@@ -1,0 +1,32 @@
+# .gitignore
+# Tracks only source: config.py, run_*.py, utils_*/.
+# Everything below is ignored. NOTE: comments must be on their own line —
+# git treats a '#' that is not at line-start as part of the pattern.
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ── Caches / generated artifacts (regenerated; not source) ────────────────────
+.cache/
+cache/
+files/
+model_cache/
+
+# ── Data / outputs / docs / notebooks (large or auxiliary; not source) ────────
+data/
+outputs/
+docs/
+notebook_drafts/
+
+# ── Generated artifacts (regenerated; not source) ─────────────────────────────
+tag_gru_tuning.db
+
+# ── Editor / tooling / OS / misc auxiliary folders ────────────────────────────
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
