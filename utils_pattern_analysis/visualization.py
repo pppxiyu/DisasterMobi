@@ -206,7 +206,7 @@ def vis_heatmap_temporal_signature(
     """
     Heatmap of a temporal factor matrix (rows=time slots, cols=components)
     with day-of-week and time-range annotations on the left axis.
-    Saves to: <output_dir>/temporal_signature<tag>.png
+    Saves to: <output_dir>/heatmap_temporal_signature<tag>.png
 
     Parameters
     ----------
@@ -259,7 +259,7 @@ def vis_heatmap_temporal_signature(
 
     os.makedirs(output_dir, exist_ok=True)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'temporal_signature{tag}.png'), bbox_inches='tight', dpi=150)
+    plt.savefig(os.path.join(output_dir, f'heatmap_temporal_signature{tag}.png'), bbox_inches='tight', dpi=150)
     plt.close()
 
 
@@ -595,7 +595,7 @@ def vis_line_nmf_component_timeline(
         Required — pass SLOTS_ACTIVE explicitly so the day boundaries are
         correct for both 2h (8 slots) and 3h (5 slots) resolution.
 
-    Saves to: <output_dir>/nmf_component_timeline<tag>.png
+    Saves to: <output_dir>/line_component_timeline<tag>.png
     """
     if slots_per_day is None:
         raise ValueError(
@@ -694,7 +694,7 @@ def vis_line_nmf_component_timeline(
                    frameon=True, framealpha=0.9)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'nmf_component_timeline{tag}.png'),
+    plt.savefig(os.path.join(output_dir, f'line_component_timeline{tag}.png'),
                 bbox_inches='tight', dpi=150)
     plt.close()
 
@@ -897,7 +897,7 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     k, C = M.shape[0], len(categories)
     ncols = max(1, min(ncols, k))
     nrows = math.ceil(k / ncols)
-    order = list(np.argsort(weights)[::-1]) if weights is not None else list(range(k))
+    order = list(range(k))   # panels in component-index order (0,1,2,…), not by weight
     vmax = M.max() if M.size and M.max() > 0 else 1.0
 
     # Font sizes (enlarged for readability).
@@ -944,6 +944,256 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150)            # constrained_layout handles margins
+        plt.close(fig)
+    return fig
+
+
+# ── Component time × function correlation ─────────────────────────────────────
+
+def vis_heatmap_time_function_corr(rho, pval=None, save_path=None,
+                                   cmap='RdBu_r', annot_fs=11):
+    """
+    Heatmap of Spearman correlations between temporal features (rows) and
+    functional features (columns) across NMF components.
+
+    Cell text shows rho, with significance stars from `pval`
+    (* p<0.05, ** p<0.01).  Diverging colormap centred at 0.
+
+    Parameters
+    ----------
+    rho, pval : DataFrames [time features × functional features]
+                (time_function_correlation output); pval optional.
+    """
+    R = rho.astype(float)
+    fig, ax = plt.subplots(
+        figsize=(1.3 * len(R.columns) + 2.5, 0.9 * len(R.index) + 2.0),
+        constrained_layout=True)
+    im = ax.imshow(R.to_numpy(), cmap=cmap, vmin=-1, vmax=1, aspect='auto')
+    for i in range(len(R.index)):
+        for j in range(len(R.columns)):
+            v = R.iloc[i, j]
+            if np.isnan(v):
+                continue
+            stars = ''
+            if pval is not None and not np.isnan(pval.iloc[i, j]):
+                p = pval.iloc[i, j]
+                stars = '**' if p < 0.01 else ('*' if p < 0.05 else '')
+            ax.text(j, i, f'{v:.2f}{stars}', ha='center', va='center',
+                    fontsize=annot_fs,
+                    color='white' if abs(v) > 0.6 else 'black')
+    ax.set_xticks(range(len(R.columns)))
+    ax.set_xticklabels(R.columns, rotation=45, ha='right', fontsize=11)
+    ax.set_yticks(range(len(R.index)))
+    ax.set_yticklabels(R.index, fontsize=11)
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Spearman ρ', fontsize=11)
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
+                                 color_from='#1976D2', color_to='#E65100'):
+    """
+    Grouped bar charts of mean functional shares by peak slot — one subplot per
+    OCCUPIED peak_slot value (components grouped by when their within-day
+    profile peaks), bars = the functional categories, paired by direction:
+    share_from_<cat> (outflow, one colour) vs share_to_<cat> (inflow, other).
+
+    peak_slot is treated as CATEGORICAL here (no ordering assumed) — this
+    replaces its use in the rank-correlation analysis.
+
+    Parameters
+    ----------
+    df         : per-component feature table with peak_slot, peak_slot_label,
+                 share_from_<cat> and share_to_<cat> columns.
+    categories : list[str] functional category names (e.g. SF_CATEGORIES).
+    """
+    import math
+    from_cols = [f'share_from_{c}' for c in categories]
+    to_cols   = [f'share_to_{c}'   for c in categories]
+
+    slots = sorted(df['peak_slot'].unique())
+    n = len(slots)
+    ncols = max(1, min(ncols, n))
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols, 3.8 * nrows),
+                             squeeze=False, constrained_layout=True)
+
+    x = np.arange(len(categories))
+    bw = 0.38                                   # bar width
+    ymax = max(df[from_cols].to_numpy().max(), df[to_cols].to_numpy().max())
+
+    for p, slot in enumerate(slots):
+        ax = axes[p // ncols][p % ncols]
+        grp = df[df['peak_slot'] == slot]
+        mean_from = grp[from_cols].mean().to_numpy()
+        mean_to   = grp[to_cols].mean().to_numpy()
+        ax.bar(x - bw / 2, mean_from, bw, color=color_from, label='from (outflow)')
+        ax.bar(x + bw / 2, mean_to,   bw, color=color_to,   label='to (inflow)')
+        ax.set_xticks(x)
+        ax.set_xticklabels(categories, rotation=30, ha='right', fontsize=10)
+        ax.set_ylim(0, ymax * 1.08)
+        ax.set_ylabel('mean share', fontsize=10)
+        ax.grid(axis='y', linestyle=':', alpha=0.4)
+        label = grp['peak_slot_label'].iloc[0] if 'peak_slot_label' in grp else str(slot)
+        ax.set_title(f'peak {label}  (n={len(grp)})', fontsize=12)
+        if p == 0:
+            ax.legend(fontsize=9, frameon=True)
+
+    for p in range(n, nrows * ncols):
+        axes[p // ncols][p % ncols].axis('off')
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_scatter_component_features(df, pairs, city_col='city',
+                                   weight_col='weight', ncols=2,
+                                   save_path=None):
+    """
+    Scatter panels of (temporal feature, functional feature) pairs — one point
+    per NMF component, coloured by city, sized by component weight, annotated
+    with the component index.
+
+    Parameters
+    ----------
+    df     : feature table; index = component id, must contain the pair columns
+             plus `city_col` and `weight_col`.
+    pairs  : list of (x_col, y_col) tuples to plot (e.g. the strongest
+             correlations).  weekday_ratio x-axes are drawn in log scale.
+    """
+    import math
+    n = len(pairs)
+    ncols = max(1, min(ncols, n))
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.6 * ncols, 4.6 * nrows),
+                             squeeze=False, constrained_layout=True)
+    cities = list(dict.fromkeys(df[city_col]))             # keep insertion order
+    palette = ['#1976D2', '#E65100', '#388E3C', '#7B1FA2']
+    col_of = {c: palette[i % len(palette)] for i, c in enumerate(cities)}
+    w = df[weight_col].astype(float)
+    sizes = 40 + 160 * (w - w.min()) / (w.max() - w.min() + 1e-12)
+
+    for p, (xc, yc) in enumerate(pairs):
+        ax = axes[p // ncols][p % ncols]
+        for c in cities:
+            m = df[city_col] == c
+            ax.scatter(df.loc[m, xc], df.loc[m, yc], s=sizes[m],
+                       color=col_of[c], alpha=0.75, edgecolor='white',
+                       linewidth=0.6, label=c, zorder=2)
+        for comp, row in df.iterrows():
+            if np.isfinite(row[xc]) and np.isfinite(row[yc]):
+                ax.annotate(str(comp), (row[xc], row[yc]), fontsize=7,
+                            ha='center', va='center', zorder=3)
+        if xc == 'weekday_ratio':
+            ax.set_xscale('log')
+            ax.axvline(1.0, color='grey', linestyle=':', linewidth=1)
+        if xc == 'am_pm':
+            ax.axvline(0.0, color='grey', linestyle=':', linewidth=1)
+        ax.set_xlabel(xc, fontsize=11)
+        ax.set_ylabel(yc, fontsize=11)
+        ax.grid(linestyle=':', alpha=0.4)
+        if p == 0:
+            ax.legend(fontsize=9, frameon=True)
+
+    for p in range(n, nrows * ncols):
+        axes[p // ncols][p % ncols].axis('off')
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+# ── Resilience (disaster drop-and-recovery) plots ─────────────────────────────
+
+def vis_line_resilience_curves(curves, ncols=3, save_path=None):
+    """
+    Per-component relative-activity curves over the disaster period — the
+    QC view behind the resilience metrics.
+
+    Parameters
+    ----------
+    curves : DataFrame [n_disaster_days × k]  (resilience_curves output);
+             index = days since landfall, values = activity / pre-disaster
+             weekday-matched baseline (1.0 = normal).
+
+    Each panel: r(d) line, grey baseline at 1.0, black dot at the trough.
+    """
+    import math
+    k = curves.shape[1]
+    ncols = max(1, min(ncols, k))
+    nrows = math.ceil(k / ncols)
+    x = curves.index.to_numpy()
+    ymax = max(1.05, np.nanmax(curves.to_numpy()) * 1.05)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.6 * ncols, 3.0 * nrows),
+                             squeeze=False, constrained_layout=True)
+    for comp in range(k):
+        ax = axes[comp // ncols][comp % ncols]
+        y = curves.iloc[:, comp].to_numpy()
+        ax.axhline(1.0, color='grey', linestyle=':', linewidth=1.2)
+        ax.plot(x, y, color='#D32F2F', linewidth=1.8)
+        t = int(np.nanargmin(y))
+        ax.plot(x[t], y[t], 'o', color='black', markersize=5, zorder=3)
+        ax.set_ylim(0, ymax)
+        ax.set_title(f'Component {comp}', fontsize=11)
+        ax.set_xlabel('days since landfall', fontsize=9)
+        ax.set_ylabel('rel. activity', fontsize=9)
+        ax.grid(linestyle=':', alpha=0.35)
+
+    for p in range(k, nrows * ncols):
+        axes[p // ncols][p % ncols].axis('off')
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_bar_resilience_by_peakslot(df, res_cols, ncols=2, save_path=None,
+                                   color='#455A64'):
+    """
+    Mean resilience metrics by peak slot — one subplot PER METRIC (metrics have
+    different scales, so they cannot share a y-axis), x = the occupied peak
+    slots (categorical), bar height = group mean over the components peaking
+    in that slot.  Group sizes are shown in the x labels.
+    """
+    import math
+    slots = sorted(df['peak_slot'].unique())
+    label_of = {}
+    for s in slots:
+        grp = df[df['peak_slot'] == s]
+        lbl = grp['peak_slot_label'].iloc[0] if 'peak_slot_label' in grp else str(s)
+        label_of[s] = f"{lbl}\n(n={len(grp)})"
+
+    n = len(res_cols)
+    ncols = max(1, min(ncols, n))
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(0.95 * len(slots) * ncols + 2,
+                                                    3.2 * nrows),
+                             squeeze=False, constrained_layout=True)
+    x = np.arange(len(slots))
+    for p, col in enumerate(res_cols):
+        ax = axes[p // ncols][p % ncols]
+        means = [df.loc[df['peak_slot'] == s, col].mean() for s in slots]
+        ax.bar(x, means, 0.6, color=color)
+        ax.axhline(0, color='black', linewidth=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels([label_of[s] for s in slots], fontsize=9)
+        ax.set_title(col, fontsize=12)
+        ax.grid(axis='y', linestyle=':', alpha=0.4)
+
+    for p in range(n, nrows * ncols):
+        axes[p // ncols][p % ncols].axis('off')
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
         plt.close(fig)
     return fig
 
