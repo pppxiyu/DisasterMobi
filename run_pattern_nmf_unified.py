@@ -5,9 +5,10 @@ Cities: #1 = Baton Rouge (Hurricane Ida, 2021), #2 = Fort Myers (Hurricane Ian, 
 
 Idea
 ----
-For each city, the pre-disaster ("normal") period and the disaster period are kept
-in ONE trailing window and a SINGLE non-negative matrix factorisation is run on
-that whole window, producing two factors:
+For each city, the pre-disaster ("normal") period, a short pre-landfall buffer
+(preparation/evacuation days, excluded from baselines/features) and the disaster
+period are kept in ONE trailing window and a SINGLE non-negative matrix
+factorisation is run on that whole window, producing two factors:
 
     W : temporal factor  [time × k]   one activity-over-time curve per component
     H : spatial factor    [k × OD]    one OD-flow map      per component
@@ -28,9 +29,12 @@ Pipeline
 3. Optionally drop low-activity OD pairs (threshold ∝ FILTER_FACTOR; 0 = keep all).
 4. Run one NMF per city → temporal factor W, spatial factor H.
 5. Save to outputs/nmf_unified/:
-     - temporal-signature heatmap (W), per city
-     - per-component timeline (W): normal in blue, disaster in red
-     - per-component OD arc map (H): one HTML per component, both cities
+     - component_characteristics/  temporal-signature heatmap + timeline (W),
+       per city; per-component OD arc maps (H) in
+       component_spatial_characteristics_<city>/ subfolders
+     - od_functionality/           per-component O×D functional cross-tabs
+     - component_corr/             time × function correlation figures
+     - resilience_corr/            resilience curves + correlation figures
 
 Geometry is loaded per city and is missing-safe: a city without a geo file keeps
 its NMF and temporal plots but skips the OD arc maps.
@@ -79,14 +83,21 @@ from utils_data_processing.fetch_sld_landuse import (
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-# Trailing window taken from the end of the graph sequence (normal + disaster).
-DAYS_WINDOW_BR          = 28   # 13 normal + 15 disaster (Ida Aug 29 + 14 recovery)
+# Trailing window taken from the end of the graph sequence
+# (normal + buffer + disaster).  The 5-day pre-landfall BUFFER isolates
+# preparation/evacuation behaviour (esp. FM: Sat Sep 24 +46% surge, Tue Sep 27
+# −19%) from the clean normal baseline: buffer slots stay in the NMF input
+# (the factorisation sees them) but are EXCLUDED from the temporal features
+# and from the resilience baselines/curves.
+DAYS_WINDOW_BR          = 33   # 13 normal + 5 buffer + 15 disaster (Ida Aug 29 + 14 recovery)
+DAYS_BUFFER_BR          = 5    # Aug 24–28 (mild pre-Ida prep; Fri Aug 27 ≈ +14%)
 DAYS_DISASTER_IN_WIN_BR = 15
-DAYS_WINDOW_FM          = 28   # 13 normal + 15 disaster (Ian Sep 28 + 14 recovery)
+DAYS_WINDOW_FM          = 33   # 13 normal + 5 buffer + 15 disaster (Ian Sep 28 + 14 recovery)
+DAYS_BUFFER_FM          = 5    # Sep 23–27 (Ian prep/evacuation contamination)
 DAYS_DISASTER_IN_WIN_FM = 15
 
-N_BEHAVIORS_BR = 15
-N_BEHAVIORS_FM = 15
+N_BEHAVIORS_BR = 20
+N_BEHAVIORS_FM = 20
 L1_REG_BR      = 0.5
 L1_REG_FM      = 0.5
 
@@ -94,20 +105,25 @@ FILTER_FACTOR_BR = 3
 FILTER_FACTOR_FM = 1
 
 # Baton Rouge runs Apr 15 (Thu) → Sep 16, trimmed to Sep 12 (Ida + 14; see
-# BR_ANALYSIS_DAYS).  Last 28 days = Aug 16 (Mon) → Sep 12; disaster portion
-# = Aug 29 (Sun, Ida landfall) → Sep 12.
-FIRST_DAY_BR_NORMAL   = 'Monday'   # first day of BR's 28-day window   (Aug 16)
-FIRST_DAY_BR_DISASTER = 'Sunday'   # first day of BR's disaster portion (Aug 29, Ida)
+# BR_ANALYSIS_DAYS).  Last 33 days = Aug 11 (Wed) → Sep 12: normal Aug 11–23,
+# buffer Aug 24–28, disaster Aug 29 (Sun, Ida landfall) → Sep 12.
+FIRST_DAY_BR_NORMAL   = 'Wednesday'   # first day of BR's 33-day window  (Aug 11)
+FIRST_DAY_BR_DISASTER = 'Sunday'      # first day of BR's disaster portion (Aug 29, Ida)
 
 # Fort Myers trimmed to Aug 30 – Oct 12 2022 (44 days; see FM_ANALYSIS_DAYS in
-# config).  Trailing 28-day window = Sep 15–Oct 12; disaster half = Sep 28–Oct 12
-# (Ian + 14 days recovery).  Weekdays are the real first-day-of-window dates.
-FIRST_DAY_FM_NORMAL   = 'Thursday'    # Sep 15 2022 (normal-half start)
-FIRST_DAY_FM_DISASTER = 'Wednesday'   # Sep 28 2022 (disaster-half / Ian landfall)
+# config).  Trailing 33-day window = Sep 10–Oct 12: normal Sep 10–22, buffer
+# Sep 23–27, disaster Sep 28–Oct 12 (Ian + 14 days recovery).
+FIRST_DAY_FM_NORMAL   = 'Saturday'    # Sep 10 2022 (normal-segment start)
+FIRST_DAY_FM_DISASTER = 'Wednesday'   # Sep 28 2022 (disaster start / Ian landfall)
 
-OUTPUT_PLOTS  = os.path.join(OUTPUT_DIR, 'nmf_unified')
-OUTPUT_NMF_BR = os.path.join(OUTPUT_DIR, 'nmf_unified', 'components_br')
-OUTPUT_NMF_FM = os.path.join(OUTPUT_DIR, 'nmf_unified', 'components_fm')
+OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf_unified')
+
+# Component temporal + spatial characteristics live together: signature
+# heatmaps & timelines directly in OUTPUT_CHAR, per-city OD arc maps (HTML)
+# in the component_spatial_characteristics_<city> subfolders.
+OUTPUT_CHAR   = os.path.join(OUTPUT_PLOTS, 'component_characteristics')
+OUTPUT_NMF_BR = os.path.join(OUTPUT_CHAR, 'component_spatial_characteristics_br')
+OUTPUT_NMF_FM = os.path.join(OUTPUT_CHAR, 'component_spatial_characteristics_fm')
 
 # Per-city block-group space-function data (EPA Smart Location Database). 
 SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')
@@ -124,8 +140,9 @@ LANDUSE_DOMINANT_THRESHOLD = 0.4        # a BG is labelled by its top category o
 # are dropped.  Order defines the heatmap rows (origin) and columns (destination).
 AXIS_CATEGORIES = list(SF_CATEGORIES) + ['Mix']
 
-OUTPUT_FIG9 = os.path.join(OUTPUT_PLOTS, 'od_function')      # O×D cross-tab outputs
-OUTPUT_CORR = os.path.join(OUTPUT_PLOTS, 'component_corr')   # feature/correlation outputs
+OUTPUT_ODFUNC = os.path.join(OUTPUT_PLOTS, 'od_functionality')   # O×D cross-tab outputs
+OUTPUT_CORR   = os.path.join(OUTPUT_PLOTS, 'component_corr')     # time × function correlation
+OUTPUT_RESIL  = os.path.join(OUTPUT_PLOTS, 'resilience_corr')    # resilience correlation
 
 # ── Per-component feature columns used by the correlation blocks ──────────────
 # Temporal features (computed from the PRE-disaster part of W only; see
@@ -166,26 +183,30 @@ RES_COLS = ['drop_depth', 'trough_day', 'recovery_level', 'cum_loss']
 
 # ── Analysis helpers (one per analysis block; called once per city) ──────────
 
-def analysis_component_signature(W, n_nor, first_day_normal, first_day_disaster, tag,
+def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
+                                 first_day_disaster, tag,
                                  gdf=None, H=None, mapping=None):
     """Component temporal signatures: full-window W heatmap + per-component
-    timeline (normal half blue, disaster half red, dashed boundary).
+    timeline (normal blue, pre-landfall buffer amber, disaster red; black
+    dashed line = landfall).  n_nor = end of the clean normal columns,
+    n_dis = disaster (landfall) start; [n_nor, n_dis) is the buffer.
     Optionally (commented below) interactive HTML OD arc maps per component —
     pass gdf/H/mapping and uncomment to enable."""
     vis_heatmap_temporal_signature(
         W, first_day=first_day_normal, show_days=True,
         slots_per_day=SLOTS_ACTIVE, interval_hours=_INTERVAL_HOURS,
-        output_dir=OUTPUT_PLOTS, tag=tag,
+        output_dir=OUTPUT_CHAR, tag=tag,
     )
     vis_line_nmf_component_timeline(
-        W[:n_nor], W[n_nor:],
+        W[:n_nor], W[n_dis:], W_buffer=W[n_nor:n_dis],
         first_day_normal=first_day_normal, first_day_disaster=first_day_disaster,
         slots_per_day=SLOTS_ACTIVE,
-        output_dir=OUTPUT_PLOTS, tag=tag,
+        output_dir=OUTPUT_CHAR, tag=tag,
     )
 
     # # Interactive HTML arc maps: one file per spatial component.
-    # out_dir = os.path.join(OUTPUT_PLOTS, f'components{tag}')  # = OUTPUT_NMF_BR/_FM
+    # out_dir = os.path.join(OUTPUT_CHAR,
+    #                        f'component_spatial_characteristics{tag}')  # = OUTPUT_NMF_BR/_FM
     # assert gdf is not None, 'Geo file missing.'
     # gdf['lon'] = gdf['centroid'].to_crs(epsg=4326).x
     # gdf['lat'] = gdf['centroid'].to_crs(epsg=4326).y
@@ -220,10 +241,10 @@ def analysis_od_function(label, key, tag, gdf, H, mapping, weights):
     print(f"  {label}: O×D flow retained in-category per component: "
           + ", ".join(f"[{i}]={r:.2f}" for i, r in enumerate(retained)))
     od_function_to_dataframe(M, AXIS_CATEGORIES, weights).to_csv(
-        os.path.join(OUTPUT_FIG9, f'od_function{tag}.csv'), index=False)
+        os.path.join(OUTPUT_ODFUNC, f'od_functionality{tag}.csv'), index=False)
     vis_heatmap_od_function(
         M, AXIS_CATEGORIES, weights=weights, ncols=3,
-        save_path=os.path.join(OUTPUT_FIG9, f'heatmap_od_function{tag}.png'),
+        save_path=os.path.join(OUTPUT_ODFUNC, f'heatmap_od_functionality{tag}.png'),
     )
     return M
 
@@ -233,8 +254,6 @@ def analysis_time_function_corr(feats, tag):
     one city's components — heatmap, top-|rho| pair scatter, plus the
     categorical peak-slot view (mean from/to shares per peak slot)."""
     rho, pval = time_function_correlation(feats, TIME_COLS, FUNC_COLS)
-    rho.to_csv(os.path.join(OUTPUT_CORR, f'spearman_rho{tag}.csv'))
-    pval.to_csv(os.path.join(OUTPUT_CORR, f'spearman_pval{tag}.csv'))
     vis_heatmap_time_function_corr(
         rho, pval,
         save_path=os.path.join(OUTPUT_CORR, f'heatmap_time_function_corr{tag}.png'),
@@ -251,40 +270,28 @@ def analysis_time_function_corr(feats, tag):
 
 
 def analysis_resilience_corr(feats, curves, tag):
-    """Resilience block: per-component drop-and-recovery curves (QC view),
-    Spearman between RES_COLS and the temporal+functional features, ranked
-    |rho| pair list, top-pair scatter, plus the categorical peak-slot view."""
+    """Resilience block (own output folder): per-component drop-and-recovery
+    curves (QC view), Spearman between RES_COLS and the temporal+functional
+    features, top-|rho| pair scatter, plus the categorical peak-slot view."""
     vis_line_resilience_curves(
         curves,
-        save_path=os.path.join(OUTPUT_CORR, f'line_resilience_curves{tag}.png'),
+        save_path=os.path.join(OUTPUT_RESIL, f'line_resilience_curves{tag}.png'),
     )
 
     rho, pval = time_function_correlation(feats, RES_COLS, TIME_COLS + FUNC_COLS)
-    rho.to_csv(os.path.join(OUTPUT_CORR, f'spearman_resilience_rho{tag}.csv'))
-    pval.to_csv(os.path.join(OUTPUT_CORR, f'spearman_resilience_pval{tag}.csv'))
     vis_heatmap_time_function_corr(
         rho, pval,
-        save_path=os.path.join(OUTPUT_CORR, f'heatmap_resilience_corr{tag}.png'),
+        save_path=os.path.join(OUTPUT_RESIL, f'heatmap_resilience_corr{tag}.png'),
     )
-
-    # Ranked pair list — answers "which pairs are strongest" in one CSV.
-    ranked = (pd.concat([rho.stack().rename('rho'),
-                         pval.stack().rename('pval')], axis=1)
-                .reset_index()
-                .rename(columns={'level_0': 'resilience_feature',
-                                 'level_1': 'feature'}))
-    ranked = ranked.reindex(ranked['rho'].abs().sort_values(ascending=False).index)
-    ranked.to_csv(os.path.join(OUTPUT_CORR, f'resilience_top_pairs{tag}.csv'),
-                  index=False)
 
     pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
     vis_scatter_component_features(
         feats, pairs,
-        save_path=os.path.join(OUTPUT_CORR, f'scatter_resilience_top_pairs{tag}.png'),
+        save_path=os.path.join(OUTPUT_RESIL, f'scatter_resilience_top_pairs{tag}.png'),
     )
     vis_bar_resilience_by_peakslot(
         feats, RES_COLS,
-        save_path=os.path.join(OUTPUT_CORR, f'bar_resilience_by_peakslot{tag}.png'),
+        save_path=os.path.join(OUTPUT_RESIL, f'bar_resilience_by_peakslot{tag}.png'),
     )
 
 
@@ -339,15 +346,23 @@ def main():
             )
 
     # compute
+    # build_city_matrices' "disaster" arg = everything after the clean normal
+    # segment (buffer + disaster), so the returned n_nor is the END of the
+    # clean normal columns; the true disaster (landfall) start is n_nor +
+    # buffer slots, computed alongside.
     print("\n── Baton Rouge ──")
     X_br_all, n_nor_br, mapping_br = build_city_matrices(
-        br_graphs, DAYS_WINDOW_BR, DAYS_DISASTER_IN_WIN_BR, FILTER_FACTOR_BR,
+        br_graphs, DAYS_WINDOW_BR,
+        DAYS_BUFFER_BR + DAYS_DISASTER_IN_WIN_BR, FILTER_FACTOR_BR,
     )
+    n_dis_br = n_nor_br + DAYS_BUFFER_BR * SLOTS_ACTIVE
 
     print("\n── Fort Myers ──")
     X_fm_all, n_nor_fm, mapping_fm = build_city_matrices(
-        fm_graphs, DAYS_WINDOW_FM, DAYS_DISASTER_IN_WIN_FM, FILTER_FACTOR_FM,
+        fm_graphs, DAYS_WINDOW_FM,
+        DAYS_BUFFER_FM + DAYS_DISASTER_IN_WIN_FM, FILTER_FACTOR_FM,
     )
+    n_dis_fm = n_nor_fm + DAYS_BUFFER_FM * SLOTS_ACTIVE
 
     print("\n── NMF: Baton Rouge ──")
     W_br, H_br, weights_br = decompose_city(X_br_all, N_BEHAVIORS_BR, l1_reg=L1_REG_BR)
@@ -357,37 +372,38 @@ def main():
 
     # ── Per-city analysis (helpers above, one per analysis block) ─────────────
     os.makedirs(SPACE_FUNCTION_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_FIG9, exist_ok=True)
+    os.makedirs(OUTPUT_ODFUNC, exist_ok=True)
     os.makedirs(OUTPUT_CORR, exist_ok=True)
+    os.makedirs(OUTPUT_RESIL, exist_ok=True)
 
     feat_frames = []
-    for label, key, tag, gdf, H, mapping, weights, W, n_nor, fd_nor, fd_dis in (
+    for label, key, tag, gdf, H, mapping, weights, W, n_nor, n_dis, fd_nor, fd_dis in (
         ('Baton Rouge', 'Baton_Rouge', '_br', br_gdf, H_br, mapping_br, weights_br,
-         W_br, n_nor_br, FIRST_DAY_BR_NORMAL, FIRST_DAY_BR_DISASTER),
+         W_br, n_nor_br, n_dis_br, FIRST_DAY_BR_NORMAL, FIRST_DAY_BR_DISASTER),
         ('Fort Myers',  'Fort_Myers',  '_fm', fm_gdf, H_fm, mapping_fm, weights_fm,
-         W_fm, n_nor_fm, FIRST_DAY_FM_NORMAL, FIRST_DAY_FM_DISASTER),
+         W_fm, n_nor_fm, n_dis_fm, FIRST_DAY_FM_NORMAL, FIRST_DAY_FM_DISASTER),
     ):
         print(f"\n── {label}: analysis ──")
-        # 1) component temporal signatures (heatmap + normal/disaster timeline;
-        #    optional OD arc maps commented inside the helper)
-        analysis_component_signature(W, n_nor, fd_nor, fd_dis, tag,
+        # 1) component temporal signatures (heatmap + normal/buffer/disaster
+        #    timeline; optional OD arc maps commented inside the helper)
+        analysis_component_signature(W, n_nor, n_dis, fd_nor, fd_dis, tag,
                                      gdf=gdf, H=H, mapping=mapping)
 
         # 2) O×D functional cross-tab per component (paper Fig. 9)
         M = analysis_od_function(label, key, tag, gdf, H, mapping, weights)
 
         # per-component features (pure computation): temporal rhythm from the
-        # pre-disaster W, functional profile from M, resilience from the
-        # disaster-period relative-activity curve
+        # CLEAN normal segment, functional profile from M, resilience from the
+        # disaster-period relative curve (buffer excluded on both sides)
         feats = pd.concat([
             temporal_features(W, n_nor, fd_nor, SLOTS_ACTIVE, _INTERVAL_HOURS),
             functional_features(M, AXIS_CATEGORIES),
-            resilience_features(W, n_nor, fd_nor, SLOTS_ACTIVE),
+            resilience_features(W, n_nor, fd_nor, SLOTS_ACTIVE, n_dis=n_dis),
         ], axis=1)
         feats.insert(0, 'city', label)
         feats.insert(1, 'weight', weights)
         feat_frames.append(feats)
-        curves = resilience_curves(W, n_nor, fd_nor, SLOTS_ACTIVE)
+        curves = resilience_curves(W, n_nor, fd_nor, SLOTS_ACTIVE, n_dis=n_dis)
 
         # 3) time × function correlation
         analysis_time_function_corr(feats, tag)

@@ -574,19 +574,22 @@ def vis_map_od_flow(
 # ── NMF component timeline (Figure-5 style) ───────────────────────────────────
 
 def vis_line_nmf_component_timeline(
-    W_normal, W_imp,
+    W_normal, W_imp, W_buffer=None,
     first_day_normal='Thursday', first_day_disaster='Saturday',
     slots_per_day=None,
     output_dir='outputs', tag='',
 ):
     """
     Line subplots (one per NMF component) showing temporal factors across the
-    normal weekly template followed by the disaster period.
+    normal weekly template, an optional pre-landfall buffer, and the disaster
+    period.
 
-    - Normal period plotted in blue; disaster period in red.
+    - Normal period plotted in blue; buffer (if given) in amber; disaster in red.
     - Weekend slots shaded light grey; weekday slots left white.
-    - A dashed vertical line marks the normal / disaster boundary.
+    - Dashed vertical lines mark the segment boundaries (black = landfall).
     - X-axis labelled with three-letter day abbreviations at the start of each day.
+    - W_buffer sits between the two segments in calendar time; its weekdays
+      continue from first_day_normal (the window is contiguous).
 
     Parameters
     ----------
@@ -608,28 +611,39 @@ def vis_line_nmf_component_timeline(
                   'Friday', 'Saturday', 'Sunday']
     WEEKEND    = {5, 6}           # Saturday, Sunday indices
     COLOR_NOR  = '#1976D2'        # blue  – normal period
+    COLOR_BUF  = '#F9A825'        # amber – pre-landfall buffer/alert period
     COLOR_DIS  = '#D32F2F'        # red   – disaster period
     COLOR_WKD  = '#EBEBEB'        # light grey – weekend background
 
     n_nor   = W_normal.shape[0]
+    n_buf   = 0 if W_buffer is None else W_buffer.shape[0]
     n_dis   = W_imp.shape[0]
-    n_total = n_nor + n_dis
+    n_total = n_nor + n_buf + n_dis
     k       = W_normal.shape[1]
 
-    W_all = np.concatenate([W_normal, W_imp], axis=0)
+    parts = [W_normal] + ([W_buffer] if n_buf else []) + [W_imp]
+    W_all = np.concatenate(parts, axis=0)
 
-    # Day-of-week index for every time slot
+    # Day-of-week index for every time slot; the buffer continues from the
+    # normal anchor (the window is contiguous in calendar time).
     si_nor = DAYS.index(first_day_normal.capitalize())
+    si_buf = (si_nor + n_nor // slots_per_day) % 7
     si_dis = DAYS.index(first_day_disaster.capitalize())
     day_idx = (
         [(si_nor + t // slots_per_day) % 7 for t in range(n_nor)] +
+        [(si_buf + t // slots_per_day) % 7 for t in range(n_buf)] +
         [(si_dis + t // slots_per_day) % 7 for t in range(n_dis)]
     )
 
     # X-tick positions and labels (first slot of each day)
     tick_pos, tick_lbl = [], []
     for t in range(n_total):
-        slot_in_day = t % slots_per_day if t < n_nor else (t - n_nor) % slots_per_day
+        if t < n_nor:
+            slot_in_day = t % slots_per_day
+        elif t < n_nor + n_buf:
+            slot_in_day = (t - n_nor) % slots_per_day
+        else:
+            slot_in_day = (t - n_nor - n_buf) % slots_per_day
         if slot_in_day == 0:
             tick_pos.append(t)
             tick_lbl.append(DAYS[day_idx[t]][:3])
@@ -660,11 +674,18 @@ def vis_line_nmf_component_timeline(
         # Normal period line
         ax.plot(range(n_nor), W_all[:n_nor, i],
                 color=COLOR_NOR, linewidth=1.6, zorder=2)
+        # Buffer (alert) period line
+        if n_buf:
+            ax.plot(range(n_nor, n_nor + n_buf), W_all[n_nor:n_nor + n_buf, i],
+                    color=COLOR_BUF, linewidth=1.6, zorder=2)
         # Disaster period line
-        ax.plot(range(n_nor, n_total), W_all[n_nor:, i],
+        ax.plot(range(n_nor + n_buf, n_total), W_all[n_nor + n_buf:, i],
                 color=COLOR_DIS, linewidth=1.6, zorder=2)
-        # Boundary
-        ax.axvline(n_nor - 0.5, color='black', linestyle='--',
+        # Boundaries: buffer start (grey, if any) and landfall (black)
+        if n_buf:
+            ax.axvline(n_nor - 0.5, color='grey', linestyle='--',
+                       linewidth=1.0, alpha=0.6, zorder=3)
+        ax.axvline(n_nor + n_buf - 0.5, color='black', linestyle='--',
                    linewidth=1.1, alpha=0.6, zorder=3)
         ax.set_ylabel(f'Comp {i}', fontsize=10, fontweight='bold', labelpad=4)
         ax.set_xlim(-0.5, n_total - 0.5)
@@ -679,7 +700,11 @@ def vis_line_nmf_component_timeline(
     axes[0].text((n_nor / 2) / n_total, 1.04, 'Normal (weekly template)',
                  transform=axes[0].transAxes, ha='center', va='bottom',
                  fontsize=9, color=COLOR_NOR, fontweight='bold')
-    axes[0].text((n_nor + n_dis / 2) / n_total, 1.04, 'Disaster period',
+    if n_buf:
+        axes[0].text((n_nor + n_buf / 2) / n_total, 1.04, 'Buffer',
+                     transform=axes[0].transAxes, ha='center', va='bottom',
+                     fontsize=9, color=COLOR_BUF, fontweight='bold')
+    axes[0].text((n_nor + n_buf + n_dis / 2) / n_total, 1.04, 'Disaster period',
                  transform=axes[0].transAxes, ha='center', va='bottom',
                  fontsize=9, color=COLOR_DIS, fontweight='bold')
 
@@ -687,6 +712,8 @@ def vis_line_nmf_component_timeline(
     import matplotlib.patches as mpatches
     handles = [
         mpatches.Patch(color=COLOR_NOR,  label='Normal period'),
+        *([mpatches.Patch(color=COLOR_BUF, label='Buffer (pre-landfall)')]
+          if n_buf else []),
         mpatches.Patch(color=COLOR_DIS,  label='Disaster period'),
         mpatches.Patch(color=COLOR_WKD,  label='Weekend'),
     ]

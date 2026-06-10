@@ -154,7 +154,7 @@ def functional_features(M, categories, drop=('Mix', 'Unknown')):
     return pd.DataFrame(rows, index=pd.RangeIndex(M.shape[0], name='component'))
 
 
-def _daily_relative_curve(W, n_nor, first_day, slots_per_day):
+def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
     """
     Per-component DISASTER-period daily activity relative to a weekday/weekend-
     matched pre-disaster baseline:
@@ -164,14 +164,26 @@ def _daily_relative_curve(W, n_nor, first_day, slots_per_day):
     baseline_k(weekday)  = mean normal-half daily total over Mon–Fri days
     baseline_k(weekend)  = mean normal-half daily total over Sat–Sun days
 
+    Parameters
+    ----------
+    n_nor : int   column where the NORMAL segment ends (baseline uses [0, n_nor)).
+    n_dis : int   column where the DISASTER segment starts (defaults to n_nor).
+                  Columns in [n_nor, n_dis) — a pre-landfall alert/buffer
+                  segment — are excluded from BOTH the baseline and the curve.
+
     Returns a DataFrame [n_disaster_days × k]; index = days since landfall
     (0 = landfall day).  Components with a zero baseline get NaN.
     """
+    if n_dis is None:
+        n_dis = n_nor
     W = np.asarray(W, dtype=float)
     n_days = W.shape[0] // slots_per_day
     if n_days * slots_per_day != W.shape[0]:
         raise ValueError("W length is not a multiple of slots_per_day")
+    if n_nor % slots_per_day or n_dis % slots_per_day:
+        raise ValueError("n_nor / n_dis must be multiples of slots_per_day")
     days_nor = n_nor // slots_per_day
+    days_dis = n_dis // slots_per_day
     daily = W.reshape(n_days, slots_per_day, W.shape[1]).sum(axis=1)   # [days × k]
 
     di0 = DAYS.index(first_day.capitalize())
@@ -180,27 +192,28 @@ def _daily_relative_curve(W, n_nor, first_day, slots_per_day):
     base_wd = daily[:days_nor][is_wd[:days_nor]].mean(axis=0)          # [k]
     base_we = daily[:days_nor][~is_wd[:days_nor]].mean(axis=0)
 
-    r = np.full((n_days - days_nor, W.shape[1]), np.nan)
-    for i, d in enumerate(range(days_nor, n_days)):
+    r = np.full((n_days - days_dis, W.shape[1]), np.nan)
+    for i, d in enumerate(range(days_dis, n_days)):
         base = base_wd if is_wd[d] else base_we
         r[i] = np.divide(daily[d], base, out=np.full(W.shape[1], np.nan),
                          where=base > 0)
     return pd.DataFrame(r, index=pd.RangeIndex(len(r), name='day_since_landfall'))
 
 
-def resilience_curves(W, n_nor, first_day, slots_per_day, smooth=3):
+def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3):
     """
     Smoothed relative-activity curves r_k(d) for the disaster period
     (centred rolling mean over `smooth` days; smooth=1 disables).
     DataFrame [n_disaster_days × k], index = days since landfall.
+    See _daily_relative_curve for the n_nor / n_dis (buffer) semantics.
     """
-    r = _daily_relative_curve(W, n_nor, first_day, slots_per_day)
+    r = _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=n_dis)
     if smooth and smooth > 1:
         r = r.rolling(smooth, center=True, min_periods=1).mean()
     return r
 
 
-def resilience_features(W, n_nor, first_day, slots_per_day, smooth=3):
+def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3):
     """
     Quantify each component's disaster response from its (smoothed) relative
     daily curve r_k(d) — the "drop and come back" pattern:
@@ -217,7 +230,8 @@ def resilience_features(W, n_nor, first_day, slots_per_day, smooth=3):
 
     Returns DataFrame indexed by component with those four columns.
     """
-    r = resilience_curves(W, n_nor, first_day, slots_per_day, smooth=smooth)
+    r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
+                          smooth=smooth)
     arr = r.to_numpy()
     return pd.DataFrame({
         'drop_depth':     1.0 - np.nanmin(arr, axis=0),
