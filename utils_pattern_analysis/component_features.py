@@ -12,22 +12,26 @@ Each NMF component becomes one observation with
                      >1 weekday-dominated (commute-like), <1 weekend-dominated
   functional features (from the O×D function cross-tab M, Mix/Unknown dropped
   and the remaining categories renormalised to sum 1):
-      share_<cat>    (origin share + destination share) / 2 per category
-      diag_share     trace of the renormalised matrix = same-function flow
-                     fraction (high = activity stays within one function type)
+      share_from_<cat>  outflow side, the fraction departing from function <cat>
+      share_to_<cat>    inflow side, the fraction arriving at function <cat>
+      diag_share        trace of the renormalised matrix = same-function flow
+                        fraction (high = activity stays within one function type)
+  resilience features (disaster-period daily activity relative to a weekday/
+  weekend-matched pre-disaster baseline):
+      drop_depth, lowest_day, recovery_level, cum_loss
 
 Correlation
 -----------
 time_function_correlation computes pairwise SPEARMAN rank correlation between
-the temporal and functional feature columns across components (both cities are
-pooled by the caller to enlarge the sample).  Spearman is rank-based, so it
-handles peak_slot's ordinality and is invariant to monotone transforms (no log
-needed for weekday_ratio).
+two feature-column groups across components.  Spearman is rank-based and
+invariant to monotone transforms (no log needed for weekday_ratio).
 
 Functions
 ---------
 temporal_features(W, n_nor, first_day, slots_per_day, interval_hours) -> DataFrame
 functional_features(M, categories, drop) -> DataFrame
+resilience_curves(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
+resilience_features(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
 time_function_correlation(df, time_cols, func_cols) -> (rho_df, pval_df)
 """
 import numpy as np
@@ -174,8 +178,13 @@ def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
     Returns a DataFrame [n_disaster_days × k]; index = days since landfall
     (0 = landfall day).  Components with a zero baseline get NaN.
     """
+    # Without n_dis the disaster starts right after the normal segment
+    # (no buffer).
     if n_dis is None:
         n_dis = n_nor
+
+    # W and both boundaries must align to whole days, otherwise the
+    # day-level reshape below would mix slots from different days.
     W = np.asarray(W, dtype=float)
     n_days = W.shape[0] // slots_per_day
     if n_days * slots_per_day != W.shape[0]:
@@ -184,14 +193,26 @@ def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
         raise ValueError("n_nor / n_dis must be multiples of slots_per_day")
     days_nor = n_nor // slots_per_day
     days_dis = n_dis // slots_per_day
+
+    # Collapse slots into daily totals.  Everything below works at day
+    # granularity, which also averages out slot-level noise.
     daily = W.reshape(n_days, slots_per_day, W.shape[1]).sum(axis=1)   # [days × k]
 
+    # Weekday/weekend label per day, projected from the window's first day
+    # (valid because the window is contiguous in calendar time).
     di0 = DAYS.index(first_day.capitalize())
     is_wd = np.array([((di0 + d) % 7) < 5 for d in range(n_days)])
 
+    # Day-type-matched baselines from the NORMAL days only — buffer and
+    # disaster days never enter the denominator.  Two baselines so that the
+    # ordinary weekend dip is not read as a disaster drop.
     base_wd = daily[:days_nor][is_wd[:days_nor]].mean(axis=0)          # [k]
     base_we = daily[:days_nor][~is_wd[:days_nor]].mean(axis=0)
 
+    # Relative value per disaster day, divided by the SAME day-type baseline.
+    # The loop starts at days_dis, so buffer days are skipped entirely.
+    # A zero baseline (component inactive in the normal segment) yields NaN,
+    # not inf — note that small baselines inflate r for emergent components.
     r = np.full((n_days - days_dis, W.shape[1]), np.nan)
     for i, d in enumerate(range(days_dis, n_days)):
         base = base_wd if is_wd[d] else base_we
@@ -213,14 +234,23 @@ def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3):
     return r
 
 
-def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3):
+def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3,
+                        recovery_threshold=0.9):
     """
     Quantify each component's disaster response from its (smoothed) relative
     daily curve r_k(d) — the "drop and come back" pattern:
 
       drop_depth     = 1 − min(r)        how deep it fell (0 none, 1 total
                        stop; NEGATIVE = rose above baseline → emergent pattern)
-      trough_day     = argmin(r)         days from landfall to the trough
+      lowest_day     = argmin(r)         days from landfall to the lowest point
+      recovery_day   = 1 + last day with r < recovery_threshold   days until r
+                       reaches the threshold AND STAYS there — any later dip
+                       below the threshold resets the clock, so oscillating
+                       recoveries are not credited early.  0 means never below
+                       the threshold (unhurt or emergent).  A value equal to
+                       the window length means NOT recovered within the window
+                       (right-censored, kept instead of NaN so the hardest-hit
+                       components stay in the rank correlation).
       recovery_level = mean of the last 3 days of r   (≈1 recovered, <1 not,
                        >1 overshoot)
       cum_loss       = Σ_d max(0, 1 − r(d))   resilience-triangle area: total
@@ -228,17 +258,34 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
                        smaller = more resilient).  Above-baseline excess is NOT
                        credited against losses.
 
-    Returns DataFrame indexed by component with those four columns.
+    Returns DataFrame indexed by component with those five columns.
     """
     r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
                           smooth=smooth)
     arr = r.to_numpy()
-    return pd.DataFrame({
-        'drop_depth':     1.0 - np.nanmin(arr, axis=0),
-        'trough_day':     np.nanargmin(arr, axis=0),
-        'recovery_level': np.nanmean(arr[-3:], axis=0),
-        'cum_loss':       np.nansum(np.clip(1.0 - arr, 0, None), axis=0),
-    }, index=pd.RangeIndex(arr.shape[1], name='component'))
+    n_days, k = arr.shape
+
+    # A zero-baseline component has an all-NaN curve.  Such columns crash
+    # nanargmin and make nansum return 0, so they are computed on a stand-in
+    # and masked to NaN at the end.
+    all_nan = np.isnan(arr).all(axis=0)
+    safe = arr.copy()
+    safe[:, all_nan] = 1.0
+
+    # Last crossing below the threshold per component (NaN compares False).
+    below = safe < recovery_threshold
+    last_below = np.where(below.any(axis=0),
+                          n_days - 1 - np.argmax(below[::-1], axis=0), -1)
+
+    feats = pd.DataFrame({
+        'drop_depth':     1.0 - np.nanmin(safe, axis=0),
+        'lowest_day':     np.nanargmin(safe, axis=0).astype(float),
+        'recovery_day':   (last_below + 1).astype(float),
+        'recovery_level': np.nanmean(safe[-3:], axis=0),
+        'cum_loss':       np.nansum(np.clip(1.0 - safe, 0, None), axis=0),
+    }, index=pd.RangeIndex(k, name='component'))
+    feats.loc[all_nan, :] = np.nan
+    return feats
 
 
 def time_function_correlation(df, time_cols, func_cols):

@@ -20,8 +20,8 @@ Steps
 
 Note on Fort Myers
 ------------------
-This script plots OD arc maps for Baton Rouge (city #1) only.  Geometry loading
-is missing-safe (a city without a geo file skips its spatial steps).  Fort Myers
+This script plots OD arc maps for Baton Rouge (city #1) only.  Geometry files
+are mandatory (loading raises if a geo CSV is absent).  Fort Myers
 is trimmed to Aug 30 – Oct 12 2022 (44 days; see FM_ANALYSIS_DAYS in config) so
 Ian's landfall (Sep 28) + ~2 weeks of recovery sit at the window end.
 
@@ -56,7 +56,7 @@ from utils_pattern_analysis.visualization import (
     vis_heatmap_temporal_signature, vis_map_od_flow,
     vis_heatmap_component_mapping, vis_line_nmf_component_timeline,
 )
-from utils_data_processing.build_graphs import load_city_geo_or_warn
+from utils_data_processing.build_graphs import load_city_geo
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -150,13 +150,10 @@ def main():
     os.makedirs(OUTPUT_NMF_BR, exist_ok=True)
     os.makedirs(OUTPUT_NMF_FM, exist_ok=True)
 
-    # Geometry (AGG_LEVEL-aware, missing-safe).  Only Baton Rouge is plotted
+    # Geometry (AGG_LEVEL-aware, mandatory).  Only Baton Rouge is plotted
     # spatially here (this script maps city #1 only).
-    br_gdf = load_city_geo_or_warn('Baton Rouge', AGG_LEVEL, BR_GEO_CSV)
-    fm_gdf = load_city_geo_or_warn('Fort Myers',  AGG_LEVEL, FM_GEO_CSV)
-
-    if br_gdf is not None:
-        br_gdf['centroid'] = br_gdf.geometry.to_crs(epsg=3857).centroid.to_crs(epsg=4326)
+    br_gdf = load_city_geo('Baton Rouge', AGG_LEVEL, BR_GEO_CSV)
+    fm_gdf = load_city_geo('Fort Myers',  AGG_LEVEL, FM_GEO_CSV)
 
     print("Loading Baton Rouge graphs …")
     br_graphs = load_graphs(BR_GRAPH_PATH)

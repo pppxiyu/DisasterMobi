@@ -55,7 +55,7 @@ from utils_pattern_analysis.visualization import (
     vis_map_spatial_factors,
     vis_heatmap_core_interaction, vis_heatmap_component_mapping,
 )
-from utils_data_processing.build_graphs import load_city_geo_or_warn
+from utils_data_processing.build_graphs import load_city_geo
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -157,13 +157,10 @@ def decompose_city(X, X_imp, ranks, days_disaster,
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Geometry (AGG_LEVEL-aware, missing-safe).  Only Baton Rouge is plotted
+    # Geometry (AGG_LEVEL-aware, mandatory).  Only Baton Rouge is plotted
     # spatially here (only Baton Rouge gets choropleths in this script).
-    br_gdf = load_city_geo_or_warn('Baton Rouge', AGG_LEVEL, BR_GEO_CSV)
-    fm_gdf = load_city_geo_or_warn('Fort Myers',  AGG_LEVEL, FM_GEO_CSV)
-
-    if br_gdf is not None:
-        br_gdf['centroid'] = br_gdf.geometry.to_crs(epsg=3857).centroid.to_crs(epsg=4326)
+    br_gdf = load_city_geo('Baton Rouge', AGG_LEVEL, BR_GEO_CSV)
+    fm_gdf = load_city_geo('Fort Myers',  AGG_LEVEL, FM_GEO_CSV)
 
     print("Loading graphs …")
     br_graphs = load_graphs(BR_GRAPH_PATH)

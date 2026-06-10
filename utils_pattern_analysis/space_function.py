@@ -17,8 +17,8 @@ A SOFT variant would instead distribute each flow by the outer product of the
 endpoints' category shares,  M_k = Sᵀ F_k S  (S = [n_BG × C] share matrix);
 the hard version is the special case where S is one-hot.  Not implemented here.
 
-Conventions (per the run-script review)
----------------------------------------
+Conventions
+-----------
 - Axis categories = the functional categories + 'Mix'; 'Unknown' (and any OD
   endpoint missing a category) is DROPPED.
 - Matrices are DIRECTED (origin rows, destination cols; asymmetric).

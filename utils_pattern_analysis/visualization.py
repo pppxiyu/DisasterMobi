@@ -924,10 +924,10 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     k, C = M.shape[0], len(categories)
     ncols = max(1, min(ncols, k))
     nrows = math.ceil(k / ncols)
-    order = list(range(k))   # panels in component-index order (0,1,2,…), not by weight
+    order = list(range(k))   # Panel layout follows the component index
     vmax = M.max() if M.size and M.max() > 0 else 1.0
 
-    # Font sizes (enlarged for readability).
+    # Font sizes.
     FS_ANNOT, FS_TICK, FS_AXLABEL, FS_TITLE, FS_CBAR = 11, 12, 13, 15, 12
 
     # constrained_layout guarantees panels / rotated tick labels / colorbar never
@@ -978,27 +978,40 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
 # ── Component time × function correlation ─────────────────────────────────────
 
 def vis_heatmap_time_function_corr(rho, pval=None, save_path=None,
-                                   cmap='RdBu_r', annot_fs=11):
+                                   cmap='RdBu_r', annot_fs=11,
+                                   row_scaled=False):
     """
-    Heatmap of Spearman correlations between temporal features (rows) and
-    functional features (columns) across NMF components.
+    Heatmap of Spearman correlations between two feature groups (rows ×
+    columns) across NMF components.
 
     Cell text shows rho, with significance stars from `pval`
     (* p<0.05, ** p<0.01).  Diverging colormap centred at 0.
 
     Parameters
     ----------
-    rho, pval : DataFrames [time features × functional features]
-                (time_function_correlation output); pval optional.
+    rho, pval  : DataFrames [row features × column features]
+                 (time_function_correlation output); pval optional.
+    row_scaled : colour each ROW by its own max |rho|, independently of the
+                 other rows.  Colours are then comparable within a row but
+                 NOT across rows, so no colorbar is drawn.  Annotations
+                 always show the original rho.
     """
     R = rho.astype(float)
+    V = R.to_numpy()
+    if row_scaled:
+        scale = np.nanmax(np.abs(V), axis=1, keepdims=True)
+        scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
+        C = V / scale
+    else:
+        C = V
+
     fig, ax = plt.subplots(
         figsize=(1.3 * len(R.columns) + 2.5, 0.9 * len(R.index) + 2.0),
         constrained_layout=True)
-    im = ax.imshow(R.to_numpy(), cmap=cmap, vmin=-1, vmax=1, aspect='auto')
+    im = ax.imshow(C, cmap=cmap, vmin=-1, vmax=1, aspect='auto')
     for i in range(len(R.index)):
         for j in range(len(R.columns)):
-            v = R.iloc[i, j]
+            v = V[i, j]
             if np.isnan(v):
                 continue
             stars = ''
@@ -1007,13 +1020,117 @@ def vis_heatmap_time_function_corr(rho, pval=None, save_path=None,
                 stars = '**' if p < 0.01 else ('*' if p < 0.05 else '')
             ax.text(j, i, f'{v:.2f}{stars}', ha='center', va='center',
                     fontsize=annot_fs,
-                    color='white' if abs(v) > 0.6 else 'black')
+                    color='white' if abs(C[i, j]) > 0.6 else 'black')
     ax.set_xticks(range(len(R.columns)))
     ax.set_xticklabels(R.columns, rotation=45, ha='right', fontsize=11)
     ax.set_yticks(range(len(R.index)))
     ax.set_yticklabels(R.index, fontsize=11)
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-    cbar.set_label('Spearman ρ', fontsize=11)
+    if not row_scaled:
+        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        cbar.set_label('Spearman ρ', fontsize=11)
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_heatmap_resilience_corr_split(rho, pval=None, time_cols=None,
+                                      categories=None, save_path=None,
+                                      cmap='RdBu_r', annot_fs=17):
+    """
+    Row-scaled correlation heatmap with split functional cells.
+
+    Time columns stay single cells.  Each category column packs
+    share_from_<cat> in the UPPER half-cell and share_to_<cat> in the LOWER
+    half-cell, with value labels (and significance stars) for both.  Each row
+    is coloured by its own max |rho| over its displayed cells, so rows are
+    independent and no colorbar is drawn — colours compare within a row only,
+    numbers compare everywhere.
+
+    Parameters
+    ----------
+    rho, pval  : DataFrames [metric rows × feature columns]; columns must
+                 contain time_cols plus share_from_<cat> / share_to_<cat>
+                 for every category.
+    time_cols  : list[str] columns shown as single cells (e.g. TIME_COLS).
+    categories : list[str] functional category names (e.g. SF_CATEGORIES).
+    """
+    rows = list(rho.index)
+    n_r, n_t, n_c = len(rows), len(time_cols), len(categories)
+    n_cols = n_t + n_c
+
+    # Upper/lower value matrices per display cell.  Time cells repeat the same
+    # value in both halves so they render as one solid cell.
+    Vup = np.full((n_r, n_cols), np.nan)
+    Vlo = np.full((n_r, n_cols), np.nan)
+    for i, rname in enumerate(rows):
+        for j, t in enumerate(time_cols):
+            Vup[i, j] = Vlo[i, j] = rho.loc[rname, t]
+        for j, c in enumerate(categories):
+            Vup[i, n_t + j] = rho.loc[rname, f'share_from_{c}']
+            Vlo[i, n_t + j] = rho.loc[rname, f'share_to_{c}']
+
+    # Per-row colour scale over every displayed value (time + from + to).
+    allv = np.concatenate([Vup, Vlo], axis=1)
+    scale = np.nanmax(np.abs(allv), axis=1, keepdims=True)
+    scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
+    Cup, Clo = Vup / scale, Vlo / scale
+
+    fine = np.empty((2 * n_r, n_cols))
+    fine[0::2, :] = Cup
+    fine[1::2, :] = Clo
+
+    fig, ax = plt.subplots(figsize=(2.0 * n_cols + 2.4, 1.75 * n_r + 2.2),
+                           constrained_layout=True)
+    ax.imshow(fine, cmap=cmap, vmin=-1, vmax=1, aspect='auto',
+              extent=[0, n_cols, n_r, 0], interpolation='nearest')
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # White main grid, plus a thin half split inside the category region only.
+    for x in range(n_cols + 1):
+        ax.axvline(x, color='white', lw=2)
+    for y in range(n_r + 1):
+        ax.axhline(y, color='white', lw=2)
+    for i in range(n_r):
+        ax.plot([n_t, n_cols], [i + 0.5] * 2, color='white', lw=0.8)
+
+    def _stars(rname, col):
+        if pval is None or np.isnan(pval.loc[rname, col]):
+            return ''
+        p = pval.loc[rname, col]
+        return '**' if p < 0.01 else ('*' if p < 0.05 else '')
+
+    for i, rname in enumerate(rows):
+        for j, t in enumerate(time_cols):
+            v = Vup[i, j]
+            if np.isnan(v):
+                continue
+            ax.text(j + 0.5, i + 0.5, f'{v:.2f}{_stars(rname, t)}',
+                    ha='center', va='center', fontsize=annot_fs,
+                    color='white' if abs(Cup[i, j]) > 0.6 else 'black')
+        for j, c in enumerate(categories):
+            x = n_t + j + 0.5
+            vu, vl = Vup[i, n_t + j], Vlo[i, n_t + j]
+            if not np.isnan(vu):
+                ax.text(x, i + 0.27, f'{vu:.2f}{_stars(rname, f"share_from_{c}")}',
+                        ha='center', va='center', fontsize=annot_fs,
+                        color='white' if abs(Cup[i, n_t + j]) > 0.6 else 'black')
+            if not np.isnan(vl):
+                ax.text(x, i + 0.73, f'{vl:.2f}{_stars(rname, f"share_to_{c}")}',
+                        ha='center', va='center', fontsize=annot_fs,
+                        color='white' if abs(Clo[i, n_t + j]) > 0.6 else 'black')
+
+    ax.set_xticks(np.arange(n_cols) + 0.5)
+    ax.set_xticklabels(list(time_cols) + list(categories), rotation=45,
+                       ha='right', fontsize=18)
+    ax.set_yticks(np.arange(n_r) + 0.5)
+    ax.set_yticklabels(rows, fontsize=18)
+    ax.tick_params(length=0)
+    ax.text(1.0, 1.01, 'Upper = Outflow,  Lower = Inflow',
+            transform=ax.transAxes, ha='right', va='bottom', fontsize=16,
+            color='dimgrey')
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150)
@@ -1079,18 +1196,15 @@ def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
     return fig
 
 
-def vis_scatter_component_features(df, pairs, city_col='city',
-                                   weight_col='weight', ncols=2,
-                                   save_path=None):
+def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
+                                   color='#1976D2', point_size=90):
     """
-    Scatter panels of (temporal feature, functional feature) pairs — one point
-    per NMF component, coloured by city, sized by component weight, annotated
-    with the component index.
+    Scatter panels of feature pairs — one point per NMF component, uniform
+    colour and size.
 
     Parameters
     ----------
-    df     : feature table; index = component id, must contain the pair columns
-             plus `city_col` and `weight_col`.
+    df     : per-component feature table containing the pair columns.
     pairs  : list of (x_col, y_col) tuples to plot (e.g. the strongest
              correlations).  weekday_ratio x-axes are drawn in log scale.
     """
@@ -1098,35 +1212,31 @@ def vis_scatter_component_features(df, pairs, city_col='city',
     n = len(pairs)
     ncols = max(1, min(ncols, n))
     nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.6 * ncols, 4.6 * nrows),
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.0 * ncols, 5.6 * nrows),
                              squeeze=False, constrained_layout=True)
-    cities = list(dict.fromkeys(df[city_col]))             # keep insertion order
-    palette = ['#1976D2', '#E65100', '#388E3C', '#7B1FA2']
-    col_of = {c: palette[i % len(palette)] for i, c in enumerate(cities)}
-    w = df[weight_col].astype(float)
-    sizes = 40 + 160 * (w - w.min()) / (w.max() - w.min() + 1e-12)
+    try:
+        fig.get_layout_engine().set(w_pad=0.25, h_pad=0.25)
+    except Exception:
+        pass
 
-    for p, (xc, yc) in enumerate(pairs):
+    # Each (a, b) pair is drawn with b on the x axis and a on the y axis.
+    for p, (yc, xc) in enumerate(pairs):
         ax = axes[p // ncols][p % ncols]
-        for c in cities:
-            m = df[city_col] == c
-            ax.scatter(df.loc[m, xc], df.loc[m, yc], s=sizes[m],
-                       color=col_of[c], alpha=0.75, edgecolor='white',
-                       linewidth=0.6, label=c, zorder=2)
-        for comp, row in df.iterrows():
-            if np.isfinite(row[xc]) and np.isfinite(row[yc]):
-                ax.annotate(str(comp), (row[xc], row[yc]), fontsize=7,
-                            ha='center', va='center', zorder=3)
+        ax.scatter(df[xc], df[yc], s=point_size, color=color, alpha=0.8,
+                   edgecolor='white', linewidth=0.6, zorder=2)
         if xc == 'weekday_ratio':
             ax.set_xscale('log')
             ax.axvline(1.0, color='grey', linestyle=':', linewidth=1)
         if xc == 'am_pm':
             ax.axvline(0.0, color='grey', linestyle=':', linewidth=1)
-        ax.set_xlabel(xc, fontsize=11)
-        ax.set_ylabel(yc, fontsize=11)
-        ax.grid(linestyle=':', alpha=0.4)
-        if p == 0:
-            ax.legend(fontsize=9, frameon=True)
+        if yc == 'weekday_ratio':
+            ax.set_yscale('log')
+            ax.axhline(1.0, color='grey', linestyle=':', linewidth=1)
+        if yc == 'am_pm':
+            ax.axhline(0.0, color='grey', linestyle=':', linewidth=1)
+        ax.set_xlabel(xc, fontsize=21)
+        ax.set_ylabel(yc, fontsize=21)
+        ax.tick_params(labelsize=18)
 
     for p in range(n, nrows * ncols):
         axes[p // ncols][p % ncols].axis('off')
@@ -1150,7 +1260,7 @@ def vis_line_resilience_curves(curves, ncols=3, save_path=None):
              index = days since landfall, values = activity / pre-disaster
              weekday-matched baseline (1.0 = normal).
 
-    Each panel: r(d) line, grey baseline at 1.0, black dot at the trough.
+    Each panel: r(d) line, grey baseline at 1.0, black dot at the lowest point.
     """
     import math
     k = curves.shape[1]
@@ -1184,35 +1294,51 @@ def vis_line_resilience_curves(curves, ncols=3, save_path=None):
 
 
 def vis_bar_resilience_by_peakslot(df, res_cols, ncols=2, save_path=None,
-                                   color='#455A64'):
+                                   color='#455A64', color_weekend='#8D6E63',
+                                   weekend_ratio_threshold=1.0):
     """
     Mean resilience metrics by peak slot — one subplot PER METRIC (metrics have
-    different scales, so they cannot share a y-axis), x = the occupied peak
-    slots (categorical), bar height = group mean over the components peaking
-    in that slot.  Group sizes are shown in the x labels.
+    different scales, so they cannot share a y-axis), bar height = group mean,
+    group sizes in the x labels.
+
+    Weekend-dominated components (weekday_ratio < weekend_ratio_threshold) form
+    their own 'Weekend' group WITHOUT a time-of-day split — their peak_slot
+    mixes day types, so the slot grouping only describes the weekday-dominated
+    components.
     """
     import math
-    slots = sorted(df['peak_slot'].unique())
-    label_of = {}
+    is_we = df['weekday_ratio'] < weekend_ratio_threshold
+    wd = df[~is_we]
+
+    slots = sorted(wd['peak_slot'].unique())
+    groups, labels, colors = [], [], []
     for s in slots:
-        grp = df[df['peak_slot'] == s]
+        grp = wd[wd['peak_slot'] == s]
         lbl = grp['peak_slot_label'].iloc[0] if 'peak_slot_label' in grp else str(s)
-        label_of[s] = f"{lbl}\n(n={len(grp)})"
+        groups.append(grp)
+        labels.append(f"{lbl}\n(n={len(grp)})")
+        colors.append(color)
+    if is_we.any():
+        grp = df[is_we]
+        groups.append(grp)
+        labels.append(f"Weekend\n(n={len(grp)})")
+        colors.append(color_weekend)
 
     n = len(res_cols)
     ncols = max(1, min(ncols, n))
     nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(0.95 * len(slots) * ncols + 2,
-                                                    3.2 * nrows),
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(0.95 * len(groups) * ncols + 2,
+                                      3.2 * nrows),
                              squeeze=False, constrained_layout=True)
-    x = np.arange(len(slots))
+    x = np.arange(len(groups))
     for p, col in enumerate(res_cols):
         ax = axes[p // ncols][p % ncols]
-        means = [df.loc[df['peak_slot'] == s, col].mean() for s in slots]
-        ax.bar(x, means, 0.6, color=color)
+        means = [grp[col].mean() for grp in groups]
+        ax.bar(x, means, 0.6, color=colors)
         ax.axhline(0, color='black', linewidth=0.8)
         ax.set_xticks(x)
-        ax.set_xticklabels([label_of[s] for s in slots], fontsize=9)
+        ax.set_xticklabels(labels, fontsize=9)
         ax.set_title(col, fontsize=12)
         ax.grid(axis='y', linestyle=':', alpha=0.4)
 

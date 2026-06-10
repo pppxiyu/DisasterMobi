@@ -33,7 +33,7 @@ BR_ANALYSIS_DAYS = 151    # trim BR data, counting from start end
 FM_ANALYSIS_DAYS = 44     # trim Fort Myers'data, counting from start end
 
 # Per-resolution geography CSVs (columns: geography_id, geometry_wkt, …).
-# Used by the AGG_LEVEL-aware loader (load_city_geo_or_warn in build_graphs).
+# Used by the AGG_LEVEL-aware loader (load_city_geo in build_graphs).
 # The active block-group geometry for Baton Rouge and Fort Myers lives directly
 # under data/; the census_tract entries are legacy (Baton Rouge + New Orleans).
 BR_GEO_CSV = {'census_tract': 'data/cubique_raw/Baton_Rouge_census_tract_geo.csv',  # legacy

@@ -89,7 +89,7 @@ def build_city_matrices(graphs, days_window, days_disaster_in_window,
 
     n_nor = days_normal_in_window * slot_active
     print(f"  Combined: {X_all.shape}  (disaster starts at column {n_nor})")
-    print_matrix_diagnostics(X_all, mapping, label='full 14-day window')
+    print_matrix_diagnostics(X_all, mapping, label='full window')
     return X_all, n_nor, mapping
 
 

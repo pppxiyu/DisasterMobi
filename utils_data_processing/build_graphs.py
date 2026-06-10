@@ -20,8 +20,7 @@ that notebook.
 
 Public API
 ----------
-  load_city_geo_or_warn(city_label, agg_level, geo_csv_map)  -> GeoDataFrame | None
-  load_city_geo(city_label, agg_level, geo_csv_map)          -> GeoDataFrame  (raises if missing)
+  load_city_geo(city_label, agg_level, geo_csv_map)  -> GeoDataFrame  (raises if missing)
 """
 import os
 
@@ -54,51 +53,27 @@ def _load_geo_df(geo_path: str) -> gpd.GeoDataFrame:
     return gdf.set_index('aggr_id')
 
 
-def load_city_geo_or_warn(city_label, agg_level, geo_csv_map):
+def load_city_geo(city_label, agg_level, geo_csv_map):
     """
-    Load a city's geometry as a GeoDataFrame with an 'aggr_id' column from the
-    geography CSV for the given AGG_LEVEL, returning None (with a warning) if
-    the required file is absent.
+    Load a city's geometry as a GeoDataFrame with 'aggr_id' and 'centroid'
+    columns from the geography CSV for the given AGG_LEVEL.
 
-    This lets callers skip spatial analysis gracefully when a city's geometry
-    is unavailable, while the non-spatial NMF / temporal outputs still run.
+    Centroids are computed in EPSG:3857 and stored back in EPSG:4326.
+    The geometry file is mandatory.  Raises FileNotFoundError if it is absent.
 
     Parameters
     ----------
-    city_label  : str          — for the warning message, e.g. 'Fort Myers'.
+    city_label  : str          — for the error message, e.g. 'Fort Myers'.
     agg_level   : str          — 'census_tract' or 'block_group' (config.AGG_LEVEL).
     geo_csv_map : dict | None   — {agg_level: csv_path}, e.g. config.FM_GEO_CSV.
-
-    Returns
-    -------
-    GeoDataFrame with an 'aggr_id' column, or None if no geo file exists.
     """
-    return _resolve_geo_csv(city_label, agg_level, geo_csv_map, required=False)
-
-
-def load_city_geo(city_label, agg_level, geo_csv_map):
-    """
-    Load a city's geometry as a GeoDataFrame with an 'aggr_id' column, raising
-    FileNotFoundError if the geography file is absent.
-
-    Use this for analyses where geometry is mandatory (e.g. distance-decay, which
-    is meaningless without centroid distances).  Use load_city_geo_or_warn
-    instead when spatial steps are optional and should degrade gracefully.
-    """
-    return _resolve_geo_csv(city_label, agg_level, geo_csv_map, required=True)
-
-
-def _resolve_geo_csv(city_label, agg_level, geo_csv_map, required):
     csv = geo_csv_map.get(agg_level) if geo_csv_map else None
     if not csv or not os.path.exists(csv):
-        if required:
-            raise FileNotFoundError(
-                f"{city_label}: a '{agg_level}' geometry file is required for "
-                f"this analysis but was not found ({csv}).  Provide the geo CSV "
-                f"(columns: geography_id, geometry_wkt)."
-            )
-        print(f"  ⚠ {city_label}: no '{agg_level}' geo file "
-              f"({csv}); spatial analysis (distances / maps / land-use) "
-              f"will be skipped for this city.")
-        return None
-    return _load_geo_df(csv).reset_index()
+        raise FileNotFoundError(
+            f"{city_label}: a '{agg_level}' geometry file is required but was "
+            f"not found ({csv}).  Provide the geo CSV "
+            f"(columns: geography_id, geometry_wkt)."
+        )
+    gdf = _load_geo_df(csv).reset_index()
+    gdf['centroid'] = gdf.geometry.to_crs(epsg=3857).centroid.to_crs(epsg=4326)
+    return gdf

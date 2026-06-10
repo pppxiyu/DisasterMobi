@@ -15,6 +15,61 @@ def load_graphs(path):
     return graphs
 
 
+def load_graphs_trimmed(path, analysis_days, slot_per_day, label=''):
+    """
+    Load a graph pkl, validate it strictly, and trim it to the analysis range.
+
+    All checks raise.
+      - analysis_days must be set (None is rejected).
+      - The pkl must carry interval_duration metadata that matches slot_per_day.
+      - The graph count must be divisible by slot_per_day (catches a 3h file
+        loaded under a 2h config even without metadata).
+      - The pkl must contain at least analysis_days days.
+
+    Parameters
+    ----------
+    path          : pkl path.
+    analysis_days : number of days kept, counted from the start.  Required.
+    slot_per_day  : slots per day (= SLOT_PER_DAY from config).
+    label         : city name for error messages.
+
+    Returns the first analysis_days * slot_per_day graphs.
+    """
+    label = label or path
+    if analysis_days is None:
+        raise ValueError(f"{label}: analysis_days must be set, got None.")
+
+    graphs = load_graphs(path)
+
+    expected_interval = f'{24 // slot_per_day}h'
+    actual_interval = graphs[0].graph.get('interval_duration')
+    if actual_interval is None:
+        raise ValueError(
+            f"{label}: the pkl lacks interval_duration metadata. Rebuild it "
+            f"with the current pipeline or verify it matches {expected_interval}."
+        )
+    if actual_interval != expected_interval:
+        raise ValueError(
+            f"{label}: pkl contains {actual_interval} graphs but config expects "
+            f"{expected_interval} (slot_per_day={slot_per_day})."
+        )
+    if len(graphs) % slot_per_day != 0:
+        raise ValueError(
+            f"{label}: {len(graphs)} graphs is not divisible by "
+            f"slot_per_day={slot_per_day}. The pkl was likely built with a "
+            f"different time resolution."
+        )
+
+    need = analysis_days * slot_per_day
+    if len(graphs) < need:
+        raise ValueError(
+            f"{label}: analysis_days={analysis_days} needs {need} graphs but "
+            f"the pkl has only {len(graphs)} "
+            f"({len(graphs) // slot_per_day} days)."
+        )
+    return graphs[:need]
+
+
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
 def periodic_trim(data, cycle_len, trim_start, trim_end):
