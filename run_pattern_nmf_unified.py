@@ -63,9 +63,9 @@ from utils_pattern_analysis.nmf_pipeline import (
 from utils_pattern_analysis.visualization import (
     vis_heatmap_temporal_signature, vis_map_od_flow,
     vis_line_nmf_component_timeline, vis_heatmap_od_function,
-    vis_heatmap_time_function_corr, vis_scatter_component_features,
+    vis_scatter_component_features,
     vis_bar_function_by_peakslot, vis_line_resilience_curves,
-    vis_bar_resilience_by_peakslot, vis_heatmap_resilience_corr_split,
+    vis_bar_resilience_by_peakslot, vis_heatmap_corr_split,
 )
 from utils_pattern_analysis.space_function import (
     category_lookup_from_landuse, build_od_function_matrix,
@@ -149,27 +149,29 @@ OUTPUT_RESIL  = os.path.join(OUTPUT_PLOTS, 'resilience_corr')    # Resilience co
 
 # Temporal features are computed from the pre-disaster part of W only (see
 # utils_pattern_analysis/component_features.py).
-#   am_pm         — morning share minus evening share of the within-day
-#                   profile (6-12h slots minus 16-22h slots, midday 12-16h
-#                   counts for neither).  Positive means morning-type and
-#                   negative means evening-type.
 #   weekday_ratio — mean weekday daily total over mean weekend daily total
 #                   (weekday from FIRST_DAY_*_NORMAL).  Above 1 means
 #                   weekday-dominated (commute-like) and below 1 means
-#                   weekend-dominated (leisure-like).
-# peak_slot (argmax of the within-day profile) is excluded from the rank
-# correlation because time-of-day is not a monotone scale.  It is treated as
-# categorical via the per-peak-slot bar charts.
-TIME_COLS = ['am_pm', 'weekday_ratio']
+#                   weekend-dominated (leisure-like).  The only temporal
+#                   feature in the rank correlations.
+# Two CATEGORICAL temporal features go to bar charts instead of correlations
+# (time-of-day is not a monotone scale).  Components with weekday_ratio below
+# WEEKEND_RATIO_THRESHOLD form a separate 'weekend' category in both, with no
+# within-day breakdown; all other components are profiled on WEEKDAY days only.
+#   peak_slot   — the weekday profile's argmax slot ('6-8h' … '20-22h')
+#   peak_period — the weekday profile's strongest day-period band, width-
+#                 corrected (morning_peak 6-10h / midday 10-16h /
+#                 evening_peak 16-20h / night 20-22h)
+WEEKEND_RATIO_THRESHOLD = 1.0
+TIME_COLS = ['weekday_ratio']
 
 # Functional features come from the O×D cross-tab with Mix and Unknown dropped
-# and the five categories renormalised, split by flow direction.
+# and the six categories renormalised, split by flow direction.  Shares are
+# full row/column sums, so same-function diagonal flow counts on both sides.
 #   share_from_<cat> — outflow side, the fraction departing from function <cat>
 #   share_to_<cat>   — inflow side, the fraction arriving at function <cat>
-#   diag_share       — same-function flow fraction (trace)
 FUNC_COLS = ([f'share_from_{c}' for c in SF_CATEGORIES]
-             + [f'share_to_{c}' for c in SF_CATEGORIES]
-             + ['diag_share'])
+             + [f'share_to_{c}' for c in SF_CATEGORIES])
 
 # Resilience features are computed from the relative-activity curve r, where
 # r(d) = the component's daily total on disaster day d divided by its
@@ -223,20 +225,20 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
         output_dir=OUTPUT_CHAR, tag=tag,
     )
 
-    # # Interactive HTML arc maps, one file per spatial component.  The
-    # # centroid column from load_city_geo is already EPSG:4326.
-    # out_dir = os.path.join(OUTPUT_CHAR,
-    #                        f'component_spatial_characteristics{tag}')  # = OUTPUT_NMF_BR/_FM
-    # os.makedirs(out_dir, exist_ok=True)
-    # gdf['lon'] = gdf['centroid'].x
-    # gdf['lat'] = gdf['centroid'].y
-    # for i in range(H.shape[0]):
-    #     vis_map_od_flow(
-    #         [h_slice_to_od_matrix(H[i: i+1, :], mapping)],
-    #         gdfs=gdf, id_col='aggr_id', min_flow=0.5,
-    #         max_line_width=20, alpha_range=(0.05, 0.95), curve_rad=0.3, vmax=5,
-    #         save_dir=os.path.join(out_dir, f'component_{i}.html'),
-    #     )
+    # Interactive HTML arc maps, one file per spatial component.  The
+    # centroid column from load_city_geo is already EPSG:4326.
+    out_dir = os.path.join(OUTPUT_CHAR,
+                           f'component_spatial_characteristics{tag}')  # = OUTPUT_NMF_BR/_FM
+    os.makedirs(out_dir, exist_ok=True)
+    gdf['lon'] = gdf['centroid'].x
+    gdf['lat'] = gdf['centroid'].y
+    for i in range(H.shape[0]):
+        vis_map_od_flow(
+            [h_slice_to_od_matrix(H[i: i+1, :], mapping)],
+            gdfs=gdf, id_col='aggr_id', min_flow=0.5,
+            max_line_width=20, alpha_range=(0.05, 0.95), curve_rad=0.3, vmax=5,
+            save_dir=os.path.join(out_dir, f'component_{i}.html'),
+        )
 
 
 def analysis_od_function(label, key, tag, gdf, H, mapping, weights):
@@ -277,8 +279,10 @@ def analysis_time_function_corr(feats, tag):
     top-pair scatter, and the categorical peak-slot bar chart."""
     os.makedirs(OUTPUT_CORR, exist_ok=True)
     rho, pval = time_function_correlation(feats, TIME_COLS, FUNC_COLS)
-    vis_heatmap_time_function_corr(
-        rho, pval,
+    # Split-cell heatmap, same style as the resilience block.  No single-cell
+    # time columns here (weekday_ratio is the row).
+    vis_heatmap_corr_split(
+        rho, pval, time_cols=[], categories=SF_CATEGORIES,
         save_path=os.path.join(OUTPUT_CORR, f'heatmap_time_function_corr{tag}.png'),
     )
     pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
@@ -289,6 +293,11 @@ def analysis_time_function_corr(feats, tag):
     vis_bar_function_by_peakslot(
         feats, SF_CATEGORIES,
         save_path=os.path.join(OUTPUT_CORR, f'bar_function_by_peakslot{tag}.png'),
+    )
+    vis_bar_function_by_peakslot(
+        feats, SF_CATEGORIES,
+        group_col='peak_period', label_col='peak_period_label',
+        save_path=os.path.join(OUTPUT_CORR, f'bar_function_by_peakperiod{tag}.png'),
     )
 
 
@@ -303,14 +312,11 @@ def analysis_resilience_corr(feats, curves, tag):
         save_path=os.path.join(OUTPUT_RESIL, f'line_resilience_curves{tag}.png'),
     )
 
-    # diag_share is excluded from this whole block (heatmap, top pairs and
-    # scatter); it stays in the time × function block only.
-    func_cols = [c for c in FUNC_COLS if c != 'diag_share']
-    rho, pval = time_function_correlation(feats, RES_COLS, TIME_COLS + func_cols)
+    rho, pval = time_function_correlation(feats, RES_COLS, TIME_COLS + FUNC_COLS)
     # Split-cell heatmap.  Time columns are single cells, each category cell
     # stacks share_from (upper) and share_to (lower), rows are coloured by
     # their own max |rho|.
-    vis_heatmap_resilience_corr_split(
+    vis_heatmap_corr_split(
         rho, pval, time_cols=TIME_COLS, categories=SF_CATEGORIES,
         save_path=os.path.join(OUTPUT_RESIL, f'heatmap_resilience_corr{tag}.png'),
     )
@@ -323,6 +329,11 @@ def analysis_resilience_corr(feats, curves, tag):
     vis_bar_resilience_by_peakslot(
         feats, RES_COLS,
         save_path=os.path.join(OUTPUT_RESIL, f'bar_resilience_by_peakslot{tag}.png'),
+    )
+    vis_bar_resilience_by_peakslot(
+        feats, RES_COLS,
+        group_col='peak_period', label_col='peak_period_label',
+        save_path=os.path.join(OUTPUT_RESIL, f'bar_resilience_by_peakperiod{tag}.png'),
     )
 
 
@@ -370,7 +381,6 @@ def main():
 
     # ── Analysis ──────────────────────────
 
-    feat_frames = []
     for label, key, tag, gdf, H, mapping, weights, W, n_nor, n_dis, fd_nor, fd_dis in (
         ('Baton Rouge', 'Baton_Rouge', '_br', br_gdf, H_br, mapping_br, weights_br,
          W_br, n_nor_br, n_dis_br, FIRST_DAY_BR_NORMAL, FIRST_DAY_BR_DISASTER),
@@ -394,19 +404,17 @@ def main():
         res['recovery_deficit'] = 1.0 - res.pop('recovery_level')
         res['early_collapse']   = (n_dd - 1) - res.pop('lowest_day')
         feats = pd.concat([
-            temporal_features(W, n_nor, fd_nor, SLOTS_ACTIVE, _INTERVAL_HOURS),
+            temporal_features(W, n_nor, fd_nor, SLOTS_ACTIVE, _INTERVAL_HOURS,
+                              weekend_ratio_threshold=WEEKEND_RATIO_THRESHOLD),
             functional_features(M, AXIS_CATEGORIES),
             res,
         ], axis=1)
         feats.insert(0, 'city', label)
         feats.insert(1, 'weight', weights)
-        feat_frames.append(feats)
         curves = resilience_curves(W, n_nor, fd_nor, SLOTS_ACTIVE, n_dis=n_dis)
 
         analysis_time_function_corr(feats, tag)
         analysis_resilience_corr(feats, curves, tag)
-
-    pd.concat(feat_frames).to_csv(os.path.join(OUTPUT_CORR, 'component_features.csv'))
 
 
 

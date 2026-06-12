@@ -975,87 +975,32 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     return fig
 
 
-# ── Component time × function correlation ─────────────────────────────────────
+# ── Feature correlation heatmap (split from/to cells) ─────────────────────────
 
-def vis_heatmap_time_function_corr(rho, pval=None, save_path=None,
-                                   cmap='RdBu_r', annot_fs=11,
-                                   row_scaled=False):
+
+def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
+                           categories=None, save_path=None,
+                           cmap='RdBu_r', annot_fs=17):
     """
-    Heatmap of Spearman correlations between two feature groups (rows ×
-    columns) across NMF components.
+    Row-scaled correlation heatmap with split functional cells.  Rows are any
+    metric set (resilience metrics, weekday_ratio, …).
 
-    Cell text shows rho, with significance stars from `pval`
-    (* p<0.05, ** p<0.01).  Diverging colormap centred at 0.
-
-    Parameters
-    ----------
-    rho, pval  : DataFrames [row features × column features]
-                 (time_function_correlation output); pval optional.
-    row_scaled : colour each ROW by its own max |rho|, independently of the
-                 other rows.  Colours are then comparable within a row but
-                 NOT across rows, so no colorbar is drawn.  Annotations
-                 always show the original rho.
-    """
-    R = rho.astype(float)
-    V = R.to_numpy()
-    if row_scaled:
-        scale = np.nanmax(np.abs(V), axis=1, keepdims=True)
-        scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
-        C = V / scale
-    else:
-        C = V
-
-    fig, ax = plt.subplots(
-        figsize=(1.3 * len(R.columns) + 2.5, 0.9 * len(R.index) + 2.0),
-        constrained_layout=True)
-    im = ax.imshow(C, cmap=cmap, vmin=-1, vmax=1, aspect='auto')
-    for i in range(len(R.index)):
-        for j in range(len(R.columns)):
-            v = V[i, j]
-            if np.isnan(v):
-                continue
-            stars = ''
-            if pval is not None and not np.isnan(pval.iloc[i, j]):
-                p = pval.iloc[i, j]
-                stars = '**' if p < 0.01 else ('*' if p < 0.05 else '')
-            ax.text(j, i, f'{v:.2f}{stars}', ha='center', va='center',
-                    fontsize=annot_fs,
-                    color='white' if abs(C[i, j]) > 0.6 else 'black')
-    ax.set_xticks(range(len(R.columns)))
-    ax.set_xticklabels(R.columns, rotation=45, ha='right', fontsize=11)
-    ax.set_yticks(range(len(R.index)))
-    ax.set_yticklabels(R.index, fontsize=11)
-    if not row_scaled:
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-        cbar.set_label('Spearman ρ', fontsize=11)
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
-def vis_heatmap_resilience_corr_split(rho, pval=None, time_cols=None,
-                                      categories=None, save_path=None,
-                                      cmap='RdBu_r', annot_fs=17):
-    """
-    Row-scaled correlation heatmap with split functional cells.
-
-    Time columns stay single cells.  Each category column packs
-    share_from_<cat> in the UPPER half-cell and share_to_<cat> in the LOWER
-    half-cell, with value labels (and significance stars) for both.  Each row
-    is coloured by its own max |rho| over its displayed cells, so rows are
-    independent and no colorbar is drawn — colours compare within a row only,
-    numbers compare everywhere.
+    Time columns stay single cells (pass an empty list when there are none).
+    Each category column packs share_from_<cat> in the UPPER half-cell and
+    share_to_<cat> in the LOWER half-cell, with value labels (and significance
+    stars) for both.  Each row is coloured by its own max |rho| over its
+    displayed cells, so rows are independent and no colorbar is drawn —
+    colours compare within a row only, numbers compare everywhere.
 
     Parameters
     ----------
     rho, pval  : DataFrames [metric rows × feature columns]; columns must
                  contain time_cols plus share_from_<cat> / share_to_<cat>
                  for every category.
-    time_cols  : list[str] columns shown as single cells (e.g. TIME_COLS).
+    time_cols  : list[str] columns shown as single cells (may be empty).
     categories : list[str] functional category names (e.g. SF_CATEGORIES).
     """
+    time_cols = time_cols or []
     rows = list(rho.index)
     n_r, n_t, n_c = len(rows), len(time_cols), len(categories)
     n_cols = n_t + n_c
@@ -1139,19 +1084,23 @@ def vis_heatmap_resilience_corr_split(rho, pval=None, time_cols=None,
 
 
 def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
-                                 color_from='#1976D2', color_to='#E65100'):
+                                 color_from='#1976D2', color_to='#E65100',
+                                 group_col='peak_slot',
+                                 label_col='peak_slot_label'):
     """
-    Grouped bar charts of mean functional shares by peak slot — one subplot per
-    OCCUPIED peak_slot value (components grouped by when their within-day
-    profile peaks), bars = the functional categories, paired by direction:
-    share_from_<cat> (outflow, one colour) vs share_to_<cat> (inflow, other).
+    Grouped bar charts of mean functional shares by a categorical temporal
+    feature — one subplot per OCCUPIED group value, bars = the functional
+    categories, paired by direction: share_from_<cat> (outflow, one colour)
+    vs share_to_<cat> (inflow, other).
 
-    peak_slot is treated as CATEGORICAL here (no ordering assumed) — this
-    replaces its use in the rank-correlation analysis.
+    The grouping feature is treated as CATEGORICAL (no ordering assumed) —
+    this replaces its use in the rank-correlation analysis.  Works for any
+    code/label column pair, e.g. peak_slot/peak_slot_label or
+    peak_period/peak_period_label; groups are laid out by ascending code.
 
     Parameters
     ----------
-    df         : per-component feature table with peak_slot, peak_slot_label,
+    df         : per-component feature table with group_col, label_col,
                  share_from_<cat> and share_to_<cat> columns.
     categories : list[str] functional category names (e.g. SF_CATEGORIES).
     """
@@ -1159,8 +1108,8 @@ def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
     from_cols = [f'share_from_{c}' for c in categories]
     to_cols   = [f'share_to_{c}'   for c in categories]
 
-    slots = sorted(df['peak_slot'].unique())
-    n = len(slots)
+    groups = sorted(df[group_col].unique())
+    n = len(groups)
     ncols = max(1, min(ncols, n))
     nrows = math.ceil(n / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols, 3.8 * nrows),
@@ -1170,9 +1119,9 @@ def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
     bw = 0.38                                   # bar width
     ymax = max(df[from_cols].to_numpy().max(), df[to_cols].to_numpy().max())
 
-    for p, slot in enumerate(slots):
+    for p, g in enumerate(groups):
         ax = axes[p // ncols][p % ncols]
-        grp = df[df['peak_slot'] == slot]
+        grp = df[df[group_col] == g]
         mean_from = grp[from_cols].mean().to_numpy()
         mean_to   = grp[to_cols].mean().to_numpy()
         ax.bar(x - bw / 2, mean_from, bw, color=color_from, label='from (outflow)')
@@ -1182,8 +1131,8 @@ def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
         ax.set_ylim(0, ymax * 1.08)
         ax.set_ylabel('mean share', fontsize=10)
         ax.grid(axis='y', linestyle=':', alpha=0.4)
-        label = grp['peak_slot_label'].iloc[0] if 'peak_slot_label' in grp else str(slot)
-        ax.set_title(f'peak {label}  (n={len(grp)})', fontsize=12)
+        label = grp[label_col].iloc[0] if label_col in grp else str(g)
+        ax.set_title(f'{label}  (n={len(grp)})', fontsize=12)
         if p == 0:
             ax.legend(fontsize=9, frameon=True)
 
@@ -1227,13 +1176,9 @@ def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
         if xc == 'weekday_ratio':
             ax.set_xscale('log')
             ax.axvline(1.0, color='grey', linestyle=':', linewidth=1)
-        if xc == 'am_pm':
-            ax.axvline(0.0, color='grey', linestyle=':', linewidth=1)
         if yc == 'weekday_ratio':
             ax.set_yscale('log')
             ax.axhline(1.0, color='grey', linestyle=':', linewidth=1)
-        if yc == 'am_pm':
-            ax.axhline(0.0, color='grey', linestyle=':', linewidth=1)
         ax.set_xlabel(xc, fontsize=21)
         ax.set_ylabel(yc, fontsize=21)
         ax.tick_params(labelsize=18)
@@ -1295,34 +1240,28 @@ def vis_line_resilience_curves(curves, ncols=3, save_path=None):
 
 def vis_bar_resilience_by_peakslot(df, res_cols, ncols=2, save_path=None,
                                    color='#455A64', color_weekend='#8D6E63',
-                                   weekend_ratio_threshold=1.0):
+                                   group_col='peak_slot',
+                                   label_col='peak_slot_label'):
     """
-    Mean resilience metrics by peak slot — one subplot PER METRIC (metrics have
-    different scales, so they cannot share a y-axis), bar height = group mean,
-    group sizes in the x labels.
+    Mean resilience metrics by a categorical temporal feature — one subplot
+    PER METRIC (metrics have different scales, so they cannot share a y-axis),
+    bar height = group mean, group sizes in the x labels.
 
-    Weekend-dominated components (weekday_ratio < weekend_ratio_threshold) form
-    their own 'Weekend' group WITHOUT a time-of-day split — their peak_slot
-    mixes day types, so the slot grouping only describes the weekday-dominated
-    components.
+    The weekend category comes from the FEATURE layer (temporal_features
+    assigns weekend-dominated components the 'weekend' label, no time-of-day
+    split); its bar is drawn in color_weekend.  Works for any code/label
+    column pair, e.g. peak_slot/peak_slot_label or
+    peak_period/peak_period_label; groups are laid out by ascending code.
     """
     import math
-    is_we = df['weekday_ratio'] < weekend_ratio_threshold
-    wd = df[~is_we]
-
-    slots = sorted(wd['peak_slot'].unique())
+    codes = sorted(df[group_col].unique())
     groups, labels, colors = [], [], []
-    for s in slots:
-        grp = wd[wd['peak_slot'] == s]
-        lbl = grp['peak_slot_label'].iloc[0] if 'peak_slot_label' in grp else str(s)
+    for g in codes:
+        grp = df[df[group_col] == g]
+        lbl = grp[label_col].iloc[0] if label_col in grp else str(g)
         groups.append(grp)
         labels.append(f"{lbl}\n(n={len(grp)})")
-        colors.append(color)
-    if is_we.any():
-        grp = df[is_we]
-        groups.append(grp)
-        labels.append(f"Weekend\n(n={len(grp)})")
-        colors.append(color_weekend)
+        colors.append(color_weekend if lbl == 'weekend' else color)
 
     n = len(res_cols)
     ncols = max(1, min(ncols, n))

@@ -4,18 +4,22 @@ cross-correlation — "do components with a certain temporal rhythm live in a
 certain functional space?"
 
 Each NMF component becomes one observation with
-  temporal features  (from the temporal factor W, PRE-DISASTER segment only):
-      peak_slot      argmax of the normalised within-day profile (ordinal 0..S-1)
-      am_pm          sum of morning-slot shares (6-12h) minus evening-slot
-                     shares (16-22h); >0 morning-type, <0 evening-type
+  temporal features  (from the temporal factor W, PRE-DISASTER segment only;
+  weekend-dominated components form their own 'weekend' category and the
+  within-day profile is computed from weekday days only):
+      peak_slot      categorical: argmax slot of the weekday profile
+                     ('6-8h' … '20-22h') or 'weekend'
+      peak_period    categorical: day-period band of the weekday profile
+                     (morning_peak 6-10h / midday 10-16h / evening_peak
+                     16-20h / night 20-22h) or 'weekend'
       weekday_ratio  mean weekday daily total / mean weekend daily total;
                      >1 weekday-dominated (commute-like), <1 weekend-dominated
   functional features (from the O×D function cross-tab M, Mix/Unknown dropped
   and the remaining categories renormalised to sum 1):
       share_from_<cat>  outflow side, the fraction departing from function <cat>
       share_to_<cat>    inflow side, the fraction arriving at function <cat>
-      diag_share        trace of the renormalised matrix = same-function flow
-                        fraction (high = activity stays within one function type)
+                        (row/column sums, so diagonal same-function flow is
+                        counted on both sides)
   resilience features (disaster-period daily activity relative to a weekday/
   weekend-matched pre-disaster baseline):
       drop_depth, lowest_day, recovery_level, cum_loss
@@ -41,23 +45,35 @@ from scipy.stats import spearmanr
 DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
         'Saturday', 'Sunday']
 
-# Hour bounds defining the morning / evening windows for am_pm.  Slots fully
-# inside [AM_START, AM_END) count as morning; fully inside [PM_START, PM_END)
-# as evening; anything else (midday) is a buffer and counts for neither.
-AM_START, AM_END = 6, 12
-PM_START, PM_END = 16, 22
-DAY_START_HOUR   = 6          # first active slot starts at 06:00 (periodic_trim)
+DAY_START_HOUR = 6            # first active slot starts at 06:00 (periodic_trim)
+
+# Day-period bands for the peak_period categorical (hour bounds, end-exclusive).
+# A slot belongs to a band when it lies fully inside [start, end).  Band order
+# defines the category codes 0..3.
+PERIOD_BANDS = [
+    ('morning_peak', 6, 10),
+    ('midday',       10, 16),
+    ('evening_peak', 16, 20),
+    ('night',        20, 22),
+]
 
 
-def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours):
+def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours,
+                      weekend_ratio_threshold=1.0):
     """
     Quantify each component's temporal signature from the PRE-DISASTER segment.
+
+    Weekend-dominated components (weekday_ratio < weekend_ratio_threshold)
+    form their own 'weekend' category in BOTH
+    categorical features and get no within-day breakdown.  For the remaining
+    (weekday-dominated) components the within-day profile is computed from the
+    WEEKDAY normal days only, so weekend days never dilute the slot shapes.
 
     Parameters
     ----------
     W              : ndarray [time × k]  temporal factors (unified NMF)
-    n_nor          : int    column where the disaster period starts; only
-                     W[:n_nor] is used (normal-period rhythm)
+    n_nor          : int    end of the clean normal columns; only W[:n_nor]
+                     is used (normal-period rhythm)
     first_day      : str    weekday of the first window day (e.g. 'Monday')
     slots_per_day  : int    active slots per day (= SLOTS_ACTIVE)
     interval_hours : int    hours per slot (= 24 // SLOT_PER_DAY)
@@ -65,7 +81,20 @@ def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours):
     Returns
     -------
     DataFrame indexed by component (0..k-1) with columns:
-      peak_slot (int), peak_slot_label (str), am_pm (float), weekday_ratio (float)
+      peak_slot         int   argmax slot of the weekday profile, or
+                              slots_per_day for the weekend category
+                              (so weekend sorts after all slots)
+      peak_slot_label   str   '6-8h' … '20-22h' or 'weekend'
+      peak_period       int   band code 0..3 (PERIOD_BANDS order), or
+                              len(PERIOD_BANDS) for weekend
+      peak_period_label str   'morning_peak' / 'midday' / 'evening_peak' /
+                              'night' / 'weekend'.  Band assignment uses the
+                              WIDTH-CORRECTED intensity (mean share per slot
+                              inside the band), so wider bands gain no
+                              mechanical advantage
+      weekday_ratio     float mean weekday daily total / mean weekend daily
+                              total (continuous; NaN if the weekend mean is 0,
+                              which counts as weekday-dominated)
     """
     W_nor = np.asarray(W, dtype=float)[:n_nor, :]
     n_days = n_nor // slots_per_day
@@ -74,26 +103,6 @@ def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours):
     k = W_nor.shape[1]
     # [days × slots × k]
     cube = W_nor.reshape(n_days, slots_per_day, k)
-
-    # ── within-day profile (mean over days, normalised per component) ─────────
-    profile = cube.mean(axis=0)                                   # [slots × k]
-    tot = profile.sum(axis=0, keepdims=True)
-    p = np.divide(profile, tot, out=np.zeros_like(profile), where=tot != 0)
-
-    peak_slot = p.argmax(axis=0)                                  # [k]
-    slot_label = [
-        f"{DAY_START_HOUR + s*interval_hours}-{DAY_START_HOUR + (s+1)*interval_hours}h"
-        for s in range(slots_per_day)
-    ]
-
-    # morning / evening slot sets from hour bounds (resolution-independent)
-    am_slots = [s for s in range(slots_per_day)
-                if DAY_START_HOUR + s*interval_hours >= AM_START
-                and DAY_START_HOUR + (s+1)*interval_hours <= AM_END]
-    pm_slots = [s for s in range(slots_per_day)
-                if DAY_START_HOUR + s*interval_hours >= PM_START
-                and DAY_START_HOUR + (s+1)*interval_hours <= PM_END]
-    am_pm = p[am_slots, :].sum(axis=0) - p[pm_slots, :].sum(axis=0)   # [k]
 
     # ── weekday vs weekend daily totals ───────────────────────────────────────
     daily = cube.sum(axis=1)                                      # [days × k]
@@ -104,12 +113,46 @@ def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours):
     weekday_ratio = np.divide(wk_mean, we_mean,
                               out=np.full(k, np.nan), where=we_mean != 0)
 
-    return pd.DataFrame({
-        'peak_slot':       peak_slot,
-        'peak_slot_label': [slot_label[s] for s in peak_slot],
-        'am_pm':           am_pm,
-        'weekday_ratio':   weekday_ratio,
-    }, index=pd.RangeIndex(k, name='component'))
+    # Weekend-dominated components form the 'weekend' category.  A NaN ratio
+    # (zero weekend activity) counts as weekday-dominated.
+    weekend_type = np.where(np.isnan(weekday_ratio), False,
+                            weekday_ratio < weekend_ratio_threshold)
+
+    # ── within-day profile from WEEKDAY normal days only ──────────────────────
+    profile = cube[is_weekday].mean(axis=0)                       # [slots × k]
+    tot = profile.sum(axis=0, keepdims=True)
+    p = np.divide(profile, tot, out=np.zeros_like(profile), where=tot != 0)
+
+    peak_idx = p.argmax(axis=0)                                   # [k]
+    slot_label = [
+        f"{DAY_START_HOUR + s*interval_hours}-{DAY_START_HOUR + (s+1)*interval_hours}h"
+        for s in range(slots_per_day)
+    ]
+
+    # Band membership from hour bounds (resolution-independent); band score =
+    # mean share per slot inside the band (width-corrected).
+    band_means = []
+    for _, h0, h1 in PERIOD_BANDS:
+        slots = [s for s in range(slots_per_day)
+                 if DAY_START_HOUR + s*interval_hours >= h0
+                 and DAY_START_HOUR + (s+1)*interval_hours <= h1]
+        band_means.append(p[slots, :].mean(axis=0) if slots else np.zeros(k))
+    band_idx = np.stack(band_means).argmax(axis=0)                # [k]
+
+    n_band = len(PERIOD_BANDS)
+    rows = []
+    for j in range(k):
+        if weekend_type[j]:
+            rows.append((slots_per_day, 'weekend', n_band, 'weekend'))
+        else:
+            rows.append((int(peak_idx[j]), slot_label[peak_idx[j]],
+                         int(band_idx[j]), PERIOD_BANDS[band_idx[j]][0]))
+
+    out = pd.DataFrame(rows, columns=['peak_slot', 'peak_slot_label',
+                                      'peak_period', 'peak_period_label'],
+                       index=pd.RangeIndex(k, name='component'))
+    out['weekday_ratio'] = weekday_ratio
+    return out
 
 
 def functional_features(M, categories, drop=('Mix', 'Unknown')):
@@ -134,7 +177,8 @@ def functional_features(M, categories, drop=('Mix', 'Unknown')):
                         DEPARTS from function <cat>  (row sums; sum to 1)
       share_to_<cat>    inflow side: fraction that ARRIVES at function <cat>
                         (column sums; sum to 1)
-      diag_share        same-function flow fraction (trace)
+      Full row/column sums include the diagonal, so same-function flow
+      a→a contributes to both share_from_a and share_to_a.
       A component whose kept-category mass is 0 gets NaN features.
     """
     M = np.asarray(M, dtype=float)
@@ -146,15 +190,13 @@ def functional_features(M, categories, drop=('Mix', 'Unknown')):
         s = sub.sum()
         if s <= 0:
             rows.append({**{f'share_from_{c}': np.nan for c in kept},
-                         **{f'share_to_{c}':   np.nan for c in kept},
-                         'diag_share': np.nan})
+                         **{f'share_to_{c}':   np.nan for c in kept}})
             continue
         sub = sub / s
         origin = sub.sum(axis=1)        # outflow: departing from function a
         dest   = sub.sum(axis=0)        # inflow:  arriving at function b
         rows.append({**{f'share_from_{c}': origin[j] for j, c in enumerate(kept)},
-                     **{f'share_to_{c}':   dest[j]   for j, c in enumerate(kept)},
-                     'diag_share': np.trace(sub)})
+                     **{f'share_to_{c}':   dest[j]   for j, c in enumerate(kept)}})
     return pd.DataFrame(rows, index=pd.RangeIndex(M.shape[0], name='component'))
 
 

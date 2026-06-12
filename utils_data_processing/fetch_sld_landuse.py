@@ -22,17 +22,13 @@ Supports pagination (maxRecordCount 5000) and returns JSON.
 Functional mapping (SLD → EULUC-style categories)
 -------------------------------------------------
 SLD has no "residential" employment sector, so residential intensity is proxied
-by housing units (CountHU).  Employment-by-sector (8-tier, E8_*) maps to the
-non-residential categories:
+by housing units (CountHU * RESIDENTIAL_WEIGHT).  Employment-by-sector (8-tier,
+E8_*) maps to the non-residential categories — see FUNCTION_FIELD_MAP and
+CATEGORIES below for the authoritative definition.
 
-    residential : CountHU * RESIDENTIAL_WEIGHT      (housing proxy)
-    commercial  : E8_Ret + E8_Off + E8_Svc + E8_Ent (retail/office/service/entertainment)
-    industrial  : E8_Ind
-    public      : E8_Ed  + E8_Hlth + E8_Pub         (education/health/public admin)
-
-A block group's dominant category is the one whose share of the four scores
-exceeds DOMINANT_THRESHOLD (0.5); otherwise it is "Mix".  Zones with no housing
-and no jobs are "Unknown".
+A block group's dominant category is the one whose (reweighted) share of the
+category scores exceeds the dominant threshold; otherwise it is "Mix".  Zones
+with no housing and no jobs are "Unknown".
 
 NOTE: EULUC's "transportation" category has no clean SLD employment/land-use
 counterpart and is intentionally NOT produced here.  RESIDENTIAL_WEIGHT puts one
@@ -90,16 +86,18 @@ RAW_FIELDS = [
 #   commercial : retail + office + service (prof./admin/other services)
 #   leisure    : entertainment (arts/recreation + accommodation/food)
 #   industrial : industrial
-#   public     : education + health + public administration
+#   health     : health care and social assistance
+#   public     : education + public administration
 # 'residential' is handled separately via housing units (counthu).
 FUNCTION_FIELD_MAP = {
     'commercial': ['e8_ret', 'e8_off', 'e8_svc'],
     'leisure':    ['e8_ent'],
     'industrial': ['e8_ind'],
-    'public':     ['e8_ed', 'e8_hlth', 'e8_pub'],
+    'health':     ['e8_hlth'],
+    'public':     ['e8_ed', 'e8_pub'],
 }
 CATEGORIES         = ['residential', 'commercial', 'leisure',
-                      'industrial', 'public']
+                      'industrial', 'health', 'public']
 RESIDENTIAL_WEIGHT = 1.0   # housing-unit ↔ job equivalence (modelling knob)
 DOMINANT_THRESHOLD = 0.5   # >50% (reweighted) share → that category, else "Mix"
 
@@ -244,7 +242,7 @@ def classify_dominant_function(df, residential_weight=RESIDENTIAL_WEIGHT,
     reweight by how *distinctive* each category is, using TF-IWF — the same
     Term-Frequency / Inverse-Word-Frequency formula as
     `utils_pattern_analysis.spatial_features.tf_iwf` (documents = block groups,
-    "words" = the four functional categories):
+    "words" = the functional categories):
 
         tf [i,c]  = score[i,c] / sum_c score[i,c]            (within-BG fraction)
         iwf[c]    = ( ln( sum(nt) / nt[c] ) ) ** iwf_scale,  nt[c] = sum_i score[i,c]
