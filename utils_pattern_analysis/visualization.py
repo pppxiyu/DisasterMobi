@@ -577,7 +577,7 @@ def vis_line_nmf_component_timeline(
     W_normal, W_imp, W_buffer=None,
     first_day_normal='Thursday', first_day_disaster='Saturday',
     slots_per_day=None,
-    output_dir='outputs', tag='',
+    output_dir='outputs', tag='', order=None,
 ):
     """
     Line subplots (one per NMF component) showing temporal factors across the
@@ -597,6 +597,11 @@ def vis_line_nmf_component_timeline(
         Number of ACTIVE slots per day (= SLOTS_ACTIVE from config).
         Required — pass SLOTS_ACTIVE explicitly so the day boundaries are
         correct for both 2h (8 slots) and 3h (5 slots) resolution.
+    order : list[int] | None
+        Component indices in top-to-bottom plotting order.  None keeps the
+        natural 0..k-1 order.  Each subplot is labelled with its TRUE
+        component index, so a custom order (e.g. sorted by a functional
+        share) stays readable.
 
     Saves to: <output_dir>/line_component_timeline<tag>.png
     """
@@ -620,6 +625,7 @@ def vis_line_nmf_component_timeline(
     n_dis   = W_imp.shape[0]
     n_total = n_nor + n_buf + n_dis
     k       = W_normal.shape[1]
+    order   = list(range(k)) if order is None else list(order)
 
     parts = [W_normal] + ([W_buffer] if n_buf else []) + [W_imp]
     W_all = np.concatenate(parts, axis=0)
@@ -668,18 +674,18 @@ def vis_line_nmf_component_timeline(
             ax.axvspan(start - 0.5, n_total - 0.5,
                        color=COLOR_WKD, zorder=0, linewidth=0)
 
-    for i in range(k):
-        ax = axes[i]
+    for row, comp in enumerate(order):
+        ax = axes[row]
         _shade_weekends(ax)
         # Normal period line
-        ax.plot(range(n_nor), W_all[:n_nor, i],
+        ax.plot(range(n_nor), W_all[:n_nor, comp],
                 color=COLOR_NOR, linewidth=1.6, zorder=2)
         # Buffer (alert) period line
         if n_buf:
-            ax.plot(range(n_nor, n_nor + n_buf), W_all[n_nor:n_nor + n_buf, i],
+            ax.plot(range(n_nor, n_nor + n_buf), W_all[n_nor:n_nor + n_buf, comp],
                     color=COLOR_BUF, linewidth=1.6, zorder=2)
         # Disaster period line
-        ax.plot(range(n_nor + n_buf, n_total), W_all[n_nor + n_buf:, i],
+        ax.plot(range(n_nor + n_buf, n_total), W_all[n_nor + n_buf:, comp],
                 color=COLOR_DIS, linewidth=1.6, zorder=2)
         # Boundaries: buffer start (grey, if any) and landfall (black)
         if n_buf:
@@ -687,7 +693,7 @@ def vis_line_nmf_component_timeline(
                        linewidth=1.0, alpha=0.6, zorder=3)
         ax.axvline(n_nor + n_buf - 0.5, color='black', linestyle='--',
                    linewidth=1.1, alpha=0.6, zorder=3)
-        ax.set_ylabel(f'Comp {i}', fontsize=10, fontweight='bold', labelpad=4)
+        ax.set_ylabel(f'Comp {comp}', fontsize=10, fontweight='bold', labelpad=4)
         ax.set_xlim(-0.5, n_total - 0.5)
         ax.grid(axis='y', linestyle=':', alpha=0.35)
         ax.tick_params(axis='y', labelsize=8)
@@ -1194,46 +1200,52 @@ def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
 
 # ── Resilience (disaster drop-and-recovery) plots ─────────────────────────────
 
-def vis_line_resilience_curves(curves, ncols=3, save_path=None):
+def vis_line_resilience_curves(curves, save_path=None, order=None):
     """
-    Per-component relative-activity curves over the disaster period — the
-    QC view behind the resilience metrics.
+    Per-component relative-activity curves over the disaster period — one
+    stacked subplot per component (one row each), the same top-to-bottom
+    layout as vis_line_nmf_component_timeline.
 
     Parameters
     ----------
     curves : DataFrame [n_disaster_days × k]  (resilience_curves output);
              index = days since landfall, values = activity / pre-disaster
-             weekday-matched baseline (1.0 = normal).
+             day-type-matched baseline (1.0 = normal).
+    order  : list[int] | None  component indices in top-to-bottom order
+             (None keeps 0..k-1).  Each subplot is labelled with its TRUE
+             component index, so an order sorted by a functional share stays
+             readable.
 
     Each panel: r(d) line, grey baseline at 1.0, black dot at the lowest point.
+    A shared y-limit makes drop depths comparable across components.
     """
-    import math
     k = curves.shape[1]
-    ncols = max(1, min(ncols, k))
-    nrows = math.ceil(k / ncols)
+    order = list(range(k)) if order is None else list(order)
     x = curves.index.to_numpy()
     ymax = max(1.05, np.nanmax(curves.to_numpy()) * 1.05)
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.6 * ncols, 3.0 * nrows),
-                             squeeze=False, constrained_layout=True)
-    for comp in range(k):
-        ax = axes[comp // ncols][comp % ncols]
+    fig, axes = plt.subplots(k, 1, figsize=(9, 1.7 * k), sharex=True,
+                             squeeze=False)
+    axes = axes[:, 0]
+    for row, comp in enumerate(order):
+        ax = axes[row]
         y = curves.iloc[:, comp].to_numpy()
         ax.axhline(1.0, color='grey', linestyle=':', linewidth=1.2)
-        ax.plot(x, y, color='#D32F2F', linewidth=1.8)
-        t = int(np.nanargmin(y))
-        ax.plot(x[t], y[t], 'o', color='black', markersize=5, zorder=3)
+        ax.plot(x, y, color='#D32F2F', linewidth=1.8, zorder=2)
+        if not np.all(np.isnan(y)):
+            t = int(np.nanargmin(y))
+            ax.plot(x[t], y[t], 'o', color='black', markersize=5, zorder=3)
         ax.set_ylim(0, ymax)
-        ax.set_title(f'Component {comp}', fontsize=11)
-        ax.set_xlabel('days since landfall', fontsize=9)
-        ax.set_ylabel('rel. activity', fontsize=9)
-        ax.grid(linestyle=':', alpha=0.35)
+        ax.set_ylabel(f'Comp {comp}', fontsize=10, fontweight='bold', labelpad=4)
+        ax.grid(axis='y', linestyle=':', alpha=0.35)
+        ax.tick_params(axis='y', labelsize=8)
 
-    for p in range(k, nrows * ncols):
-        axes[p // ncols][p % ncols].axis('off')
+    axes[-1].set_xticks(x)
+    axes[-1].set_xlabel('days since landfall', fontsize=11, labelpad=6)
+    plt.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
     return fig
 

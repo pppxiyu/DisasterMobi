@@ -29,12 +29,19 @@ Pipeline
 3. Optionally drop low-activity OD pairs (threshold ∝ FILTER_FACTOR; 0 = keep all).
 4. Run one NMF per city → temporal factor W, spatial factor H.
 5. Save to outputs/nmf_unified/:
-     - component_characteristics/  temporal-signature heatmap + timeline (W),
-       per city; per-component OD arc maps (H) in
-       component_spatial_characteristics_<city>/ subfolders
-     - od_functionality/           per-component O×D functional cross-tabs
-     - component_corr/             time × function correlation figures
-     - resilience_corr/            resilience curves + correlation figures
+     - component_characteristics/  per-component characteristics, by type:
+         temporal/          signature heatmap + timeline (temporal factor W)
+         spatial/           per-component OD arc maps (H), per-city subfolders
+         func/              per-component O×D functional cross-tabs
+         func_vs_temporal/  time × function correlation figures
+     - resilience_corr/
+         func_vs_resilience/      functional-share heatmap, top-pair scatter,
+           and two per-function line stacks (one figure per category,
+           components ordered by combined functional share):
+             line_component_timeline_by_func/           full-window W timeline
+             line_component_resilience_curves_by_func/  disaster r(d) curves
+         temporal_vs_resilience/  weekday_ratio heatmap + peak-slot /
+           peak-period bar charts
 
 Geometry files are mandatory.  Loading raises FileNotFoundError when a city's
 geo CSV is absent.
@@ -69,7 +76,6 @@ from utils_pattern_analysis.visualization import (
 )
 from utils_pattern_analysis.space_function import (
     category_lookup_from_landuse, build_od_function_matrix,
-    od_function_to_dataframe,
 )
 from utils_pattern_analysis.component_features import (
     temporal_features, functional_features, time_function_correlation,
@@ -118,12 +124,19 @@ FIRST_DAY_FM_DISASTER = 'Wednesday'   # Sep 28 2022 (disaster start, Ian landfal
 
 OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf_unified')
 
-# Component temporal and spatial characteristics live together.  Signature
-# heatmaps and timelines go directly in OUTPUT_CHAR, and per-city OD arc maps
-# (HTML) go in the component_spatial_characteristics_<city> subfolders.
-OUTPUT_CHAR   = os.path.join(OUTPUT_PLOTS, 'component_characteristics')
-OUTPUT_NMF_BR = os.path.join(OUTPUT_CHAR, 'component_spatial_characteristics_br')
-OUTPUT_NMF_FM = os.path.join(OUTPUT_CHAR, 'component_spatial_characteristics_fm')
+# All per-component characteristics live under component_characteristics, one
+# subfolder per characteristic type.
+#   temporal/          signature heatmap + timeline (temporal factor W)
+#   spatial/           per-city OD arc-map subfolders (spatial factor H)
+#   func/              per-component O×D functional cross-tabs
+#   func_vs_temporal/  time × function correlation figures
+OUTPUT_CHAR         = os.path.join(OUTPUT_PLOTS, 'component_characteristics')
+OUTPUT_TEMPORAL     = os.path.join(OUTPUT_CHAR, 'temporal')
+OUTPUT_SPATIAL      = os.path.join(OUTPUT_CHAR, 'spatial')
+OUTPUT_NMF_BR       = os.path.join(OUTPUT_SPATIAL, 'component_spatial_characteristics_br')
+OUTPUT_NMF_FM       = os.path.join(OUTPUT_SPATIAL, 'component_spatial_characteristics_fm')
+OUTPUT_FUNC         = os.path.join(OUTPUT_CHAR, 'func')
+OUTPUT_FUNC_VS_TEMP = os.path.join(OUTPUT_CHAR, 'func_vs_temporal')
 
 # Per-city block-group space-function data (EPA Smart Location Database).
 SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')
@@ -141,9 +154,17 @@ LANDUSE_DOMINANT_THRESHOLD = 0.4        # Top-category share needed for a label,
 # and columns (destination).
 AXIS_CATEGORIES = list(SF_CATEGORIES) + ['Mix']
 
-OUTPUT_ODFUNC = os.path.join(OUTPUT_PLOTS, 'od_functionality')   # O×D cross-tab outputs
-OUTPUT_CORR   = os.path.join(OUTPUT_PLOTS, 'component_corr')     # Time × function correlation
-OUTPUT_RESIL  = os.path.join(OUTPUT_PLOTS, 'resilience_corr')    # Resilience correlation
+# Resilience correlation has two subfolders.  func_vs_resilience holds the
+# functional-share heatmap, the top-pair scatter, and two per-function stacks
+# of line figures (one figure per category, components ordered by combined
+# functional share): the W timelines and the resilience curves.
+# temporal_vs_resilience holds the temporal-feature figures (weekday_ratio
+# heatmap + peak-slot / peak-period bar charts).
+OUTPUT_RESIL         = os.path.join(OUTPUT_PLOTS, 'resilience_corr')
+OUTPUT_FUNC_VS_RESIL = os.path.join(OUTPUT_RESIL, 'func_vs_resilience')
+OUTPUT_TL_BY_FUNC    = os.path.join(OUTPUT_FUNC_VS_RESIL, 'line_component_timeline_by_func')
+OUTPUT_RC_BY_FUNC    = os.path.join(OUTPUT_FUNC_VS_RESIL, 'line_component_resilience_curves_by_func')
+OUTPUT_TEMP_VS_RESIL = os.path.join(OUTPUT_RESIL, 'temporal_vs_resilience')
 
 # ── Per-component feature columns used by the correlation blocks ──────────────
 
@@ -212,22 +233,22 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
     normal columns and n_dis the disaster start, so [n_nor, n_dis) is the
     buffer.  Interactive OD arc maps are available below (commented) — pass
     gdf, H and mapping, then uncomment to enable."""
-    os.makedirs(OUTPUT_CHAR, exist_ok=True)
+    os.makedirs(OUTPUT_TEMPORAL, exist_ok=True)
     vis_heatmap_temporal_signature(
         W, first_day=first_day_normal, show_days=True,
         slots_per_day=SLOTS_ACTIVE, interval_hours=_INTERVAL_HOURS,
-        output_dir=OUTPUT_CHAR, tag=tag,
+        output_dir=OUTPUT_TEMPORAL, tag=tag,
     )
     vis_line_nmf_component_timeline(
         W[:n_nor], W[n_dis:], W_buffer=W[n_nor:n_dis],
         first_day_normal=first_day_normal, first_day_disaster=first_day_disaster,
         slots_per_day=SLOTS_ACTIVE,
-        output_dir=OUTPUT_CHAR, tag=tag,
+        output_dir=OUTPUT_TEMPORAL, tag=tag,
     )
 
     # Interactive HTML arc maps, one file per spatial component.  The
     # centroid column from load_city_geo is already EPSG:4326.
-    out_dir = os.path.join(OUTPUT_CHAR,
+    out_dir = os.path.join(OUTPUT_SPATIAL,
                            f'component_spatial_characteristics{tag}')  # = OUTPUT_NMF_BR/_FM
     os.makedirs(out_dir, exist_ok=True)
     gdf['lon'] = gdf['centroid'].x
@@ -244,10 +265,10 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
 def analysis_od_function(label, key, tag, gdf, H, mapping, weights):
     """O×D functionality block.  Ensures the raw SLD cache,
     classifies block groups on the fly, aggregates each component's OD flows
-    into an origin×destination functional cross-tab, and saves the CSV and
-    the heatmap grid.  Returns M [k × C × C]."""
+    into an origin×destination functional cross-tab, and saves the heatmap
+    grid plus a per-component functional-share CSV.  Returns M [k × C × C]."""
     os.makedirs(SPACE_FUNCTION_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_ODFUNC, exist_ok=True)
+    os.makedirs(OUTPUT_FUNC, exist_ok=True)
     raw_csv = os.path.join(SPACE_FUNCTION_DIR, f'{key}_block_group_sld_raw.csv')
     assert ensure_city_landuse_raw(label, gdf['aggr_id'].tolist(), raw_csv) is not None
     landuse = load_city_landuse(
@@ -264,12 +285,14 @@ def analysis_od_function(label, key, tag, gdf, H, mapping, weights):
     M, retained = build_od_function_matrix(H, mapping, cat_lookup, AXIS_CATEGORIES)
     print(f"  {label}: O×D flow retained in-category per component: "
           + ", ".join(f"[{i}]={r:.2f}" for i, r in enumerate(retained)))
-    od_function_to_dataframe(M, AXIS_CATEGORIES, weights).to_csv(
-        os.path.join(OUTPUT_ODFUNC, f'od_functionality{tag}.csv'), index=False)
     vis_heatmap_od_function(
         M, AXIS_CATEGORIES, weights=weights, ncols=3,
-        save_path=os.path.join(OUTPUT_ODFUNC, f'heatmap_od_functionality{tag}.png'),
+        save_path=os.path.join(OUTPUT_FUNC, f'heatmap_od_functionality{tag}.png'),
     )
+    # Per-component functional dimensions — the 12 from/to shares, one row per
+    # component (index), for inspecting the raw values behind the heatmap.
+    functional_features(M, AXIS_CATEGORIES).to_csv(
+        os.path.join(OUTPUT_FUNC, f'component_functionality{tag}.csv'))
     return M
 
 
@@ -277,64 +300,98 @@ def analysis_time_function_corr(feats, tag):
     """Time × function correlation block.  Computes Spearman between TIME_COLS
     and FUNC_COLS across one city's components, then plots the heatmap, the
     top-pair scatter, and the categorical peak-slot bar chart."""
-    os.makedirs(OUTPUT_CORR, exist_ok=True)
+    os.makedirs(OUTPUT_FUNC_VS_TEMP, exist_ok=True)
     rho, pval = time_function_correlation(feats, TIME_COLS, FUNC_COLS)
     # Split-cell heatmap, same style as the resilience block.  No single-cell
     # time columns here (weekday_ratio is the row).
     vis_heatmap_corr_split(
         rho, pval, time_cols=[], categories=SF_CATEGORIES,
-        save_path=os.path.join(OUTPUT_CORR, f'heatmap_time_function_corr{tag}.png'),
+        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'heatmap_time_function_corr{tag}.png'),
     )
     pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
     vis_scatter_component_features(
         feats, pairs,
-        save_path=os.path.join(OUTPUT_CORR, f'scatter_time_function_top_pairs{tag}.png'),
+        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'scatter_time_function_top_pairs{tag}.png'),
     )
     vis_bar_function_by_peakslot(
         feats, SF_CATEGORIES,
-        save_path=os.path.join(OUTPUT_CORR, f'bar_function_by_peakslot{tag}.png'),
+        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'bar_function_by_peakslot{tag}.png'),
     )
     vis_bar_function_by_peakslot(
         feats, SF_CATEGORIES,
         group_col='peak_period', label_col='peak_period_label',
-        save_path=os.path.join(OUTPUT_CORR, f'bar_function_by_peakperiod{tag}.png'),
+        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'bar_function_by_peakperiod{tag}.png'),
     )
 
 
-def analysis_resilience_corr(feats, curves, tag):
-    """Resilience correlation block with its own output folder.  Plots the
-    per-component drop-and-recovery curves, the Spearman heatmap between
-    RES_COLS and the temporal and functional features, the top-pair scatter,
-    and the categorical peak-slot bar chart."""
-    os.makedirs(OUTPUT_RESIL, exist_ok=True)
-    vis_line_resilience_curves(
-        curves,
-        save_path=os.path.join(OUTPUT_RESIL, f'line_resilience_curves{tag}.png'),
-    )
-
+def analysis_resilience_corr(feats, tag):
+    """Resilience correlation block.  Splits its figures across two subfolders
+    of resilience_corr — func_vs_resilience gets the Spearman heatmap between
+    RES_COLS and the functional shares plus the top-pair scatter;
+    temporal_vs_resilience gets the weekday_ratio heatmap and the peak-slot /
+    peak-period bar charts.  The per-function curve stacks are drawn separately
+    by analysis_func_ordered_lines."""
+    os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
     rho, pval = time_function_correlation(feats, RES_COLS, TIME_COLS + FUNC_COLS)
-    # Split-cell heatmap.  Time columns are single cells, each category cell
-    # stacks share_from (upper) and share_to (lower), rows are coloured by
-    # their own max |rho|.
+    # Functional-share heatmap — the 6 category columns only, each cell stacking
+    # share_from (upper) and share_to (lower).  weekday_ratio is split off into
+    # its own heatmap below.  Rows are coloured by their own max |rho|.
     vis_heatmap_corr_split(
-        rho, pval, time_cols=TIME_COLS, categories=SF_CATEGORIES,
-        save_path=os.path.join(OUTPUT_RESIL, f'heatmap_resilience_corr{tag}.png'),
+        rho, pval, time_cols=[], categories=SF_CATEGORIES,
+        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL, f'heatmap_resilience_corr{tag}.png'),
     )
 
     pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
     vis_scatter_component_features(
         feats, pairs,
-        save_path=os.path.join(OUTPUT_RESIL, f'scatter_resilience_top_pairs{tag}.png'),
+        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL, f'scatter_resilience_top_pairs{tag}.png'),
+    )
+    os.makedirs(OUTPUT_TEMP_VS_RESIL, exist_ok=True)
+    # The weekday_ratio column of the same correlation, on its own as a single
+    # temporal feature against the resilience metrics.
+    vis_heatmap_corr_split(
+        rho, pval, time_cols=TIME_COLS, categories=[],
+        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL, f'heatmap_weekday_ratio_resilience{tag}.png'),
     )
     vis_bar_resilience_by_peakslot(
         feats, RES_COLS,
-        save_path=os.path.join(OUTPUT_RESIL, f'bar_resilience_by_peakslot{tag}.png'),
+        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL, f'bar_resilience_by_peakslot{tag}.png'),
     )
     vis_bar_resilience_by_peakslot(
         feats, RES_COLS,
         group_col='peak_period', label_col='peak_period_label',
-        save_path=os.path.join(OUTPUT_RESIL, f'bar_resilience_by_peakperiod{tag}.png'),
+        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL, f'bar_resilience_by_peakperiod{tag}.png'),
     )
+
+
+def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
+                                first_day_disaster, curves, feats, tag):
+    """Per-function component line stacks.  For each functional category, two
+    figures order the components top-to-bottom by descending combined
+    functional share (share_from + share_to), so the components most tied to
+    the function sit at the top (NaN share sorts to the bottom):
+      - line_component_timeline_by_func/      the full-window W timeline
+      - line_component_resilience_curves_by_func/  the disaster relative-
+        activity curves r(d)
+    Both use the same single-column stacked layout and label each row with its
+    true component index."""
+    os.makedirs(OUTPUT_TL_BY_FUNC, exist_ok=True)
+    os.makedirs(OUTPUT_RC_BY_FUNC, exist_ok=True)
+    for cat in SF_CATEGORIES:
+        combined = feats[f'share_from_{cat}'] + feats[f'share_to_{cat}']
+        order = combined.sort_values(ascending=False).index.tolist()
+        vis_line_nmf_component_timeline(
+            W[:n_nor], W[n_dis:], W_buffer=W[n_nor:n_dis],
+            first_day_normal=first_day_normal, first_day_disaster=first_day_disaster,
+            slots_per_day=SLOTS_ACTIVE, order=order,
+            output_dir=OUTPUT_TL_BY_FUNC, tag=f'_by_{cat}{tag}',
+        )
+        vis_line_resilience_curves(
+            curves, order=order,
+            save_path=os.path.join(
+                OUTPUT_RC_BY_FUNC,
+                f'line_component_resilience_curves_by_{cat}{tag}.png'),
+        )
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -414,7 +471,9 @@ def main():
         curves = resilience_curves(W, n_nor, fd_nor, SLOTS_ACTIVE, n_dis=n_dis)
 
         analysis_time_function_corr(feats, tag)
-        analysis_resilience_corr(feats, curves, tag)
+        analysis_resilience_corr(feats, tag)
+        analysis_func_ordered_lines(W, n_nor, n_dis, fd_nor, fd_dis,
+                                    curves, feats, tag)
 
 
 
