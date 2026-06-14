@@ -4,8 +4,6 @@ Matrix factorization (NMF) and tensor decomposition (Tucker) functions.
 NMF section
 -----------
   decompose_mobility_patterns            – standard NMF
-  decompose_mobility_patterns_with_init  – NMF with warm-start W/H
-  generate_W_init_by_weekday             – broadcasts a 7-day W to any length
   h_slice_to_od_matrix                   – converts a spatial component to OD DataFrame
 
 Tucker section
@@ -160,51 +158,6 @@ def normalize_nmf_components(W, H):
     H_n = H * col_norms[:, np.newaxis]              # broadcast over columns
     weights = col_norms * np.linalg.norm(H, axis=1)
     return W_n, H_n, weights
-
-
-def decompose_mobility_patterns_with_init(X, W_init, H_init, n_behaviors, l1_reg=0.0):
-    """
-    NMF with a warm-start W / H (uses 'custom' init).
-
-    l1_reg : float  same semantics as in decompose_mobility_patterns.
-    """
-    n_samples, n_features = X.shape
-    alpha_W = l1_reg / n_features if l1_reg > 0 else 0.0
-    alpha_H = l1_reg / n_samples  if l1_reg > 0 else 0.0
-
-    print(f"  NMF (disaster, warm-start): input shape {X.shape}, l1_reg={l1_reg}")
-    model = NMF(n_components=n_behaviors, init='custom', solver='cd',
-                random_state=42, max_iter=5000,
-                alpha_W=alpha_W, alpha_H=alpha_H, l1_ratio=1.0)
-    W = model.fit_transform(X, W=W_init, H=H_init)
-    print(f"  NMF (disaster): done, n_iter={model.n_iter_}, "
-          f"reconstruction_err={model.reconstruction_err_:.4f}")
-    return W, model.components_
-
-
-def generate_W_init_by_weekday(W_source, first_day_source, first_day_target,
-                                target_len, slots_per_day):
-    """
-    Broadcasts a 7-day temporal factor matrix (W_source, shape 7*slots × behaviors)
-    to a target length, preserving weekday alignment.
-
-    slots_per_day is required (no default) — pass SLOTS_ACTIVE from config so
-    the value stays correct when switching between 2h and 3h resolution.
-    """
-    expected = 7 * slots_per_day
-    assert W_source.shape[0] == expected, (
-        f"W_source must be exactly 7 days ({expected} rows), got {W_source.shape[0]}."
-    )
-    days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-    si   = days.index(first_day_source.capitalize())
-    day_patterns = {
-        (si + i) % 7: W_source[i * slots_per_day: (i + 1) * slots_per_day, :]
-        for i in range(7)
-    }
-    ti = days.index(first_day_target.capitalize())
-    n_days = int(np.ceil(target_len / slots_per_day))
-    W_init = np.vstack([day_patterns[(ti + d) % 7] for d in range(n_days)])
-    return W_init[:target_len, :]
 
 
 def h_slice_to_od_matrix(h_slice, spatial_mapping):

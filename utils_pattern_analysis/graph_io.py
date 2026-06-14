@@ -230,21 +230,6 @@ def filter_inactive_locations_2d(X, X_impact, edge_names, threshold=10):
     return np.array(rows_X), np.array(rows_Xi), filt_edges
 
 
-def calculate_segment_average_2d(matrix, segment_len):
-    """
-    Splits the time axis (axis 1) into segments and averages them.
-    Input:  (Flows, T)
-    Output: (Flows, segment_len)
-    """
-    F, T = matrix.shape
-    if T % segment_len != 0:
-        n = T // segment_len
-        matrix = matrix[:, :n * segment_len]
-        T = matrix.shape[1]
-    n_seg = T // segment_len
-    return np.mean(matrix.reshape(F, n_seg, segment_len), axis=1)
-
-
 # ── 3-D (Tucker) conversion ───────────────────────────────────────────────────
 
 def graphs_to_3d_tensor(graph_list):
