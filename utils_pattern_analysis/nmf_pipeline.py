@@ -39,7 +39,8 @@ from utils_pattern_analysis.graph_io import (
     print_matrix_diagnostics,
 )
 from utils_pattern_analysis.decomposition import (
-    decompose_mobility_patterns, normalize_nmf_components,
+    decompose_mobility_patterns, fit_nmf_basis_and_project,
+    normalize_nmf_components,
 )
 
 
@@ -93,7 +94,30 @@ def build_city_matrices(graphs, days_window, days_disaster_in_window,
     return X_all, n_nor, mapping
 
 
-def decompose_city(X_all, n_behaviors, l1_reg=0.0):
+def print_projection_diagnostics(X_full, W_raw, H_raw, fit_time_cols):
+    """
+    Reconstruction quality when the basis is fit on a subset and the full
+    window is projected onto it.  Reports relative error (‖residual‖/‖X‖) on the
+    full / fit / held-out rows, plus the count of near-zero-weight components (a
+    too-large-k symptom).  Same indented layout as print_matrix_diagnostics.
+    """
+    resid = X_full - W_raw @ H_raw
+    rel = lambda rows: (np.linalg.norm(resid[rows]) / np.linalg.norm(X_full[rows])
+                        if X_full[rows].any() else float('nan'))
+    n_time = X_full.shape[0]
+    held   = np.setdiff1d(np.arange(n_time), fit_time_cols)
+    comp_w = np.linalg.norm(W_raw, axis=0) * np.linalg.norm(H_raw, axis=1)
+    n_tiny = int((comp_w < 0.01 * comp_w.max()).sum()) if comp_w.max() > 0 else 0
+    held_rel = f"{rel(held):.4f}" if held.size else "n/a"
+    print("  Projection diagnostics :")
+    print(f"    Fit rows         : {fit_time_cols.size} / {n_time}")
+    print(f"    Rel. error full  : {rel(np.arange(n_time)):.4f}")
+    print(f"    Rel. error fit   : {rel(fit_time_cols):.4f}")
+    print(f"    Rel. error held  : {held_rel}  ({held.size} rows)")
+    print(f"    Near-zero comps  : {n_tiny} / {W_raw.shape[1]}")
+
+
+def decompose_city(X_all, n_behaviors, l1_reg=0.0, fit_time_cols=None):
     """
     Single NMF on the combined normal+disaster matrix.
 
@@ -104,9 +128,15 @@ def decompose_city(X_all, n_behaviors, l1_reg=0.0):
 
     Parameters
     ----------
-    X_all       : ndarray [n_OD × n_time]  (the matrix from build_city_matrices)
-    n_behaviors : int   number of NMF components
-    l1_reg      : float symmetric L1 penalty (paper's sparsity parameter q)
+    X_all         : ndarray [n_OD × n_time]  (the matrix from build_city_matrices)
+    n_behaviors   : int   number of NMF components
+    l1_reg        : float symmetric L1 penalty (paper's sparsity parameter q)
+    fit_time_cols : None | 1-D int array
+        None  -> fit AND project on the full window (the original behaviour,
+                 byte-identical to before).
+        array -> fit the basis H on those time columns of X_all only, then
+                 project the full window onto H, so W still spans every row.
+                 W/H shapes and downstream indices are unchanged either way.
 
     Returns
     -------
@@ -114,9 +144,17 @@ def decompose_city(X_all, n_behaviors, l1_reg=0.0):
     H       : ndarray [k × n_OD]     spatial factors carrying the magnitude
     weights : ndarray [k]            per-component importance
     """
-    W_raw, H_raw = decompose_mobility_patterns(
-        X_all.T, n_behaviors=n_behaviors, l1_reg=l1_reg,
-    )
+    if fit_time_cols is None:
+        W_raw, H_raw = decompose_mobility_patterns(
+            X_all.T, n_behaviors=n_behaviors, l1_reg=l1_reg,
+        )
+    else:
+        X_full = X_all.T                       # [n_time × n_OD]
+        W_raw, H_raw = fit_nmf_basis_and_project(
+            X_full[fit_time_cols, :], X_full,
+            n_behaviors=n_behaviors, l1_reg=l1_reg,
+        )
+        print_projection_diagnostics(X_full, W_raw, H_raw, fit_time_cols)
     W, H, weights = normalize_nmf_components(W_raw, H_raw)
     order = np.argsort(weights)[::-1]
     weight_str = ", ".join(f"[{i}]={weights[i]:.1f}" for i in order)

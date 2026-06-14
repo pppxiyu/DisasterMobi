@@ -24,6 +24,9 @@ notebook_drafts/
 # ── Generated artifacts (regenerated; not source) ─────────────────────────────
 tag_gru_tuning.db
 
+# ── Task / review scratch docs (not source) ───────────────────────────────────
+TASK.md
+
 # ── Editor / tooling / OS / misc auxiliary folders ────────────────────────────
 .claude/
 .vscode/

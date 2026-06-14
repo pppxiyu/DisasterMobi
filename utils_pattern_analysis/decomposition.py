@@ -46,6 +46,25 @@ from scipy import sparse
 
 # ── NMF ──────────────────────────────────────────────────────────────────────
 
+def select_segment_columns(segments, n_nor, n_dis, n_time):
+    """
+    Return the sorted unique time-column indices for the named segments.
+
+    Spans match the unified pipeline's window layout:
+        normal=[0, n_nor)   buffer=[n_nor, n_dis)   disaster=[n_dis, n_time)
+    Selecting all three yields np.arange(n_time).  Used to pick which time rows
+    fit the NMF basis when the decomposition window is sliced.
+    """
+    spans = {'normal': (0, n_nor), 'buffer': (n_nor, n_dis),
+             'disaster': (n_dis, n_time)}
+    bad = set(segments) - set(spans)
+    if bad:
+        raise ValueError(f"unknown segment(s) {sorted(bad)}; valid: {sorted(spans)}")
+    cols = (np.concatenate([np.arange(*spans[s]) for s in segments]) if segments
+            else np.empty(0, dtype=int))
+    return np.unique(cols.astype(int))
+
+
 def decompose_mobility_patterns(X, n_behaviors=5, l1_reg=0.0):
     """
     NMF: X ≈ W @ H  (X shape: n_time × n_flows)
@@ -71,6 +90,47 @@ def decompose_mobility_patterns(X, n_behaviors=5, l1_reg=0.0):
     print(f"NMF (normal):")
     print(f"    n_iter={model.n_iter_}, reconstruction_err={model.reconstruction_err_:.4f}")
     return W, model.components_
+
+
+def fit_nmf_basis_and_project(X_fit, X_full, n_behaviors=5, l1_reg=0.0):
+    """
+    Fit the NMF basis H on a SUBSET of time rows, then project the full window
+    onto that frozen basis.
+
+        X_fit  : [n_fit_time  × n_flows]   rows that DEFINE the components
+        X_full : [n_full_time × n_flows]   every row, projected onto the basis
+
+    transform() freezes H = components_ and re-solves only W with the same CD
+    solver / tol / max_iter (W starts from zeros, so it is deterministic).
+    alpha_W = l1_reg / n_features with n_features = n_flows is identical for the
+    fit subset and the full window, so the L1 pressure on W is unchanged across
+    the projection; the fit row count only affects alpha_H, which is unused once
+    H is frozen.  Same l1_reg → (alpha_W, alpha_H) convention as
+    decompose_mobility_patterns.
+
+    Returns (W_full, H) exactly like decompose_mobility_patterns.
+    """
+    n_samples, n_features = X_fit.shape
+    if n_behaviors > n_samples:          # nndsvd needs n_components <= n_samples
+        raise ValueError(
+            f"fit segment has {n_samples} time rows < n_components {n_behaviors}; "
+            f"widen NMF_FIT_SEGMENTS or lower n_behaviors."
+        )
+    alpha_W = l1_reg / n_features if l1_reg > 0 else 0.0
+    alpha_H = l1_reg / n_samples  if l1_reg > 0 else 0.0
+
+    print("NMF (fit then project):")
+    print(f"    fit shape {X_fit.shape}, project shape {X_full.shape}, "
+          f"n_components={n_behaviors}, l1_reg={l1_reg}")
+    model = NMF(n_components=n_behaviors, init='nndsvd', solver='cd',
+                random_state=42, max_iter=5000,
+                alpha_W=alpha_W, alpha_H=alpha_H, l1_ratio=1.0)
+    model.fit(X_fit)
+    W_full = model.transform(X_full)
+    print("NMF (fit then project):")
+    print(f"    fit n_iter={model.n_iter_}, "
+          f"fit reconstruction_err={model.reconstruction_err_:.4f}")
+    return W_full, model.components_
 
 
 def normalize_nmf_components(W, H):

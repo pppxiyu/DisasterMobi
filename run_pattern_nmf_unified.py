@@ -63,7 +63,9 @@ from config import (
 # Derived from config.  Never hardcode the interval here.
 _INTERVAL_HOURS = 24 // SLOT_PER_DAY   # 3 for 3h data and 2 for 2h data
 from utils_pattern_analysis.graph_io import load_graphs_trimmed
-from utils_pattern_analysis.decomposition import h_slice_to_od_matrix
+from utils_pattern_analysis.decomposition import (
+    h_slice_to_od_matrix, select_segment_columns,
+)
 from utils_pattern_analysis.nmf_pipeline import (
     build_city_matrices, decompose_city,
 )
@@ -106,6 +108,15 @@ N_BEHAVIORS_BR = 20
 N_BEHAVIORS_FM = 25
 L1_REG_BR      = 0.5
 L1_REG_FM      = 0.5
+
+# Which time segments FIT the NMF basis H.  The full window is ALWAYS projected
+# onto that basis, so W/H shapes and n_nor/n_dis are unchanged downstream.  All
+# three segments = the original single-fit pipeline (exact).  A smaller fit
+# segment has fewer time samples (normal=104, disaster=120, buffer=40, full=264
+# rows at 8 slots/day) — revisit N_BEHAVIORS (and possibly L1_REG) when slicing
+# and watch the near-zero-weight component count in the projection diagnostics.
+NMF_FIT_SEGMENTS_BR = ('normal', 'buffer', 'disaster')
+NMF_FIT_SEGMENTS_FM = ('normal', 'buffer')
 
 FILTER_FACTOR_BR = 3
 FILTER_FACTOR_FM = 1
@@ -430,11 +441,24 @@ def main():
     )
     n_dis_fm = n_nor_fm + DAYS_BUFFER_FM * SLOTS_ACTIVE
 
+    # All three segments selected -> fit_time_cols=None -> the exact original
+    # full-window fit_transform path.  A subset fits the basis on those columns
+    # only and projects the full window onto it.
+    _ALL_SEGMENTS = {'normal', 'buffer', 'disaster'}
+    fit_time_cols_br = (None if set(NMF_FIT_SEGMENTS_BR) == _ALL_SEGMENTS
+                        else select_segment_columns(NMF_FIT_SEGMENTS_BR,
+                                                    n_nor_br, n_dis_br, X_br_all.shape[1]))
+    fit_time_cols_fm = (None if set(NMF_FIT_SEGMENTS_FM) == _ALL_SEGMENTS
+                        else select_segment_columns(NMF_FIT_SEGMENTS_FM,
+                                                    n_nor_fm, n_dis_fm, X_fm_all.shape[1]))
+
     print("\n── NMF: Baton Rouge ──")
-    W_br, H_br, weights_br = decompose_city(X_br_all, N_BEHAVIORS_BR, l1_reg=L1_REG_BR)
+    W_br, H_br, weights_br = decompose_city(
+        X_br_all, N_BEHAVIORS_BR, l1_reg=L1_REG_BR, fit_time_cols=fit_time_cols_br)
 
     print("\n── NMF: Fort Myers ──")
-    W_fm, H_fm, weights_fm = decompose_city(X_fm_all, N_BEHAVIORS_FM, l1_reg=L1_REG_FM)
+    W_fm, H_fm, weights_fm = decompose_city(
+        X_fm_all, N_BEHAVIORS_FM, l1_reg=L1_REG_FM, fit_time_cols=fit_time_cols_fm)
 
     # ── Analysis ──────────────────────────
 
