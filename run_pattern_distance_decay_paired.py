@@ -8,16 +8,15 @@ Answer the question that single-NMF + Figure 7 cannot:
     "Does each NMF component's distance-decay α change from the normal
      period to the disaster period?"
 
-In the single-NMF framework of run_pattern_nmf_unified.py, every component's
+In the single-NMF framework of run_pattern_nmf.py, every component's
 α is structurally time-invariant (H[k, :] is shared across the whole window).
 To get a per-component, period-aware α we must let H itself vary by period,
 i.e. run TWO NMFs — one on each half — and compare the resulting H rows.
 
 Method
 ------
-1. Take the last DAYS_WINDOW_<city> days of the graph sequence (trailing window
-   convention as nmf_unified.py — NOT the 28-day / 14-day split that
-   run_pattern_nmf.py uses).
+1. Take the last DAYS_WINDOW_<city> days of the graph sequence (trailing
+   window convention — the last DAYS_WINDOW days).
 2. Split the window into normal (first half) + disaster (second half).
 3. Build two OD-aligned matrices (same row ordering, joint low-activity filter).
 4. NMF on the normal half and NMF on the disaster half — INDEPENDENTLY
@@ -35,20 +34,19 @@ Method
      - Slope graph (each component a line from α_normal to α_disaster)
      - CSV: full parameter table including Δα and match cosine.
 
-Methodology choices vs. run_pattern_nmf.py
-------------------------------------------
-When the two-stage approach conflicts with nmf_unified's conventions, we
-follow nmf_unified:
+Methodology alignment with run_pattern_nmf.py
+---------------------------------------------
+When the two-stage approach conflicts with run_pattern_nmf.py's conventions, we
+follow run_pattern_nmf.py:
 
   - Trailing window (both cities 22d = 7 normal + 15 disaster), not the 28+14 split
   - No segment-averaging of the normal period
   - Per-city FIRST_DAY_* (Baton Rouge = Sunday; Fort Myers = Wednesday)
-  - Same FILTER_FACTOR / L1_REG / N_BEHAVIORS as nmf_unified
+  - Same FILTER_FACTOR / L1_REG / N_BEHAVIORS as run_pattern_nmf.py
 
-Unlike run_pattern_nmf.py (which warm-starts the disaster NMF to keep the
-temporal factor aligned for cross-period *temporal* matching), this script
-matches on the *spatial* factor H — so it must decompose each period
-independently and align components post-hoc.
+This script matches components on the *spatial* factor H (not the temporal
+factor), so it decomposes each period independently and aligns components
+post-hoc.
 
 Run
 ---
@@ -97,7 +95,7 @@ except ImportError as e:
     ) from e
 
 
-# ── Configuration (mirror nmf_unified where applicable) ─────────────────────
+# ── Configuration (mirror run_pattern_nmf.py where applicable) ──────────────
 
 # Trailing window — now MATCHED across cities: both use 22d (7 normal + 15
 # disaster = landfall day + 14 recovery days).  BR's data was extended through
@@ -386,7 +384,7 @@ def main():
         # window end (Aug 30 – Oct 12 2022 = Ian + 2 weeks recovery; see config).
         fm_graphs = fm_graphs[:FM_ANALYSIS_DAYS * SLOT_PER_DAY]
 
-    # Same sanity-check as nmf_unified.
+    # Same sanity-check as run_pattern_nmf.py.
     expected_interval = f'{_INTERVAL_HOURS}h'
     for city, gs in [('Baton Rouge', br_graphs), ('Fort Myers', fm_graphs)]:
         n = len(gs)

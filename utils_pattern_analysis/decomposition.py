@@ -48,7 +48,7 @@ def select_segment_columns(segments, n_nor, n_dis, n_time):
     """
     Return the sorted unique time-column indices for the named segments.
 
-    Spans match the unified pipeline's window layout:
+    Spans match the NMF pipeline's window layout:
         normal=[0, n_nor)   buffer=[n_nor, n_dis)   disaster=[n_dis, n_time)
     Selecting all three yields np.arange(n_time).  Used to pick which time rows
     fit the NMF basis when the decomposition window is sliced.

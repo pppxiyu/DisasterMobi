@@ -735,7 +735,7 @@ def vis_line_nmf_component_timeline(
 # ── Distance decay (Figure 7 style) ─────────────────────────────────────────
 #
 # Pure plotting helper for per-component distance-decay fits.  The truncated
-# power-law fitting itself happens upstream (see run_pattern_nmf_unified.py's
+# power-law fitting itself happens upstream (see run_pattern_nmf.py's
 # add-on block) and the result is passed in.  No `powerlaw` import is needed
 # here — `fits[i]['_fit']` carries the powerlaw.Fit object whose `.plot_pdf`
 # method we call.

@@ -1,5 +1,5 @@
 """
-NMF decomposition of mobility patterns — UNIFIED (paper-style) approach.
+NMF decomposition of mobility patterns (paper-style, single factorization).
 
 Cities: #1 = Baton Rouge (Hurricane Ida, 2021), #2 = Fort Myers (Hurricane Ian, 2022).
 
@@ -28,7 +28,7 @@ Pipeline
    flatten to one flow matrix per city.
 3. Optionally drop low-activity OD pairs (threshold ∝ FILTER_FACTOR; 0 = keep all).
 4. Run one NMF per city → temporal factor W, spatial factor H.
-5. Save to outputs/nmf_unified/:
+5. Save to outputs/nmf/:
      - component_characteristics/  per-component characteristics, by type:
          temporal/          signature heatmap + timeline (temporal factor W)
          spatial/           per-component OD arc maps (H), per-city subfolders
@@ -48,7 +48,7 @@ geo CSV is absent.
 
 Run
 ---
-    python run_pattern_nmf_unified.py
+    python run_pattern_nmf.py
 """
 import os
 
@@ -133,7 +133,7 @@ FIRST_DAY_BR_DISASTER = 'Sunday'      # First day of BR's disaster portion (Aug 
 FIRST_DAY_FM_NORMAL   = 'Saturday'    # Sep 10 2022 (normal-segment start)
 FIRST_DAY_FM_DISASTER = 'Wednesday'   # Sep 28 2022 (disaster start, Ian landfall)
 
-OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf_unified')
+OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf')
 
 # All per-component characteristics live under component_characteristics, one
 # subfolder per characteristic type.

@@ -71,7 +71,7 @@ def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours,
 
     Parameters
     ----------
-    W              : ndarray [time × k]  temporal factors (unified NMF)
+    W              : ndarray [time × k]  temporal factors (NMF)
     n_nor          : int    end of the clean normal columns; only W[:n_nor]
                      is used (normal-period rhythm)
     first_day      : str    weekday of the first window day (e.g. 'Monday')

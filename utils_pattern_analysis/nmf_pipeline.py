@@ -1,7 +1,7 @@
 """
 Shared building blocks for the single-NMF (paper-style) decomposition pipeline.
 
-Both run_pattern_nmf_unified.py and run_pattern_distance_decay.py rely on
+Both run_pattern_nmf.py and run_pattern_distance_decay_paired.py rely on
 exactly the same matrix construction and NMF call, so the two helpers below
 live here instead of being duplicated in each run script.
 
@@ -177,11 +177,10 @@ def build_paired_matrices(graphs, days_window, days_disaster, filter_factor):
         X_disaster : last   days_disaster days
 
     Both matrices share the SAME OD-pair row ordering because the low-activity
-    filter is applied jointly on the full window before splitting.  Compared
-    to run_pattern_nmf.py's build_city_matrices, this routine follows
-    nmf_unified's "last-N-days trailing window" convention rather than
-    "first 28 days normal + last 14 days disaster"; it also skips the
-    weekly segment-averaging since normal here is exactly 7 days.
+    filter is applied jointly on the full window before splitting.  This
+    routine follows the last-N-days trailing window convention (not a fixed
+    28-day-normal + 14-day-disaster split); it also skips the weekly
+    segment-averaging since normal here is exactly 7 days.
 
     Returns
     -------
