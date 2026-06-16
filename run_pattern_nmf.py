@@ -88,6 +88,14 @@ from utils_data_processing.fetch_sld_landuse import (
     ensure_city_landuse_raw, load_city_landuse, CATEGORIES as SF_CATEGORIES,
 )
 
+import matplotlib as mpl
+mpl.rcParams.update({
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+    'pdf.fonttype': 42,        # editable TrueType text in PDF exports
+    'svg.fonttype': 'none',    # editable text in SVG exports
+})
+
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -115,7 +123,7 @@ L1_REG_FM      = 0.5
 # segment has fewer time samples (normal=104, disaster=120, buffer=40, full=264
 # rows at 8 slots/day) — revisit N_BEHAVIORS (and possibly L1_REG) when slicing
 # and watch the near-zero-weight component count in the projection diagnostics.
-NMF_FIT_SEGMENTS_BR = ('normal', 'buffer', 'disaster')
+NMF_FIT_SEGMENTS_BR = ('normal', 'buffer')
 NMF_FIT_SEGMENTS_FM = ('normal', 'buffer')
 
 FILTER_FACTOR_BR = 3
@@ -257,20 +265,20 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
         output_dir=OUTPUT_TEMPORAL, tag=tag,
     )
 
-    # Interactive HTML arc maps, one file per spatial component.  The
-    # centroid column from load_city_geo is already EPSG:4326.
-    out_dir = os.path.join(OUTPUT_SPATIAL,
-                           f'component_spatial_characteristics{tag}')  # = OUTPUT_NMF_BR/_FM
-    os.makedirs(out_dir, exist_ok=True)
-    gdf['lon'] = gdf['centroid'].x
-    gdf['lat'] = gdf['centroid'].y
-    for i in range(H.shape[0]):
-        vis_map_od_flow(
-            [h_slice_to_od_matrix(H[i: i+1, :], mapping)],
-            gdfs=gdf, id_col='aggr_id', min_flow=0.5,
-            max_line_width=20, alpha_range=(0.05, 0.95), curve_rad=0.3, vmax=5,
-            save_dir=os.path.join(out_dir, f'component_{i}.html'),
-        )
+    # # Interactive HTML arc maps, one file per spatial component.  The
+    # # centroid column from load_city_geo is already EPSG:4326.
+    # out_dir = os.path.join(OUTPUT_SPATIAL,
+    #                        f'component_spatial_characteristics{tag}')  # = OUTPUT_NMF_BR/_FM
+    # os.makedirs(out_dir, exist_ok=True)
+    # gdf['lon'] = gdf['centroid'].x
+    # gdf['lat'] = gdf['centroid'].y
+    # for i in range(H.shape[0]):
+    #     vis_map_od_flow(
+    #         [h_slice_to_od_matrix(H[i: i+1, :], mapping)],
+    #         gdfs=gdf, id_col='aggr_id', min_flow=0.5,
+    #         max_line_width=20, alpha_range=(0.05, 0.95), curve_rad=0.3, vmax=5,
+    #         save_dir=os.path.join(out_dir, f'component_{i}.html'),
+    #     )
 
 
 def analysis_od_function(label, key, tag, gdf, H, mapping, weights):
