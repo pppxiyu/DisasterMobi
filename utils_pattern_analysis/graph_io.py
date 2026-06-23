@@ -4,6 +4,7 @@ suitable for NMF and Tucker decomposition.
 """
 import pickle
 import numpy as np
+import pandas as pd
 
 
 # ── Loading ───────────────────────────────────────────────────────────────────
@@ -291,3 +292,37 @@ def calculate_segment_average(tensor, segment_len):
         T = tensor.shape[2]
     n_seg = T // segment_len
     return np.mean(tensor.reshape(I, J, n_seg, segment_len), axis=2)
+
+
+# ── Geometry ──────────────────────────────────────────────────────────────────
+
+def build_distance_array(mapping, gdf, id_col='aggr_id'):
+    """
+    OD-pair centroid distances (km) aligned to the NMF mapping / H-column order.
+
+    Centroids are taken in EPSG:3857 (Web Mercator); the distance is the
+    straight-line centroid separation / 1000.  Web Mercator inflates absolute
+    distance with latitude, but the factor is ~constant within one city, so
+    cross-flow / cross-component comparisons are unaffected.  Shared by the
+    distance-decay and the NMF spatial-feature analyses so both use one definition.
+    """
+    proj   = gdf.to_crs(epsg=3857)
+    cents  = proj.geometry.centroid
+    coords = pd.DataFrame({
+        'cx': cents.x.values,
+        'cy': cents.y.values,
+    }, index=gdf[id_col].astype(str).values)
+
+    origins = np.array([o for o, _ in mapping])
+    dests   = np.array([d for _, d in mapping])
+    missing = (~pd.Index(origins).isin(coords.index)) | \
+              (~pd.Index(dests).isin(coords.index))
+    if missing.any():
+        raise KeyError(
+            f"{int(missing.sum())} OD pairs reference aggr_id values not "
+            f"found in the geo-dataframe."
+        )
+
+    co = coords.loc[origins][['cx', 'cy']].to_numpy()
+    cd = coords.loc[dests  ][['cx', 'cy']].to_numpy()
+    return np.linalg.norm(co - cd, axis=1) / 1000.0

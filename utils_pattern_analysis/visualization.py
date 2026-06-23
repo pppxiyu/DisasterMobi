@@ -981,7 +981,107 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     return fig
 
 
+def vis_hist_function_entropy(entropy_df, lambda_ctx=None, max_entropy=None,
+                              title=None, save_path=None, nbins=12):
+    """
+    Distribution, ACROSS components, of per-component functional entropy — two
+    overlaid histograms: OUTFLOW (entropy_from) and INFLOW (entropy_to).  Each
+    component contributes one outflow value and one inflow value
+    (component_function_entropy, computed from the functionality-heatmap M); the
+    spread of those values over the components is the plotted distribution.
+
+    LOWER entropy = the component's flow is concentrated on fewer functions (more
+    functionally specialised); HIGHER = spread across many.  A dashed line marks
+    each side's mean, a rug shows the individual components, and (if max_entropy
+    = ln K is given) a grey dotted line marks the theoretical maximum.
+
+    lambda_ctx (context-aware strength) is shown in the title; the caller encodes
+    it in save_path so runs at different strengths can be compared.
+
+    Returns the Matplotlib Figure.
+    """
+    out_ = np.asarray(entropy_df['entropy_from'].dropna(), dtype=float)
+    in_  = np.asarray(entropy_df['entropy_to'].dropna(),   dtype=float)
+    allv = (np.concatenate([out_, in_]) if (out_.size + in_.size)
+            else np.array([0.0, 1.0]))
+    bins = (np.linspace(allv.min(), allv.max(), nbins + 1)
+            if np.ptp(allv) > 0 else nbins)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for vals, color, lbl in ((out_, '#D32F2F', 'outflow (from origin)'),
+                             (in_,  '#1976D2', 'inflow (to destination)')):
+        if vals.size == 0:
+            continue
+        ax.hist(vals, bins=bins, color=color, alpha=0.45, edgecolor='white',
+                linewidth=0.6,
+                label=f'{lbl}   mean={vals.mean():.2f}, n={vals.size}')
+        sns.rugplot(x=vals, ax=ax, color=color, height=0.06, alpha=0.8, lw=1.4)
+        ax.axvline(vals.mean(), color=color, linestyle='--', linewidth=1.6)
+
+    if max_entropy is not None:
+        ax.axvline(max_entropy, color='grey', linestyle=':', linewidth=1.4)
+        ax.text(max_entropy, ax.get_ylim()[1] * 0.98,
+                f'  max = ln K = {max_entropy:.2f}', color='grey', fontsize=9,
+                va='top', ha='left', rotation=90)
+
+    ttl = title or 'Functional entropy distribution'
+    if lambda_ctx is not None:
+        ttl += f'  (context-aware λ = {lambda_ctx:g})'
+    ax.set_title(ttl, fontsize=14)
+    ax.set_xlabel('Shannon entropy of functional distribution (nats) '
+                  '— lower = more concentrated', fontsize=11)
+    ax.set_ylabel('number of components', fontsize=11)
+    ax.legend(fontsize=10, frameon=False)
+    ax.margins(x=0.02)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
 # ── Feature correlation heatmap (split from/to cells) ─────────────────────────
+
+
+def vis_bar_component_distance(spatial_df, weights=None, title=None,
+                               save_path=None):
+    """
+    Per-component loading-weighted flow distance: one horizontal bar per
+    component (bar = mean distance, whisker = ±1 weighted SD of the component's
+    flow distances), sorted shortest→longest.  If weights are given, bars are
+    coloured by component importance so you can see whether long- or short-range
+    components carry the weight.  Components with NaN distance (zero loading mass)
+    are dropped.
+    """
+    df = spatial_df.dropna(subset=['mean_distance']).copy()
+    df = df.loc[df['mean_distance'].sort_values().index]      # shortest at bottom
+    n = len(df)
+    ypos = np.arange(n)
+    fig, ax = plt.subplots(figsize=(8, max(3.0, 0.34 * n + 1.6)))
+    ekw = dict(ecolor='grey', lw=1, alpha=0.6)
+    if weights is not None and n:
+        w = np.asarray(weights, dtype=float)[df.index.to_numpy()]
+        norm = mcolors.Normalize(vmin=float(np.nanmin(w)), vmax=float(np.nanmax(w)))
+        ax.barh(ypos, df['mean_distance'], xerr=df['std_distance'],
+                color=cm.viridis(norm(w)), error_kw=ekw)
+        sm = cm.ScalarMappable(norm=norm, cmap='viridis'); sm.set_array([])
+        fig.colorbar(sm, ax=ax, pad=0.02).set_label('component weight', fontsize=10)
+    else:
+        ax.barh(ypos, df['mean_distance'], xerr=df['std_distance'],
+                color='#1976D2', error_kw=ekw)
+    ax.set_yticks(ypos)
+    ax.set_yticklabels([f'comp {i}' for i in df.index], fontsize=9)
+    ax.set_xlabel('loading-weighted flow distance (km)   '
+                  '[bar = mean, whisker = ±1 weighted SD]', fontsize=10)
+    ax.set_title(title or 'Per-component flow distance', fontsize=13)
+    ax.margins(y=0.01)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
 
 
 def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
@@ -1082,6 +1182,157 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
     ax.text(1.0, 1.01, 'Upper = Outflow,  Lower = Inflow',
             transform=ax.transAxes, ha='right', va='bottom', fontsize=16,
             color='dimgrey')
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_heatmap_corr_merged(mat, pval=None, categories=None, save_path=None,
+                            cmap='RdBu_r', annot_fs=17, caption=None):
+    """
+    Row-scaled heatmap with ONE value per cell — the MERGED-cell sibling of
+    vis_heatmap_corr_split.  Use it when each function's outflow and inflow are
+    combined into a single feature (so there is no upper/lower from/to split):
+    every (metric, function) pair is one solid cell.
+
+    Rows are any metric set (mat.index = y-labels), columns are the merged
+    features (mat.columns, labelled by `categories` if given).  Each row is
+    coloured by its own max |value| so colours compare WITHIN a row while the
+    printed numbers compare everywhere — same convention as the split version.
+    Pass `pval` (same shape as mat) for significance stars, or None for a plain
+    coefficient heatmap.
+    """
+    rows   = list(mat.index)
+    labels = list(categories) if categories is not None else list(mat.columns)
+    n_r, n_c = len(rows), mat.shape[1]
+
+    V = mat.to_numpy(dtype=float)
+    scale = np.nanmax(np.abs(V), axis=1, keepdims=True)
+    scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
+    C = V / scale
+
+    fig, ax = plt.subplots(figsize=(2.0 * n_c + 2.4, 1.2 * n_r + 2.2),
+                           constrained_layout=True)
+    ax.imshow(C, cmap=cmap, vmin=-1, vmax=1, aspect='auto',
+              extent=[0, n_c, n_r, 0], interpolation='nearest')
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    for x in range(n_c + 1):
+        ax.axvline(x, color='white', lw=2)
+    for y in range(n_r + 1):
+        ax.axhline(y, color='white', lw=2)
+
+    def _stars(i, j):
+        if pval is None:
+            return ''
+        p = pval.iloc[i, j]
+        return '' if np.isnan(p) else ('**' if p < 0.01 else ('*' if p < 0.05 else ''))
+
+    for i in range(n_r):
+        for j in range(n_c):
+            v = V[i, j]
+            if np.isnan(v):
+                continue
+            ax.text(j + 0.5, i + 0.5, f'{v:.2f}{_stars(i, j)}',
+                    ha='center', va='center', fontsize=annot_fs,
+                    color='white' if abs(C[i, j]) > 0.6 else 'black')
+
+    ax.set_xticks(np.arange(n_c) + 0.5)
+    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=18)
+    ax.set_yticks(np.arange(n_r) + 0.5)
+    ax.set_yticklabels(rows, fontsize=18)
+    ax.tick_params(length=0)
+    if caption:
+        ax.text(1.0, 1.01, caption, transform=ax.transAxes, ha='right',
+                va='bottom', fontsize=14, color='dimgrey')
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
+                         save_path=None, ncols=3, r2_label='LOO R²'):
+    """
+    Regression diagnostic scatter for ONE city: one panel per resilience metric,
+    each plotting the ACTUAL value (y, ground truth) against the leave-one-out
+    PREDICTED value (x) — both on the model's ranked-standardized scale — one
+    point per component (labelled with its index).  The dashed y=x line is perfect
+    prediction; the panel title carries the LOO R² and PASS/FAIL.  An
+    'insufficient data' metric gets a blank panel.
+    """
+    import math
+    metrics = list(res_cols)
+    n = len(metrics)
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.6 * nrows),
+                             squeeze=False)
+    for idx, m in enumerate(metrics):
+        ax = axes[idx // ncols][idx % ncols]
+        pd_m = pred_data.get(m)
+        s = summary.loc[m]
+        if pd_m is None:
+            ax.text(0.5, 0.5, f'{m}\n(insufficient data)', ha='center',
+                    va='center', transform=ax.transAxes, fontsize=10, color='grey')
+            ax.set_xticks([]); ax.set_yticks([])
+            continue
+        y_true, y_pred, comp_idx = pd_m
+        # Prediction on x, ground truth on y (observed-vs-predicted calibration).
+        ax.scatter(y_pred, y_true, s=32, color='#1976D2', alpha=0.85,
+                   edgecolor='white', linewidth=0.5)
+        for xp, yt, ci in zip(y_pred, y_true, comp_idx):
+            ax.annotate(str(int(ci)), (xp, yt), fontsize=6, color='grey',
+                        xytext=(2, 2), textcoords='offset points')
+        lo = float(min(np.min(y_true), np.min(y_pred)))
+        hi = float(max(np.max(y_true), np.max(y_pred)))
+        ax.plot([lo, hi], [lo, hi], '--', color='grey', lw=1)      # y = x
+        tag = ('PASS' if s['passed'] else 'FAIL') if s['status'] == 'ok' else 'n/a'
+        ax.set_title(f"{m}\n{r2_label}={s['loo_r2']:+.2f} [{tag}]", fontsize=10)
+        ax.set_xlabel('predicted (std rank)', fontsize=8)
+        ax.set_ylabel('actual (std rank)', fontsize=8)
+        ax.tick_params(labelsize=7)
+    for idx in range(n, nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis('off')
+    if title:
+        fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_heatmap_cross_city_r2(r2_table, loo=None, title=None, save_path=None,
+                              vmax=0.6):
+    """
+    Cross-city test-R² heatmap: rows = resilience metrics, columns = TRAIN->TEST
+    directions.  If `loo` (within-city LOO R², rows = metrics, cols = cities) is
+    given, those columns are prepended for comparison (within-city vs cross-city).
+    Diverging colour centred at 0 (green = beats the mean, red = worse than the
+    mean), clipped to ±vmax; each cell annotated with the R² (n/a if undefined).
+    """
+    tab = pd.concat([loo, r2_table], axis=1) if loo is not None else r2_table.copy()
+    V = tab.to_numpy(dtype=float)
+    n_r, n_c = V.shape
+    fig, ax = plt.subplots(figsize=(1.7 * n_c + 3.0, 0.7 * n_r + 2.2))
+    im = ax.imshow(np.clip(V, -vmax, vmax), cmap='RdYlGn', vmin=-vmax, vmax=vmax,
+                   aspect='auto')
+    for i in range(n_r):
+        for j in range(n_c):
+            v = V[i, j]
+            ax.text(j, i, 'n/a' if np.isnan(v) else f'{v:+.2f}',
+                    ha='center', va='center', fontsize=11, color='black')
+    ax.set_xticks(range(n_c))
+    ax.set_xticklabels(list(tab.columns), rotation=30, ha='right', fontsize=10)
+    ax.set_yticks(range(n_r))
+    ax.set_yticklabels(list(tab.index), fontsize=11)
+    ax.set_title(title or 'Cross-city test R²', fontsize=13)
+    fig.colorbar(im, ax=ax, pad=0.02, shrink=0.8).set_label('R² (clipped)', fontsize=9)
+    fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150)

@@ -172,6 +172,137 @@ def h_slice_to_od_matrix(h_slice, spatial_mapping):
     return df_long.pivot(index='origin', columns='destination', values='flow').fillna(0)
 
 
+# ── Context-aware NMF (shared-factor, Chen et al. 2018) ──────────────────────
+
+def _init_wh_nndsvd(X, n_components, random_state=42):
+    """
+    nndsvd init for W, H, matching the sklearn NMF path used elsewhere; falls
+    back to a non-negative random init if sklearn's private initializer is
+    unavailable or rejects the shape.
+    """
+    try:
+        from sklearn.decomposition._nmf import _initialize_nmf
+        W, H = _initialize_nmf(X, n_components, init='nndsvd',
+                               random_state=random_state)
+        return np.asarray(W), np.asarray(H)
+    except Exception:
+        rng   = np.random.default_rng(random_state)
+        scale = np.sqrt(np.abs(X).mean() / max(n_components, 1)) if X.size else 1.0
+        W = np.abs(rng.standard_normal((X.shape[0], n_components))) * scale
+        H = np.abs(rng.standard_normal((n_components, X.shape[1]))) * scale
+        return W, H
+
+
+def nmf_context_multiplicative(X, Y, mask, n_components, lambda_ctx=0.1,
+                               l1_reg=0.0, max_iter=5000, tol=1e-6,
+                               random_state=42, eps=1e-9, verbose=False):
+    """
+    Context-aware NMF by non-negative multiplicative updates (shared-factor /
+    Chen et al. 2018, *A Context-Aware NMF Framework …*, IEEE MIPR 2018).
+
+        min_{W,H,G ≥ 0}  ½‖X − W H‖²_F
+                       + (λ/2) Σ_j m_j ‖Y[j,:] − H[:,j]ᵀ G‖²
+                       + q (Σ W + Σ H)
+
+    X    : [n_time × n_OD]   mobility matrix (this pipeline passes X_all.T)
+    Y    : [n_OD × C']       per-flow POI feature, built so ‖Y[j,:]‖ tracks the
+                             flow's volume (see space_function.build_flow_poi_feature)
+    mask : [n_OD] bool       flows carrying a POI constraint; m_j = 0 excludes a
+                             flow from the context term entirely (numerator AND
+                             denominator), so a missing-POI flow reduces to plain
+                             NMF rather than being shrunk toward zero.
+
+    The context term ties each flow's H-column (its k-dim embedding), through a
+    single GLOBAL map G [k × C'], to that flow's POI feature.  Because Y is built
+    to co-scale with H, G only has to fit the direction (which land-use type),
+    not the per-flow magnitude.
+
+    lambda_ctx : RELATIVE context weight.  The effective λ is auto-scaled by
+                 ‖X‖²_F / ‖Y‖²_F so the two reconstruction terms are comparable
+                 and lambda_ctx means the same thing across cities.
+    l1_reg     : symmetric L1 penalty q on W and H (same convention as
+                 decompose_mobility_patterns — q is added to the MU denominators).
+
+    Returns (W [n_time × k], H [k × n_OD], G [k × C'], errors).
+    """
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+    m = np.asarray(mask, dtype=float)                  # [n_OD]
+    n_od = X.shape[1]
+    Cp   = Y.shape[1]
+
+    # Auto-scale λ so ½‖X−WH‖² and (λ/2)‖Y−HᵀG‖² are comparable in magnitude.
+    xnorm2 = float(np.sum(X * X))
+    ynorm2 = float(np.sum((Y * m[:, None]) ** 2))
+    lam    = lambda_ctx * (xnorm2 / (ynorm2 + eps))
+
+    W, H = _init_wh_nndsvd(X, n_components, random_state=random_state)
+    rng  = np.random.default_rng(random_state)
+    G    = np.abs(rng.standard_normal((n_components, Cp))) * \
+           (np.sqrt(ynorm2 / max(n_od, 1)) / np.sqrt(max(n_components, 1)) + eps)
+
+    q       = l1_reg
+    errors  = []
+    prev    = None
+    for it in range(max_iter):
+        Hm = H * m[None, :]                             # mask flow-columns of H
+
+        # G update (context only):  G ← G ⊙ (Hm Y) / (Hm Hᵀ G)
+        G *= (Hm @ Y) / (Hm @ H.T @ G + eps)
+
+        # H update: reconstruction + masked context + L1
+        ctx_num = G @ Y.T                               # [k × n_OD]
+        ctx_den = (G @ G.T) @ Hm                        # [k × n_OD], masked
+        H *= (W.T @ X + lam * ctx_num) / \
+             ((W.T @ W) @ H + lam * ctx_den + q + eps)
+
+        # W update: reconstruction + L1 (context does not involve W)
+        W *= (X @ H.T) / (W @ (H @ H.T) + q + eps)
+
+        if it % 10 == 0 or it == max_iter - 1:
+            rec = 0.5 * np.sum((X - W @ H) ** 2)
+            ctx = 0.5 * lam * np.sum(m[:, None] * (Y - H.T @ G) ** 2)
+            obj = rec + ctx + q * (W.sum() + H.sum())
+            errors.append(obj)
+            if verbose:
+                print(f"    iter {it}: obj={obj:.4e} rec={rec:.4e} ctx={ctx:.4e}")
+            if prev is not None and abs(prev - obj) < tol * (prev + eps):
+                break
+            prev = obj
+    return W, H, G, errors
+
+
+def project_W_onto_H(X_full, H, l1_reg=0.0, max_iter=5000, tol=1e-6,
+                     random_state=42, eps=1e-9):
+    """
+    Re-solve W ≥ 0 minimising ½‖X_full − W H‖² + q·ΣW with H FROZEN — the
+    projection half of the fit-then-project path for the context-aware solver.
+
+    The context term lives only in the fit stage (it constrains H); projecting
+    the full window onto the frozen basis is a plain non-negative least squares
+    for W, mirroring sklearn's transform() role in fit_nmf_basis_and_project.
+    """
+    X_full = np.asarray(X_full, dtype=float)
+    H      = np.asarray(H, dtype=float)
+    k      = H.shape[0]
+    rng    = np.random.default_rng(random_state)
+    W      = np.abs(rng.standard_normal((X_full.shape[0], k))) * \
+             (np.sqrt(np.abs(X_full).mean() / max(k, 1)) + eps)
+
+    HHt = H @ H.T
+    XHt = X_full @ H.T
+    q   = l1_reg
+    prev = None
+    for it in range(max_iter):
+        W *= XHt / (W @ HHt + q + eps)
+        if it % 10 == 0 or it == max_iter - 1:
+            obj = 0.5 * np.sum((X_full - W @ H) ** 2) + q * W.sum()
+            if prev is not None and abs(prev - obj) < tol * (prev + eps):
+                break
+            prev = obj
+    return W
+
+
 # ── Tucker / HALS ─────────────────────────────────────────────────────────────
 
 def non_negative_tucker_hals(

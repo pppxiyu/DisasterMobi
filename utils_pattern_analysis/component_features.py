@@ -200,6 +200,85 @@ def functional_features(M, categories, drop=('Mix', 'Unknown')):
     return pd.DataFrame(rows, index=pd.RangeIndex(M.shape[0], name='component'))
 
 
+def component_function_entropy(M, categories=None, drop=(), base=np.e):
+    """
+    Per-component Shannon entropy of the OUTFLOW (origin) and INFLOW
+    (destination) functional distributions, computed from the SAME per-component
+    O×D matrix M that the functionality heatmap plots (each M[i] sums to 1).
+
+    For component i:
+        outflow distribution = row sums of M[i]    (share DEPARTING per origin function)
+        inflow  distribution = column sums of M[i]  (share ARRIVING per dest function)
+        entropy_from = H(outflow),  entropy_to = H(inflow)
+
+    H(p) = -Σ p_c ln p_c (nats; base=e). LOWER entropy = the component's flow is
+    concentrated on fewer functions (more specialised); HIGHER = spread across
+    many.  Both marginals sum to 1, so each H lies in [0, ln K] (K = #categories).
+
+    By DEFAULT all axis categories are kept, matching the heatmap (which includes
+    'Mix').  Pass drop=('Mix', 'Unknown') with `categories` to restrict to
+    substantive functions — then the marginals match functional_features'
+    share_from / share_to and H lies in [0, ln 6].
+
+    Returns DataFrame indexed by component with columns entropy_from, entropy_to;
+    a component whose kept mass is 0 gets NaN on both.
+    """
+    M = np.asarray(M, dtype=float)
+    if drop:
+        if categories is None:
+            raise ValueError("pass `categories` when `drop` is non-empty")
+        keep = [i for i, c in enumerate(categories) if c not in drop]
+        M = M[np.ix_(np.arange(M.shape[0]), keep, keep)]
+
+    log_base = np.log(base)
+
+    def _H(p):
+        s = p.sum()
+        if s <= 0:
+            return np.nan
+        p = p[p > 0] / s
+        return float(-np.sum(p * np.log(p)) / log_base)
+
+    rows = [(_H(M[i].sum(axis=1)), _H(M[i].sum(axis=0))) for i in range(M.shape[0])]
+    return pd.DataFrame(rows, columns=['entropy_from', 'entropy_to'],
+                        index=pd.RangeIndex(M.shape[0], name='component'))
+
+
+def spatial_features(H, distances):
+    """
+    Per-component SPATIAL features from the spatial factor H and a per-flow
+    distance array — structurally parallel to temporal_/functional_/
+    resilience_features (each takes an already-built factor/intermediate and
+    returns one row per component).
+
+    Each component is a flow map: H[i, :] are its non-negative loadings over the
+    OD flows, and distances[j] is flow j's origin->destination centroid distance
+    (km), aligned to H's columns (build via graph_io.build_distance_array).  The
+    loading-weighted summary describes how LONG-RANGE the component's flows are:
+
+        mean_distance[i] = Σ_j H[i,j]·d_j / Σ_j H[i,j]
+        std_distance[i]  = sqrt(Σ_j H[i,j]·(d_j − mean_i)² / Σ_j H[i,j])
+                           (spread of flow distances within the component)
+
+    A component whose loadings sum to <= 0 gets NaN.  Returns a DataFrame indexed
+    by component with columns mean_distance, std_distance.
+    """
+    H = np.asarray(H, dtype=float)
+    d = np.asarray(distances, dtype=float)
+    rows = []
+    for i in range(H.shape[0]):
+        w   = H[i]
+        tot = w.sum()
+        if tot <= 0:
+            rows.append((np.nan, np.nan))
+            continue
+        mean = float(np.sum(w * d) / tot)
+        var  = float(np.sum(w * (d - mean) ** 2) / tot)
+        rows.append((mean, float(np.sqrt(max(var, 0.0)))))
+    return pd.DataFrame(rows, columns=['mean_distance', 'std_distance'],
+                        index=pd.RangeIndex(H.shape[0], name='component'))
+
+
 def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
     """
     Per-component DISASTER-period daily activity relative to a weekday/weekend-

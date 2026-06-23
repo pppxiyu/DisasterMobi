@@ -40,8 +40,9 @@ from utils_pattern_analysis.graph_io import (
 )
 from utils_pattern_analysis.decomposition import (
     decompose_mobility_patterns, fit_nmf_basis_and_project,
-    normalize_nmf_components,
+    normalize_nmf_components, nmf_context_multiplicative, project_W_onto_H,
 )
+from utils_pattern_analysis.space_function import build_flow_poi_feature
 
 
 def build_city_matrices(graphs, days_window, days_disaster_in_window,
@@ -159,6 +160,71 @@ def decompose_city(X_all, n_behaviors, l1_reg=0.0, fit_time_cols=None):
     order = np.argsort(weights)[::-1]
     weight_str = ", ".join(f"[{i}]={weights[i]:.1f}" for i in order)
     print("Component weights (importance): ")
+    print(textwrap.fill(weight_str, width=100,
+                        initial_indent="    ", subsequent_indent="    "))
+    return W, H, weights
+
+
+def decompose_city_context(X_all, n_behaviors, mapping, landuse_df,
+                           lambda_ctx=0.1, feature_mode='outer', l1_reg=0.0,
+                           fit_time_cols=None):
+    """
+    Context-aware single NMF (shared-factor / Chen et al. 2018).
+
+    Same return contract as decompose_city, but the spatial factor H is
+    regularised toward a per-flow POI feature built from the endpoints' TF-IWF
+    land-use shares:
+
+        min  ½‖X − W H‖² + (λ/2) Σ_j m_j ‖Y[j,:] − H[:,j]ᵀ G‖² + q(ΣW + ΣH)
+
+    The spatial unit is the OD flow; each flow gets ONE feature combining its
+    origin and destination (feature_mode='outer' → C² joint O×D type, 'sum' →
+    C-dim).  Y co-scales with H's flow-carrying columns by construction (its row
+    norm = the flow's fit-segment volume), so the context aligns DIRECTION
+    (land-use type) without flattening flow magnitude — see
+    docs/technical_notes §3.2/§3.3 and build_flow_poi_feature.
+
+    The context term acts during the FIT of H.  When fit_time_cols is given, the
+    full window is then projected onto the frozen H with a plain non-negative
+    least squares for W (no context), exactly like the sklearn fit-then-project
+    path; n_nor / W / H shapes are unchanged downstream.
+
+    Returns
+    -------
+    W       : ndarray [n_time × k]   normalised temporal factors
+    H       : ndarray [k × n_OD]     spatial factors carrying the magnitude
+    weights : ndarray [k]            per-component importance
+    """
+    X_full = X_all.T                                    # [n_time × n_OD]
+    X_fit  = X_full if fit_time_cols is None else X_full[fit_time_cols, :]
+
+    # Flow volume over the FIT segment → makes ‖Y[j,:]‖ track ‖H[:,j]‖.
+    flow_scale = np.linalg.norm(X_fit, axis=0)          # [n_OD]
+    Y, labels, mask = build_flow_poi_feature(
+        mapping, landuse_df, flow_scale, mode=feature_mode,
+    )
+    print(f"  Context-aware NMF (shared-factor):")
+    print(f"    feature={feature_mode}, Y shape {Y.shape}, "
+          f"constrained flows {int(mask.sum())}/{len(mapping)}, "
+          f"lambda_ctx={lambda_ctx}")
+
+    W_fit_raw, H_raw, G, errors = nmf_context_multiplicative(
+        X_fit, Y, mask, n_components=n_behaviors,
+        lambda_ctx=lambda_ctx, l1_reg=l1_reg,
+    )
+    print(f"    fit iters≈{len(errors) * 10}, final obj={errors[-1]:.4e}, "
+          f"G range [{G.min():.3g}, {G.max():.3g}]")
+
+    if fit_time_cols is None:
+        W_raw = W_fit_raw
+    else:
+        W_raw = project_W_onto_H(X_full, H_raw, l1_reg=l1_reg)
+        print_projection_diagnostics(X_full, W_raw, H_raw, fit_time_cols)
+
+    W, H, weights = normalize_nmf_components(W_raw, H_raw)
+    order = np.argsort(weights)[::-1]
+    weight_str = ", ".join(f"[{i}]={weights[i]:.1f}" for i in order)
+    print("Component weights (importance, context-aware): ")
     print(textwrap.fill(weight_str, width=100,
                         initial_indent="    ", subsequent_indent="    "))
     return W, H, weights

@@ -91,6 +91,82 @@ def build_od_function_matrix(H, mapping, cat_lookup, categories):
     return M, retained
 
 
+def build_flow_poi_feature(mapping, landuse_df, flow_scale, mode='outer',
+                           id_col='aggr_id', categories=None):
+    """
+    Per-flow POI feature matrix Y for context-aware NMF (shared-factor /
+    Chen 2018).  The spatial unit is the OD flow itself, so each flow gets ONE
+    feature built jointly from its two endpoints.
+
+    Each OD flow j = (origin o, destination d) is described by its endpoints'
+    TF-IWF land-use SHARE vectors s_o, s_d (the `share_<cat>` columns of
+    landuse_df, each a C-vector summing to 1).  The two are combined into a
+    single direction, L2-normalised, then scaled by flow_scale[j] so that
+    ‖Y[j,:]‖ = flow_scale[j].
+
+    Pass flow_scale = ‖X_fit[:,j]‖ (the flow's volume over the NMF fit segment)
+    so the feature CO-SCALES with H's flow-carrying columns: a volume-free
+    share direction would otherwise fight the magnitude H carries (a single
+    global G cannot rescale per flow), see docs/technical_notes §3.2/§3.3.
+
+    mode
+        'outer' — vec(s_o ⊗ s_d), the C² joint origin×destination type
+                  (not separable into an origin term + a destination term;
+                  this is the "don't split the endpoints" feature)
+        'sum'   — s_o + s_d, the C-dim combined type (lower-dim, loses the
+                  joint structure and which-end information)
+
+    A flow is CONSTRAINED only if BOTH endpoints have a non-zero share vector
+    (present in landuse_df and not 'Unknown' — Unknown block groups have
+    all-zero shares).  Otherwise its Y row is all-zero and it is excluded from
+    the context term (mask = False), matching the O×D cross-tab convention of
+    dropping flows with an Unknown/missing endpoint.
+
+    Returns
+    -------
+    Y      : ndarray [n_OD × C']   C' = C² ('outer') or C ('sum')
+    labels : list[str]             feature column labels
+    mask   : ndarray [n_OD] bool   True where the flow carries a constraint
+    """
+    if categories is None:
+        share_cols = [c for c in landuse_df.columns if c.startswith('share_')]
+        categories = [c[len('share_'):] for c in share_cols]
+    else:
+        share_cols = [f'share_{c}' for c in categories]
+    C = len(categories)
+
+    shares = {str(i): np.asarray(v, dtype=float)
+              for i, v in zip(landuse_df[id_col].astype(str),
+                              landuse_df[share_cols].to_numpy(dtype=float))}
+
+    flow_scale = np.asarray(flow_scale, dtype=float)
+    n  = len(mapping)
+    Cp = C * C if mode == 'outer' else C
+    Y    = np.zeros((n, Cp))
+    mask = np.zeros(n, dtype=bool)
+
+    for j, (o, d) in enumerate(mapping):
+        s_o = shares.get(str(o))
+        s_d = shares.get(str(d))
+        if s_o is None or s_d is None or s_o.sum() <= 0 or s_d.sum() <= 0:
+            continue                                   # Unknown / missing endpoint
+        if mode == 'outer':
+            d_vec = np.outer(s_o, s_d).ravel()
+        elif mode == 'sum':
+            d_vec = s_o + s_d
+        else:
+            raise ValueError(f"mode must be 'outer' or 'sum', got '{mode}'")
+        nrm = np.linalg.norm(d_vec)
+        if nrm <= 0:
+            continue
+        Y[j]    = (d_vec / nrm) * flow_scale[j]         # ‖Y[j,:]‖ = flow_scale[j]
+        mask[j] = True
+
+    labels = ([f'{a}*{b}' for a in categories for b in categories]
+              if mode == 'outer' else list(categories))
+    return Y, labels, mask
+
+
 def od_function_to_dataframe(M, categories, weights=None):
     """
     Flatten [k × C × C] proportions into a tidy long-format DataFrame with
