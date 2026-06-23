@@ -21,8 +21,8 @@ Each NMF component becomes one observation with
                         (row/column sums, so diagonal same-function flow is
                         counted on both sides)
   resilience features (disaster-period daily activity relative to a weekday/
-  weekend-matched pre-disaster baseline):
-      drop_depth, lowest_day, recovery_level, cum_loss
+  weekend-matched pre-disaster baseline; every metric reads higher = worse):
+      drop_depth, early_collapse, recovery_day, recovery_deficit, cum_loss
 
 Correlation
 -----------
@@ -359,27 +359,32 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
                         recovery_threshold=0.9):
     """
     Quantify each component's disaster response from its (smoothed) relative
-    daily curve r_k(d) — the "drop and come back" pattern:
+    daily curve r_k(d) — the "drop and come back" pattern.  Every metric reads
+    HIGHER = WORSE (early_collapse and recovery_deficit invert the natural
+    argmin / recovery-level forms so the whole set shares that direction):
 
-      drop_depth     = 1 − min(r)        how deep it fell (0 none, 1 total
-                       stop; NEGATIVE = rose above baseline → emergent pattern)
-      lowest_day     = argmin(r)         days from landfall to the lowest point
-      recovery_day   = 1 + last day with r < recovery_threshold   days until r
-                       reaches the threshold AND STAYS there — any later dip
-                       below the threshold resets the clock, so oscillating
-                       recoveries are not credited early.  0 means never below
-                       the threshold (unhurt or emergent).  A value equal to
-                       the window length means NOT recovered within the window
-                       (right-censored, kept instead of NaN so the hardest-hit
-                       components stay in the rank correlation).
-      recovery_level = mean of the last 3 days of r   (≈1 recovered, <1 not,
-                       >1 overshoot)
-      cum_loss       = Σ_d max(0, 1 − r(d))   resilience-triangle area: total
-                       activity lost over the disaster window (day-equivalents;
-                       smaller = more resilient).  Above-baseline excess is NOT
-                       credited against losses.
+      drop_depth       = 1 − min(r)        how deep it fell (0 none, 1 total
+                         stop; NEGATIVE = rose above baseline → emergent pattern)
+      early_collapse   = (disaster days − 1) − argmin(r)   how soon it bottomed
+                         out: high = bottomed early (on/near landfall), 0 = on
+                         the final day
+      recovery_day     = 1 + last day with r < recovery_threshold   days until r
+                         reaches the threshold AND STAYS there — any later dip
+                         below the threshold resets the clock, so oscillating
+                         recoveries are not credited early.  0 means never below
+                         the threshold (unhurt or emergent).  A value equal to
+                         the window length means NOT recovered within the window
+                         (right-censored, kept instead of NaN so the hardest-hit
+                         components stay in the rank correlation).
+      recovery_deficit = 1 − mean of the last 3 days of r   shortfall still left
+                         at the window end (0 recovered, >0 not, <0 overshoot)
+      cum_loss         = Σ_d max(0, 1 − r(d))   resilience-triangle area: total
+                         activity lost over the disaster window (day-equivalents;
+                         smaller = more resilient).  Above-baseline excess is NOT
+                         credited against losses.
 
-    Returns DataFrame indexed by component with those five columns.
+    Returns DataFrame indexed by component with those five columns (the RES_COLS
+    used by the resilience correlation/regression blocks in run_pattern_nmf).
     """
     r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
                           smooth=smooth)
@@ -398,12 +403,14 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
     last_below = np.where(below.any(axis=0),
                           n_days - 1 - np.argmax(below[::-1], axis=0), -1)
 
+    # early_collapse and recovery_deficit invert argmin(r) / mean-tail(r) so every
+    # metric reads HIGHER = WORSE; n_days is the disaster-window length.
     feats = pd.DataFrame({
-        'drop_depth':     1.0 - np.nanmin(safe, axis=0),
-        'lowest_day':     np.nanargmin(safe, axis=0).astype(float),
-        'recovery_day':   (last_below + 1).astype(float),
-        'recovery_level': np.nanmean(safe[-3:], axis=0),
-        'cum_loss':       np.nansum(np.clip(1.0 - safe, 0, None), axis=0),
+        'drop_depth':       1.0 - np.nanmin(safe, axis=0),
+        'early_collapse':   (n_days - 1) - np.nanargmin(safe, axis=0).astype(float),
+        'recovery_day':     (last_below + 1).astype(float),
+        'recovery_deficit': 1.0 - np.nanmean(safe[-3:], axis=0),
+        'cum_loss':         np.nansum(np.clip(1.0 - safe, 0, None), axis=0),
     }, index=pd.RangeIndex(k, name='component'))
     feats.loc[all_nan, :] = np.nan
     return feats

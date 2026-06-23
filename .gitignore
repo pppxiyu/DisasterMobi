@@ -18,11 +18,18 @@ model_cache/
 # ── Data / outputs / docs / notebooks (large or auxiliary; not source) ────────
 data/
 outputs/
-docs/
+# Ignore docs/ EXCEPT the technical notes, which are tracked source.
+docs/*
+!docs/technical_notes/
 notebook_drafts/
 
 # ── Generated artifacts (regenerated; not source) ─────────────────────────────
 tag_gru_tuning.db
+
+# ── Optuna fine-tuning intermediate products (the tuner SCRIPT is kept) ───────
+optuna_*.db
+_tune_run*.log
+_verify_*.log
 
 # ── Task / review scratch docs (not source) ───────────────────────────────────
 TASK.md

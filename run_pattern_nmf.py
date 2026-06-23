@@ -18,7 +18,7 @@ Because both periods share one factorisation, the k components keep the same
 identity across the normal/disaster boundary.
 The boundary is used only to colour the W timeline, never inside the factorisation.
 
-Each city's graphs are trimmed so its disaster sits at the window end, 
+Each city's graphs are trimmed so its disaster sits at the window end,
 giving both cities a matched "landfall + 14-day recovery" window.
 
 Pipeline
@@ -60,9 +60,6 @@ from config import (
     BR_GEO_CSV, FM_GEO_CSV, AGG_LEVEL,
     DATA_DIR, OUTPUT_DIR, SLOT_PER_DAY, SLOTS_ACTIVE,
 )
-
-# Derived from config.  Never hardcode the interval here.
-_INTERVAL_HOURS = 24 // SLOT_PER_DAY   # 3 for 3h data and 2 for 2h data
 from utils_pattern_analysis.graph_io import load_graphs_trimmed, build_distance_array
 from utils_pattern_analysis.decomposition import (
     h_slice_to_od_matrix, select_segment_columns,
@@ -76,7 +73,7 @@ from utils_pattern_analysis.visualization import (
     vis_scatter_component_features,
     vis_bar_function_by_peakslot, vis_line_resilience_curves,
     vis_bar_resilience_by_peakslot, vis_heatmap_corr_split,
-    vis_hist_function_entropy, vis_heatmap_corr_merged,
+    vis_hist_function_entropy,
     vis_bar_component_distance, vis_scatter_reg_pred,
     vis_heatmap_cross_city_r2,
 )
@@ -107,6 +104,9 @@ mpl.rcParams.update({
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
+# Derived from config.  Never hardcode the interval here.
+_INTERVAL_HOURS = 24 // SLOT_PER_DAY   # 3 for 3h data and 2 for 2h data
+
 # Trailing window taken from the end of the graph sequence
 # (normal + buffer + disaster).  The 5-day pre-landfall buffer isolates
 # preparation and evacuation behaviour from the clean normal baseline
@@ -120,10 +120,10 @@ DAYS_WINDOW_FM          = 33   # 13 normal + 5 buffer + 15 disaster (Ian Sep 28 
 DAYS_BUFFER_FM          = 5    # Sep 23–27 (Ian prep and evacuation contamination)
 DAYS_DISASTER_IN_WIN_FM = 15
 
-N_BEHAVIORS_BR = 10
-N_BEHAVIORS_FM = 15
+N_BEHAVIORS_BR = 11
+N_BEHAVIORS_FM = 13
 L1_REG_BR      = 0.5
-L1_REG_FM      = 0.5
+L1_REG_FM      = 1.1
 
 # Context-aware NMF (shared-factor / Chen et al. 2018, IEEE MIPR).  When on, the
 # spatial factor H is regularised toward a per-flow POI feature built from the
@@ -132,7 +132,7 @@ L1_REG_FM      = 0.5
 # origin and destination.  False -> the exact sklearn baseline (H unchanged).
 # See docs/technical_notes §3.2/§3.3 for the formulation and the magnitude
 # (co-scaling) reasoning behind FLOW_FEATURE_MODE / LAMBDA_CTX.
-CONTEXT_AWARE_BR  = False     # Controls solver, even if lambada is 0, the solver chages if its on
+CONTEXT_AWARE_BR  = False     # Controls the solver: even when LAMBDA_CTX is 0 the solver still changes if this is on
 CONTEXT_AWARE_FM  = False
 LAMBDA_CTX_BR     = 0.1       # relative context weight (auto-scaled by ‖X‖²/‖Y‖²)
 LAMBDA_CTX_FM     = 0.1
@@ -147,8 +147,13 @@ FLOW_FEATURE_MODE = 'sum'    # 'outer' = C² joint O×D type, 'sum' = C-dim comb
 NMF_FIT_SEGMENTS_BR = ('normal', 'buffer')
 NMF_FIT_SEGMENTS_FM = ('normal', 'buffer')
 
-FILTER_FACTOR_BR = 3
-FILTER_FACTOR_FM = 1
+FILTER_FACTOR_BR = 1
+FILTER_FACTOR_FM = 2
+
+# Resilience regression: when True, each function's
+# outflow + inflow shares are merged into ONE feature 
+# when False the 12 directional shares are used as-is. 
+MERGE_FUNC_DIRECTIONS = True
 
 # Baton Rouge runs Apr 15 (Thu) → Sep 16 and is trimmed to Sep 12 (Ida + 14,
 # see BR_ANALYSIS_DAYS).  The last 33 days span Aug 11 (Wed) → Sep 12, with
@@ -191,7 +196,7 @@ SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')
 # reweighting, see utils_data_processing/fetch_sld_landuse.py).
 LANDUSE_WEIGHTING          = 'tf_iwf'   # 'tf_iwf' down-weights ubiquitous residential, 'raw_share' does not
 LANDUSE_IWF_SCALE          = 1.0        # IWF exponent.  Higher pulls labels toward rare functions
-LANDUSE_RESIDENTIAL_WEIGHT = 1.0        # Housing-unit to job equivalence.  Fix this
+LANDUSE_RESIDENTIAL_WEIGHT = 1.0        # Housing-unit to job equivalence; 1.0 treats one housing unit as one job
 LANDUSE_DOMINANT_THRESHOLD = 0.4        # Top-category share needed for a label, otherwise 'Mix'.
                                         # Lower gives fewer Mix
 
@@ -249,8 +254,8 @@ FUNC_COLS = ([f'share_from_{c}' for c in SF_CATEGORIES]
 # r(d) = the component's daily total on disaster day d divided by its
 # weekday/weekend-matched pre-disaster baseline, 3-day smoothed (see
 # component_features.resilience_features).  r = 1 means the normal level.
-# Every metric reads HIGHER = WORSE.  recovery_deficit and early_collapse are
-# script-level inversions of resilience_features' recovery_level / lowest_day.
+# Every metric reads HIGHER = WORSE; resilience_features returns all five
+# directly (early_collapse and recovery_deficit are inverted inside it).
 #   drop_depth       — 1 − min(r), how deep activity fell.  1 means a total
 #                      stop and negative means it rose above baseline
 #                      (a disaster-emergent pattern)
@@ -275,6 +280,30 @@ RES_COLS = ['drop_depth', 'early_collapse', 'recovery_day', 'recovery_deficit',
 
 # ── Analysis helpers (one per analysis block, called once per city) ──────────
 
+def _lambda_tag(lambda_ctx):
+    """Filename-safe context-strength tag, e.g. 'lambda0', 'lambda0.1', or
+    'baseline' when context-aware NMF is off (lambda_ctx is None)."""
+    return f"lambda{lambda_ctx:g}" if lambda_ctx is not None else "baseline"
+
+
+def load_landuse_for_context(label, key, gdf):
+    """Ensure the raw SLD cache and load the on-the-fly TF-IWF classification for
+    the context-aware NMF, using the same LANDUSE_RESIDENTIAL_WEIGHT /
+    LANDUSE_WEIGHTING / LANDUSE_IWF_SCALE / LANDUSE_DOMINANT_THRESHOLD knobs as the
+    O×D func block.  Returns the landuse DataFrame with `share_<cat>` columns
+    keyed by `aggr_id`."""
+    os.makedirs(SPACE_FUNCTION_DIR, exist_ok=True)
+    raw_csv = os.path.join(SPACE_FUNCTION_DIR, f'{key}_block_group_sld_raw.csv')
+    assert ensure_city_landuse_raw(label, gdf['aggr_id'].tolist(), raw_csv) is not None
+    return load_city_landuse(
+        raw_csv,
+        residential_weight=LANDUSE_RESIDENTIAL_WEIGHT,
+        weighting=LANDUSE_WEIGHTING,
+        iwf_scale=LANDUSE_IWF_SCALE,
+        dominant_threshold=LANDUSE_DOMINANT_THRESHOLD,
+    )
+
+
 def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
                                  first_day_disaster, tag,
                                  gdf=None, H=None, mapping=None):
@@ -297,6 +326,8 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
         output_dir=OUTPUT_TEMPORAL, tag=tag,
     )
 
+    # DISABLED arc-map path: the gdf/H/mapping params and the vis_map_od_flow /
+    # h_slice_to_od_matrix imports exist only for this commented block.
     # # Interactive HTML arc maps, one file per spatial component.  The
     # # centroid column from load_city_geo is already EPSG:4326.
     # out_dir = os.path.join(OUTPUT_SPATIAL,
@@ -315,27 +346,30 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
 
 def analysis_spatial(label, H, mapping, gdf, weights, tag, lambda_ctx=None):
     """Per-component SPATIAL characteristics block (structurally parallel to the
-    temporal / functional / resilience blocks).  Computes each component's
-    loading-weighted flow distance (km) from H and the OD centroid distances
+    O×D functional block).  Builds the OD centroid distance array
     (graph_io.build_distance_array — same definition the distance-decay analysis
-    uses), saves a per-component bar figure under component_characteristics/
-    spatial/ and the raw values as CSV.  NOT yet fed into the regression — this
-    is for inspecting the visualisation first.  lambda_ctx tags the filename
-    (H, hence the distances, shift with context strength)."""
+    uses), computes each component's loading-weighted flow distance (km) from H,
+    saves a per-component bar figure under component_characteristics/spatial/ and
+    the raw values as CSV.  lambda_ctx tags the filename (H, hence the distances,
+    shift with context strength).
+
+    Returns the OD centroid `distances` array — the reusable intermediate (the
+    spatial analogue of the func cross-tab M returned by analysis_od_function), so
+    the caller rebuilds the feature inline with spatial_features(H, distances)."""
     os.makedirs(OUTPUT_SPATIAL, exist_ok=True)
-    ltag = _lambda_tag(lambda_ctx)
+    lambda_tag = _lambda_tag(lambda_ctx)
     distances = build_distance_array(mapping, gdf)
-    sf = spatial_features(H, distances)
+    spatial_feats = spatial_features(H, distances)
     vis_bar_component_distance(
-        sf, weights=weights,
+        spatial_feats, weights=weights,
         title=f'{label}: per-component flow distance',
         save_path=os.path.join(OUTPUT_SPATIAL,
-                               f'component_distance_{ltag}{tag}.png'),
+                               f'component_distance_{lambda_tag}{tag}.png'),
     )
     os.makedirs(OUTPUT_SPATIAL_DIST_RAW, exist_ok=True)
-    sf.to_csv(os.path.join(OUTPUT_SPATIAL_DIST_RAW,
-                           f'spatial_features_{ltag}{tag}.csv'))
-    return sf
+    spatial_feats.to_csv(os.path.join(OUTPUT_SPATIAL_DIST_RAW,
+                                      f'spatial_features_{lambda_tag}{tag}.csv'))
+    return distances
 
 
 def analysis_od_function(label, key, tag, gdf, H, mapping, weights,
@@ -380,17 +414,17 @@ def analysis_od_function(label, key, tag, gdf, H, mapping, weights,
     # (column sums) of the SAME heatmap M (categories include 'Mix'); lower =
     # more functionally concentrated.  λ is in the filename for cross-strength
     # comparison.
-    ltag = _lambda_tag(lambda_ctx)
+    lambda_tag = _lambda_tag(lambda_ctx)
     ent = component_function_entropy(M)
     os.makedirs(OUTPUT_FUNC_ENT_RAW, exist_ok=True)
     ent.to_csv(os.path.join(OUTPUT_FUNC_ENT_RAW,
-                            f'component_function_entropy_{ltag}{tag}.csv'))
+                            f'component_function_entropy_{lambda_tag}{tag}.csv'))
     vis_hist_function_entropy(
         ent, lambda_ctx=lambda_ctx,
         max_entropy=float(np.log(len(AXIS_CATEGORIES))),
         title=f'{label}: functional entropy across components',
         save_path=os.path.join(OUTPUT_FUNC,
-                               f'hist_function_entropy_{ltag}{tag}.png'),
+                               f'hist_function_entropy_{lambda_tag}{tag}.png'),
     )
     return M
 
@@ -436,11 +470,11 @@ def analysis_resilience_corr(feats, tag, lambda_ctx=None):
     # Functional-share heatmap — the 6 category columns only, each cell stacking
     # share_from (upper) and share_to (lower).  weekday_ratio is split off into
     # its own heatmap below.  Rows are coloured by their own max |rho|.
-    ltag = _lambda_tag(lambda_ctx)
+    lambda_tag = _lambda_tag(lambda_ctx)
     vis_heatmap_corr_split(
         rho, pval, time_cols=[], categories=SF_CATEGORIES,
         save_path=os.path.join(OUTPUT_RESIL_CORR_HM,
-                               f'heatmap_resilience_corr_{ltag}{tag}.png'),
+                               f'heatmap_resilience_corr_{lambda_tag}{tag}.png'),
     )
 
     pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
@@ -466,33 +500,39 @@ def analysis_resilience_corr(feats, tag, lambda_ctx=None):
     )
 
 
-def analysis_resilience_linear(feats, tag, lambda_ctx=None):
-    """Multivariate Ridge counterpart to analysis_resilience_corr (ADDED
-    ALONGSIDE; the Spearman block is unchanged, only relocated to its own
-    subfolder).  Each function's OUTFLOW and INFLOW shares are MERGED into one
-    feature (func_c = share_from_c + share_to_c = total share of the component's
-    flow touching function c), so there are 6 functional features (not 12), PLUS
-    the component's loading-weighted mean flow distance (mean_distance) as a 7th
-    SPATIAL feature.  One RANK ridge regression per resilience metric (features
-    AND the metric are rank-transformed, so it is Spearman-aligned — a
-    multivariate PARTIAL Spearman) predicts that metric's rank from those 7, so
-    each standardized coefficient is that feature's rank-effect CONTROLLING FOR
-    the others (vs the Spearman block's one-at-a-time).  Outputs the per-metric
-    LOO predicted-vs-actual scatter (each panel titled with its leave-one-out R²
-    and PASS/FAIL) plus the coefficient + LOO-summary CSVs; the coefficient
-    heatmap is no longer drawn.  lambda_ctx tags every filename."""
+def analysis_resilience_linear(feats, tag, lambda_ctx=None,
+                               merge_func_directions=True):
+    """Multivariate Ridge counterpart to analysis_resilience_corr.  The functional
+    predictors are either the 6 MERGED per-function shares (func_c = share_from_c +
+    share_to_c, total share of the component's flow touching function c) when
+    merge_func_directions is True, or the 12 directional shares (share_from_<c>,
+    share_to_<c>) as-is when False; either way the component's loading-weighted
+    mean flow distance (mean_distance) is appended as the final SPATIAL feature
+    (7 predictors merged, 13 unmerged).  One RANK ridge regression per resilience
+    metric (features AND the metric are rank-transformed, so it is Spearman-aligned
+    — a multivariate PARTIAL Spearman) predicts that metric's rank from those
+    features, so each standardized coefficient is that feature's rank-effect
+    CONTROLLING FOR the others (vs the Spearman block's one-at-a-time).  Outputs the
+    per-metric LOO predicted-vs-actual scatter (each panel titled with its
+    leave-one-out R² and PASS/FAIL) plus the coefficient + LOO-summary CSVs.
+    lambda_ctx tags every filename."""
     os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
-    ltag = _lambda_tag(lambda_ctx)
+    lambda_tag = _lambda_tag(lambda_ctx)
 
-    # Merge same-category outflow + inflow into ONE feature per function:
-    # func_c = share_from_c + share_to_c (total share of flow touching function c).
-    # 6 functional features instead of 12 — fewer parameters for the tiny n —
-    # plus mean_distance (the spatial feature, already in feats) as the 7th predictor.
-    feats_m = feats.copy()
-    merged_cols = [f'func_{c}' for c in SF_CATEGORIES]
-    for c in SF_CATEGORIES:
-        feats_m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
-    feature_cols = merged_cols + ['mean_distance']
+    if merge_func_directions:
+        # Merge same-category outflow + inflow into ONE feature per function:
+        # func_c = share_from_c + share_to_c (total share of flow touching c).
+        # 6 functional features instead of 12 — fewer parameters for the tiny n.
+        feats_m = feats.copy()
+        func_cols = [f'func_{c}' for c in SF_CATEGORIES]
+        for c in SF_CATEGORIES:
+            feats_m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
+    else:
+        # Keep outflow and inflow as the 12 separate directional shares.
+        feats_m = feats
+        func_cols = FUNC_COLS
+    # mean_distance (the spatial feature, already in feats) is the final predictor.
+    feature_cols = func_cols + ['mean_distance']
     coef_mat, summary, pred_data = run_city_resilience_linear(
         feats_m, RES_COLS, feature_cols)
 
@@ -501,65 +541,14 @@ def analysis_resilience_linear(feats, tag, lambda_ctx=None):
         pred_data, summary, RES_COLS,
         title=f'{feats["city"].iloc[0]}: regression predicted vs actual (LOO)',
         save_path=os.path.join(OUTPUT_FUNC_VS_RESIL,
-                               f'scatter_resilience_reg_{ltag}{tag}.png'),
+                               f'scatter_resilience_reg_{lambda_tag}{tag}.png'),
     )
     os.makedirs(OUTPUT_RESIL_REG_RAW, exist_ok=True)
     coef_mat.to_csv(os.path.join(OUTPUT_RESIL_REG_RAW,
-                                 f'linear_coef_{ltag}{tag}.csv'))
+                                 f'linear_coef_{lambda_tag}{tag}.csv'))
     summary.to_csv(os.path.join(OUTPUT_RESIL_REG_RAW,
-                                f'linear_loo_summary_{ltag}{tag}.csv'))
+                                f'linear_loo_summary_{lambda_tag}{tag}.csv'))
     return summary
-
-
-def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None):
-    """Cross-city (leave-one-city-out) generalisation of the resilience
-    regression: train on one city, TEST on the other (option A — each city
-    rank-transformed + standardized within itself, coefficients transferred, so
-    absolute-level differences between the two disasters are normalised away).
-    With 2 cities this is a single hard probe (both directions), not a stable
-    estimate.  Saves a cross-city test-R² heatmap (with within-city LOO columns
-    for comparison) + a predicted-vs-actual scatter per direction, in
-    func_vs_resilience.  lambda_ctx tags the filenames."""
-    os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
-    ltag = _lambda_tag(lambda_ctx)
-
-    # Merge func features per city (same recipe as analysis_resilience_linear).
-    feature_cols = [f'func_{c}' for c in SF_CATEGORIES] + ['mean_distance']
-    merged = {}
-    for code, fc in feats_by_city.items():
-        fm = fc.copy()
-        for c in SF_CATEGORIES:
-            fm[f'func_{c}'] = fc[f'share_from_{c}'] + fc[f'share_to_{c}']
-        merged[code] = fm
-
-    r2_table, pred = cross_city_resilience(merged, RES_COLS, feature_cols)
-    loo_table = pd.DataFrame(loo_by_city).reindex(index=RES_COLS)
-
-    vis_heatmap_cross_city_r2(
-        r2_table, loo=loo_table,
-        title='Cross-city resilience prediction (test R²; LOO cols = within-city)',
-        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL, f'cross_city_r2_{ltag}.png'))
-    os.makedirs(OUTPUT_RESIL_REG_RAW, exist_ok=True)
-    pd.concat([loo_table.add_prefix('LOO_'), r2_table], axis=1).to_csv(
-        os.path.join(OUTPUT_RESIL_REG_RAW, f'cross_city_r2_{ltag}.csv'))
-
-    # Predicted-vs-actual scatter per direction (reuse the within-city scatter).
-    for d, pdat in pred.items():
-        s = pd.DataFrame({
-            'loo_r2': {m: r2_table.loc[m, d] for m in RES_COLS},
-            'passed': {m: (bool(r2_table.loc[m, d] > 0)
-                           if pd.notna(r2_table.loc[m, d]) else False)
-                       for m in RES_COLS},
-            'status': {m: ('ok' if pdat[m] is not None else 'insufficient_data')
-                       for m in RES_COLS},
-        })
-        train, test = d.split('->')
-        vis_scatter_reg_pred(
-            pdat, s, RES_COLS, r2_label='test R²',
-            title=f'Cross-city: train {train} -> test {test}',
-            save_path=os.path.join(
-                OUTPUT_FUNC_VS_RESIL,
-                f'cross_city_scatter_{d.replace("->", "_to_")}_{ltag}.png'))
 
 
 def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
@@ -592,29 +581,69 @@ def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
         )
 
 
+def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
+                        merge_func_directions=True):
+    """Cross-city (leave-one-city-out) generalisation of the resilience
+    regression: train on one city, TEST on the other (option A — each city
+    rank-transformed + standardized within itself, coefficients transferred, so
+    absolute-level differences between the two disasters are normalised away).
+    With 2 cities this is a single hard probe (both directions), not a stable
+    estimate.  Saves a cross-city test-R² heatmap (with within-city LOO columns
+    for comparison) + a predicted-vs-actual scatter per direction, in
+    func_vs_resilience.  lambda_ctx tags the filenames.  merge_func_directions
+    matches analysis_resilience_linear: True (default) uses the 6 merged
+    func_<c> = share_from_c + share_to_c features, False the 12 directional
+    shares; mean_distance is appended either way (7 predictors merged, 13 not)."""
+    os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
+    lambda_tag = _lambda_tag(lambda_ctx)
+
+    # Per-city predictor tables (same recipe as analysis_resilience_linear).
+    if merge_func_directions:
+        # Merge same-category outflow + inflow into ONE feature per function.
+        func_cols = [f'func_{c}' for c in SF_CATEGORIES]
+        cities = {}
+        for code, city_feats in feats_by_city.items():
+            merged_feats = city_feats.copy()
+            for c in SF_CATEGORIES:
+                merged_feats[f'func_{c}'] = city_feats[f'share_from_{c}'] + city_feats[f'share_to_{c}']
+            cities[code] = merged_feats
+    else:
+        # Keep outflow and inflow as the 12 separate directional shares.
+        func_cols = FUNC_COLS
+        cities = feats_by_city
+    feature_cols = func_cols + ['mean_distance']
+
+    r2_table, pred = cross_city_resilience(cities, RES_COLS, feature_cols)
+    loo_table = pd.DataFrame(loo_by_city).reindex(index=RES_COLS)
+
+    vis_heatmap_cross_city_r2(
+        r2_table, loo=loo_table,
+        title='Cross-city resilience prediction (test R²; LOO cols = within-city)',
+        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL, f'cross_city_r2_{lambda_tag}.png'))
+    os.makedirs(OUTPUT_RESIL_REG_RAW, exist_ok=True)
+    pd.concat([loo_table.add_prefix('LOO_'), r2_table], axis=1).to_csv(
+        os.path.join(OUTPUT_RESIL_REG_RAW, f'cross_city_r2_{lambda_tag}.csv'))
+
+    # Predicted-vs-actual scatter per direction (reuse the within-city scatter).
+    for direction, pred_data in pred.items():
+        dir_summary = pd.DataFrame({
+            'loo_r2': {m: r2_table.loc[m, direction] for m in RES_COLS},
+            'passed': {m: (bool(r2_table.loc[m, direction] > 0)
+                           if pd.notna(r2_table.loc[m, direction]) else False)
+                       for m in RES_COLS},
+            'status': {m: ('ok' if pred_data[m] is not None else 'insufficient_data')
+                       for m in RES_COLS},
+        })
+        train, test = direction.split('->')
+        vis_scatter_reg_pred(
+            pred_data, dir_summary, RES_COLS, r2_label='test R²',
+            title=f'Cross-city: train {train} -> test {test}',
+            save_path=os.path.join(
+                OUTPUT_FUNC_VS_RESIL,
+                f'cross_city_scatter_{direction.replace("->", "_to_")}_{lambda_tag}.png'))
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
-
-def _lambda_tag(lambda_ctx):
-    """Filename-safe context-strength tag, e.g. 'lambda0', 'lambda0.1', or
-    'baseline' when context-aware NMF is off (lambda_ctx is None)."""
-    return f"lambda{lambda_ctx:g}" if lambda_ctx is not None else "baseline"
-
-
-def load_landuse_for_context(label, key, gdf):
-    """Ensure the raw SLD cache and load the on-the-fly TF-IWF classification
-    (same knobs as the O×D func block) for the context-aware NMF.  Returns the
-    landuse DataFrame with `share_<cat>` columns keyed by `aggr_id`."""
-    os.makedirs(SPACE_FUNCTION_DIR, exist_ok=True)
-    raw_csv = os.path.join(SPACE_FUNCTION_DIR, f'{key}_block_group_sld_raw.csv')
-    assert ensure_city_landuse_raw(label, gdf['aggr_id'].tolist(), raw_csv) is not None
-    return load_city_landuse(
-        raw_csv,
-        residential_weight=LANDUSE_RESIDENTIAL_WEIGHT,
-        weighting=LANDUSE_WEIGHTING,
-        iwf_scale=LANDUSE_IWF_SCALE,
-        dominant_threshold=LANDUSE_DOMINANT_THRESHOLD,
-    )
-
 
 def main():
     # ── Data preprocessing ─────────────────────────────────────────────────────
@@ -683,7 +712,7 @@ def main():
         W_fm, H_fm, weights_fm = decompose_city(
             X_fm_all, N_BEHAVIORS_FM, l1_reg=L1_REG_FM, fit_time_cols=fit_time_cols_fm)
 
-    # ── Analysis ──────────────────────────
+    # ── Analysis ───────────────────────────────────────────────────────────────
 
     # Per-city context strength tags the func entropy figure/CSV; None (baseline)
     # when context-aware NMF is off, so the filename still distinguishes runs.
@@ -693,56 +722,63 @@ def main():
     feats_by_city = {}   # short code -> per-component feats, for the cross-city test
     loo_by_city   = {}   # short code -> within-city LOO R² (for the comparison)
 
-    for label, key, tag, gdf, H, mapping, weights, W, n_nor, n_dis, fd_nor, fd_dis, ctx_lambda in (
+    for label, key, tag, gdf, H, mapping, weights, W, n_nor, n_dis, first_day_nor, first_day_dis, ctx_lambda in (
         ('Baton Rouge', 'Baton_Rouge', '_br', br_gdf, H_br, mapping_br, weights_br,
          W_br, n_nor_br, n_dis_br, FIRST_DAY_BR_NORMAL, FIRST_DAY_BR_DISASTER, ctx_lambda_br),
         ('Fort Myers',  'Fort_Myers',  '_fm', fm_gdf, H_fm, mapping_fm, weights_fm,
          W_fm, n_nor_fm, n_dis_fm, FIRST_DAY_FM_NORMAL, FIRST_DAY_FM_DISASTER, ctx_lambda_fm),
     ):
         print(f"\n── {label}: analysis ──")
-        analysis_component_signature(W, n_nor, n_dis, fd_nor, fd_dis, tag,
+        analysis_component_signature(W, n_nor, n_dis, first_day_nor, first_day_dis, tag,
                                      gdf=gdf, H=H, mapping=mapping)
-        sf = analysis_spatial(label, H, mapping, gdf, weights, tag,
-                              lambda_ctx=ctx_lambda)
-
+        
+        distances = analysis_spatial(label, H, mapping, gdf, weights, tag,
+                                     lambda_ctx=ctx_lambda)
         M = analysis_od_function(label, key, tag, gdf, H, mapping, weights,
                                  lambda_ctx=ctx_lambda)
 
-        # Temporal features read W[:n_nor], resilience reads W[n_dis:] against
-        # a baseline built from W[:n_nor], and the functional profile reads M.
-        # The buffer columns [n_nor, n_dis) feed none of them.
-        # recovery_level and lowest_day are inverted here so every resilience
-        # metric reads higher = worse.  Spearman is invariant to monotone
-        # transforms, so only the sign of these correlation rows changes.
-        res = resilience_features(W, n_nor, fd_nor, SLOTS_ACTIVE, n_dis=n_dis)
-        n_dd = (W.shape[0] - n_dis) // SLOTS_ACTIVE
-        res['recovery_deficit'] = 1.0 - res.pop('recovery_level')
-        res['early_collapse']   = (n_dd - 1) - res.pop('lowest_day')
         feats = pd.concat([
-            temporal_features(W, n_nor, fd_nor, SLOTS_ACTIVE, _INTERVAL_HOURS,
+            # Temporal features read W[:n_nor].
+            temporal_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, _INTERVAL_HOURS,
                               weekend_ratio_threshold=WEEKEND_RATIO_THRESHOLD),
+            
+            # Functional profile reads M.
             functional_features(M, AXIS_CATEGORIES),
-            sf,                                   # spatial: mean_distance, std_distance
-            res,
+            
+            # Spatial: mean_distance, std_distance (reads H + OD centroid distances).
+            spatial_features(H, distances),
+            
+            # Resilience reads W[n_dis:] against a baseline built from W[:n_nor].
+            # The buffer columns [n_nor, n_dis) feed neither the resilience features
+            # nor the curves.
+            resilience_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, n_dis=n_dis),
         ], axis=1)
         feats.insert(0, 'city', label)
         feats.insert(1, 'weight', weights)
-        curves = resilience_curves(W, n_nor, fd_nor, SLOTS_ACTIVE, n_dis=n_dis)
 
         analysis_time_function_corr(feats, tag)
+        
         analysis_resilience_corr(feats, tag, lambda_ctx=ctx_lambda)
-        summary_reg = analysis_resilience_linear(feats, tag, lambda_ctx=ctx_lambda)
-        analysis_func_ordered_lines(W, n_nor, n_dis, fd_nor, fd_dis,
+        
+        curves = resilience_curves(W, n_nor, first_day_nor, SLOTS_ACTIVE, n_dis=n_dis)
+        analysis_func_ordered_lines(W, n_nor, n_dis, first_day_nor, first_day_dis,
                                     curves, feats, tag)
 
+        reg_summary = analysis_resilience_linear(
+            feats, tag, lambda_ctx=ctx_lambda,
+            merge_func_directions=MERGE_FUNC_DIRECTIONS)
+        
         # Stash for the cross-city (leave-one-city-out) test after the loop.
-        feats_by_city[tag.strip('_').upper()] = feats.copy()
-        loo_by_city[tag.strip('_').upper()]   = summary_reg['loo_r2']
+        city_code = tag.strip('_').upper()
+        feats_by_city[city_code] = feats.copy()
+        loo_by_city[city_code]   = reg_summary['loo_r2']
 
-    # ── Cross-city generalisation (train one city, test the other) ──
+    # ── Cross-city generalisation (train one city, test the other) ─────────────
     if len(feats_by_city) >= 2:
         print("\n── Cross-city resilience test ──")
-        analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=ctx_lambda_br)
+        # loo_by_city and lambda_ctx are just for display or filename
+        analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=ctx_lambda_br,
+                            merge_func_directions=MERGE_FUNC_DIRECTIONS)
 
 
 if __name__ == '__main__':
