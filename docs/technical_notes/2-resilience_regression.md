@@ -48,11 +48,11 @@ transform in §2 removes a constant per-feature scale entirely.
 
 **(b) Per-component loading-weighted mean**.
 Component `i`'s flow map is `H[i, :]` (non-negative loadings over flows), so its
-typical flow length is the loading-weighted average distance:
+typical flow length — stored as `mean_distance[i]` — is the loading-weighted
+average distance:
 
 $$
-\texttt{mean\_distance}[i] \;=\; \frac{\sum_j H[i,j]\, d_j}{\sum_j H[i,j]},
-\qquad
+\bar d_i \;=\; \frac{\sum_j H[i,j]\, d_j}{\sum_j H[i,j]}
 $$
 
 High `mean_distance` = a long-range component; low = a local one.
@@ -105,7 +105,7 @@ data, choosing its own penalty by the internal leave-one-out of §2.
 city's prepared features, and the test R² is measured against the test city's
 own actual (rank-standardized) targets.
 
-## 4. Hyperparameter tuning (`tune_nmf_optuna.py`)
+## 4. Hyperparameter tuning
 
 A **separate** Optuna script (not part of a normal pipeline run) that searches the
 NMF + feature hyperparameters to maximise cross-city resilience transfer. 

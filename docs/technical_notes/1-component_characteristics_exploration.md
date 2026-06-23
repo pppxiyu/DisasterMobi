@@ -52,15 +52,15 @@ $$
 
 2. **Rarity weight (IWF)** — a category that is everywhere (residential) gets
    a small weight, a scarce and concentrated one (leisure, industrial) gets a
-   large one. `IWF_SCALE` = 1.0 uses the weight as is; larger exponents push
-   labels further toward rare categories:
+   large one. The exponent β below is the config knob `IWF_SCALE`: β = 1.0 uses
+   the weight as is; larger β pushes labels further toward rare categories:
 
 $$
 \text{rarity weight} \;=\;
 \left[\;\ln\!\left(
 \frac{\text{total mass of all categories, region-wide}}
      {\text{this category's mass, region-wide}}
-\right)\right]^{\texttt{IWF\_SCALE}}
+\right)\right]^{\beta}
 $$
 
 3. **Combine and rescale** — the labelling threshold is applied to these
