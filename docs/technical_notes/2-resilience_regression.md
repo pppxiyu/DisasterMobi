@@ -1,5 +1,63 @@
 # Technical Note — Resilience Regression
 
+## Overview
+
+```mermaid
+%%{init: {"theme":"base", "themeVariables": {"fontSize":"15px"}, "flowchart": {"nodeSpacing": 45, "rankSpacing": 45}}}%%
+flowchart TD
+    A["Decompose OD flows into<br/>temporal W* and spatial H*"]
+
+    subgraph S1["Step 1 — Data: per-city design matrix"]
+        B["Predictors: functional shares<br/>(6 merged func_c*) + mean_distance*"]
+        C["Targets: 5 resilience metrics<br/>(higher = worse)"]
+        D["Per-component feature table"]
+        B --> D
+        C --> D
+    end
+    A --> B
+    A --> C
+
+    subgraph S2["Step 2 — Within-city regression (per metric)"]
+        E["Rank-transform features + target"] --> F["Standardize (z-score)"] --> G["RidgeCV: pick α* by internal LOO* → coefficients"] --> H["Separate LOO* R²* (pass if > 0)"]
+    end
+
+    subgraph S3["Step 3 — Cross-city: train one, test the other"]
+        I["Prep each city within itself<br/>(rank + standardize)"] --> J["Fit ridge on TRAIN city"] --> K["Apply to TEST city<br/>→ cross-city test R²* (both directions)"]
+    end
+
+    D --> E
+    D --> I
+
+    subgraph S4["Step 4 — Hyperparameter tuning (Optuna, separate)"]
+        L["Propose hyperparameters:<br/>k*, FILTER_FACTOR*, L1*, LAMBDA_CTX*,<br/>CONTEXT_AWARE*, FLOW_FEATURE_MODE*"]
+    end
+    L -.->|"each trial re-runs Steps 1 & 3"| A
+    K -.->|"objective: maximize mean cross-city R²"| L
+```
+
+Terms marked `*` in the diagram:
+
+- **W**, **H** — the two NMF factors: `W` is the temporal factor (each
+  component's activity over time), `H` the spatial factor (each component's
+  origin–destination flow map).
+- **`func_c`** — the merged functional share of functional category *c*
+  (`share_from_c` + `share_to_c`): the total share of a component's flow touching
+  that category.
+- **`mean_distance`** — a component's loading-weighted average origin→destination
+  flow distance (km).
+- **leave-one-out (LOO)** — hold out one component, predict it from all the
+  others, repeat for every component, then measure how close the predictions are;
+  a small-sample way to check the model without a separate test set.
+- **α** — the ridge penalty strength (regularization); `RidgeCV` selects it
+  automatically.
+- **R²** — out-of-sample coefficient of determination (the "test score"):
+  1 = perfect, 0 = no better than predicting the mean, negative = worse.
+- **Hyperparameters** — `k` = number of components; `FILTER_FACTOR` =
+  low-activity OD-flow filter; `L1` = sparsity penalty on the factors;
+  `LAMBDA_CTX` = context strength; `CONTEXT_AWARE` = use functional context
+  (on/off); `FLOW_FEATURE_MODE` = geometry of the context feature.
+
+
 ## 1. Data — the design matrix
 
 **(a) Targets.** The five resilience metrics
