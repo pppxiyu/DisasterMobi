@@ -13,6 +13,7 @@ branch is kept for reproducing older runs (those used New Orleans as city #2).
 DATA_DIR        = 'data'
 OUTPUT_DIR      = 'outputs'
 MODEL_CACHE_DIR = '.cache/model'   # NN checkpoints (best_model.pth); under the .cache root
+OPTUNA_CACHE_DIR = '.cache/optuna' # Optuna studies: .cache/optuna/<task>/<task>.db (NMF + GRU tuners)
 
 # ── Spatial resolution ───────────────────────────────────────────────────────
 # 'block_group' = current data (Baton Rouge + Fort Myers, bare-name pkls).

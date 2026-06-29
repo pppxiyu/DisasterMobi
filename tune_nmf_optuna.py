@@ -45,8 +45,11 @@ Run (inside the disaster_mobi env)
 ----------------------------------
     python tune_nmf_optuna.py --trials 60
     python tune_nmf_optuna.py --trials 40 --baseline-only      # skip context (faster)
-    python tune_nmf_optuna.py --trials 200 --timeout 3600 --study optuna_nmf.db
-The best hyperparameters are printed at the end.
+    python tune_nmf_optuna.py --trials 200 --timeout 3600
+Each run PERSISTS to cache/optuna/<task>/<task>.db (task = the objective target,
+plus '_baseline' for --baseline-only) and RESUMES that study if it already exists,
+so different fine-tuning tasks keep separate, resumable subfolders.  --study
+overrides the path.  The best hyperparameters are printed at the end.
 """
 import argparse
 import contextlib
@@ -62,6 +65,13 @@ import optuna
 # main() (guarded by __main__).  Reusing its objects guarantees the trial path
 # matches production exactly; no constant is duplicated here.
 import run_pattern_nmf as rp
+from config import OPTUNA_CACHE_DIR as CACHE_DIR
+
+
+# Every study is persisted under CACHE_DIR/<task>/<task>.db — i.e.
+# .cache/optuna/<task>/<task>.db (.cache/ is gitignored) — so distinct fine-tuning
+# tasks keep separate, resumable subfolders.  CACHE_DIR lives in config.py, shared
+# with the GRU tuner (run_prediction_training.py), so both use the same cache root.
 
 
 # ── Search ranges (edit here) ─────────────────────────────────────────────────
@@ -236,7 +246,8 @@ def main():
     ap.add_argument('--baseline-only', action='store_true',
                     help='force CONTEXT_AWARE=False (skip the slow context solver)')
     ap.add_argument('--study', default=None,
-                    help='sqlite path to persist/resume the study, e.g. optuna_nmf.db')
+                    help='override the sqlite path (default: '
+                         'cache/optuna/<task>/<task>.db, auto-created and resumed)')
     args = ap.parse_args()
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -265,12 +276,20 @@ def main():
                                context_choices=((False,) if args.baseline_only
                                                 else (True, False)))
 
+    # Persist under cache/optuna/<task>/<task>.db so each fine-tuning task (the
+    # objective target, plus '_baseline' for context-off searches) gets its own
+    # resumable subfolder; --study overrides the full path.
+    task = f'nmf_crosscity_{args.target}' + ('_baseline' if args.baseline_only else '')
+    db_path = args.study or os.path.join(CACHE_DIR, task, f'{task}.db')
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    print(f"Study '{task}'  ->  {db_path}")
+
     sampler = optuna.samplers.TPESampler(seed=args.seed, multivariate=True, group=True)
     study = optuna.create_study(
         direction='maximize', sampler=sampler,
-        study_name=f'nmf_crosscity_{args.target}',
-        storage=(f'sqlite:///{args.study}' if args.study else None),
-        load_if_exists=bool(args.study))
+        study_name=task,
+        storage=f'sqlite:///{db_path}',
+        load_if_exists=True)
 
     obj_label = ('mean over all 5 metrics' if args.target == 'all'
                  else args.target)

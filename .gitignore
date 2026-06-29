@@ -10,10 +10,10 @@ __pycache__/
 .ipynb_checkpoints/
 
 # ── Caches / generated artifacts (regenerated; not source) ────────────────────
+# .cache/ is the single cache root: .cache/model (NN checkpoints) and
+# .cache/optuna/<task>/<task>.db (all Optuna fine-tuning studies — NMF + GRU).
 .cache/
-cache/
 files/
-model_cache/
 
 # ── Data / outputs / docs / notebooks (large or auxiliary; not source) ────────
 data/
@@ -23,11 +23,8 @@ docs/*
 !docs/technical_notes/
 notebook_drafts/
 
-# ── Generated artifacts (regenerated; not source) ─────────────────────────────
-tag_gru_tuning.db
-
-# ── Optuna fine-tuning intermediate products (the tuner SCRIPT is kept) ───────
-optuna_*.db
+# ── Tuning / verification scratch logs (the tuner SCRIPTS are kept; the study
+#    dbs live under .cache/optuna/, already ignored above) ──────────────────────
 _tune_run*.log
 _verify_*.log
 

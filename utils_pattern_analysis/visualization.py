@@ -1084,35 +1084,75 @@ def vis_bar_component_distance(spatial_df, weights=None, title=None,
     return fig
 
 
+def vis_bar_component_income(income_df, weights=None, title=None, save_path=None):
+    """
+    Per-component loading-weighted median household income: one horizontal bar per
+    component (USD), sorted lowest→highest.  If weights are given, bars are
+    coloured by component importance so you can see whether high- or low-income
+    components carry the weight.  Components with NaN income (no valid-income
+    loading mass) are dropped.
+    """
+    df = income_df.dropna(subset=['median_income']).copy()
+    df = df.loc[df['median_income'].sort_values().index]      # lowest at bottom
+    n = len(df)
+    ypos = np.arange(n)
+    fig, ax = plt.subplots(figsize=(8, max(3.0, 0.34 * n + 1.6)))
+    if weights is not None and n:
+        w = np.asarray(weights, dtype=float)[df.index.to_numpy()]
+        norm = mcolors.Normalize(vmin=float(np.nanmin(w)), vmax=float(np.nanmax(w)))
+        ax.barh(ypos, df['median_income'], color=cm.viridis(norm(w)))
+        sm = cm.ScalarMappable(norm=norm, cmap='viridis'); sm.set_array([])
+        fig.colorbar(sm, ax=ax, pad=0.02).set_label('component weight', fontsize=10)
+    else:
+        ax.barh(ypos, df['median_income'], color='#1976D2')
+    ax.set_yticks(ypos)
+    ax.set_yticklabels([f'comp {i}' for i in df.index], fontsize=9)
+    ax.set_xlabel('loading-weighted median household income (USD)', fontsize=10)
+    ax.set_title(title or 'Per-component median household income', fontsize=13)
+    ax.margins(y=0.01)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
 def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
                            categories=None, save_path=None,
-                           cmap='RdBu_r', annot_fs=17):
+                           cmap='RdBu_r', annot_fs=17, extra_cols=None):
     """
     Row-scaled correlation heatmap with split functional cells.  Rows are any
     metric set (resilience metrics, weekday_ratio, …).
 
-    Time columns stay single cells (pass an empty list when there are none).
-    Each category column packs share_from_<cat> in the UPPER half-cell and
-    share_to_<cat> in the LOWER half-cell, with value labels (and significance
-    stars) for both.  Each row is coloured by its own max |rho| over its
-    displayed cells, so rows are independent and no colorbar is drawn —
+    Single-value columns render as one solid cell and can sit on the LEFT
+    (time_cols) or on the RIGHT after the categories (extra_cols, e.g. a spatial
+    or socioeconomic feature).  Each category column packs share_from_<cat> in the
+    UPPER half-cell and share_to_<cat> in the LOWER half-cell, with value labels
+    (and significance stars) for both.  Each row is coloured by its own max |rho|
+    over its displayed cells, so rows are independent and no colorbar is drawn —
     colours compare within a row only, numbers compare everywhere.
 
     Parameters
     ----------
-    rho, pval  : DataFrames [metric rows × feature columns]; columns must
-                 contain time_cols plus share_from_<cat> / share_to_<cat>
-                 for every category.
-    time_cols  : list[str] columns shown as single cells (may be empty).
-    categories : list[str] functional category names (e.g. SF_CATEGORIES).
+    rho, pval  : DataFrames [metric rows × feature columns]; columns must contain
+                 time_cols, extra_cols, and share_from_<cat> / share_to_<cat> for
+                 every category.
+    time_cols  : list[str] single-cell columns shown on the LEFT (may be empty).
+    categories : list[str] functional category names (split cells, e.g. SF_CATEGORIES).
+    extra_cols : list[str] single-cell columns shown on the RIGHT, after the
+                 categories (e.g. mean_distance, median_income); may be empty.
     """
-    time_cols = time_cols or []
+    time_cols  = time_cols or []
+    extra_cols = extra_cols or []
+    categories = categories or []
     rows = list(rho.index)
-    n_r, n_t, n_c = len(rows), len(time_cols), len(categories)
-    n_cols = n_t + n_c
+    n_r, n_t, n_c, n_e = len(rows), len(time_cols), len(categories), len(extra_cols)
+    n_cols  = n_t + n_c + n_e
+    cat_end = n_t + n_c                       # split-cell category region = [n_t, cat_end)
 
-    # Upper/lower value matrices per display cell.  Time cells repeat the same
-    # value in both halves so they render as one solid cell.
+    # Upper/lower value matrices per display cell.  Single (time / extra) cells
+    # repeat the same value in both halves so they render as one solid cell.
     Vup = np.full((n_r, n_cols), np.nan)
     Vlo = np.full((n_r, n_cols), np.nan)
     for i, rname in enumerate(rows):
@@ -1121,8 +1161,10 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
         for j, c in enumerate(categories):
             Vup[i, n_t + j] = rho.loc[rname, f'share_from_{c}']
             Vlo[i, n_t + j] = rho.loc[rname, f'share_to_{c}']
+        for j, e in enumerate(extra_cols):
+            Vup[i, cat_end + j] = Vlo[i, cat_end + j] = rho.loc[rname, e]
 
-    # Per-row colour scale over every displayed value (time + from + to).
+    # Per-row colour scale over every displayed value (time + from + to + extra).
     allv = np.concatenate([Vup, Vlo], axis=1)
     scale = np.nanmax(np.abs(allv), axis=1, keepdims=True)
     scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
@@ -1145,7 +1187,7 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
     for y in range(n_r + 1):
         ax.axhline(y, color='white', lw=2)
     for i in range(n_r):
-        ax.plot([n_t, n_cols], [i + 0.5] * 2, color='white', lw=0.8)
+        ax.plot([n_t, cat_end], [i + 0.5] * 2, color='white', lw=0.8)
 
     def _stars(rname, col):
         if pval is None or np.isnan(pval.loc[rname, col]):
@@ -1153,14 +1195,17 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
         p = pval.loc[rname, col]
         return '**' if p < 0.01 else ('*' if p < 0.05 else '')
 
+    def _single_cell(i, col_idx, name):
+        v = Vup[i, col_idx]
+        if np.isnan(v):
+            return
+        ax.text(col_idx + 0.5, i + 0.5, f'{v:.2f}{_stars(rows[i], name)}',
+                ha='center', va='center', fontsize=annot_fs,
+                color='white' if abs(Cup[i, col_idx]) > 0.6 else 'black')
+
     for i, rname in enumerate(rows):
         for j, t in enumerate(time_cols):
-            v = Vup[i, j]
-            if np.isnan(v):
-                continue
-            ax.text(j + 0.5, i + 0.5, f'{v:.2f}{_stars(rname, t)}',
-                    ha='center', va='center', fontsize=annot_fs,
-                    color='white' if abs(Cup[i, j]) > 0.6 else 'black')
+            _single_cell(i, j, t)
         for j, c in enumerate(categories):
             x = n_t + j + 0.5
             vu, vl = Vup[i, n_t + j], Vlo[i, n_t + j]
@@ -1172,10 +1217,12 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
                 ax.text(x, i + 0.73, f'{vl:.2f}{_stars(rname, f"share_to_{c}")}',
                         ha='center', va='center', fontsize=annot_fs,
                         color='white' if abs(Clo[i, n_t + j]) > 0.6 else 'black')
+        for j, e in enumerate(extra_cols):
+            _single_cell(i, cat_end + j, e)
 
     ax.set_xticks(np.arange(n_cols) + 0.5)
-    ax.set_xticklabels(list(time_cols) + list(categories), rotation=45,
-                       ha='right', fontsize=18)
+    ax.set_xticklabels(list(time_cols) + list(categories) + list(extra_cols),
+                       rotation=45, ha='right', fontsize=18)
     ax.set_yticks(np.arange(n_r) + 0.5)
     ax.set_yticklabels(rows, fontsize=18)
     ax.tick_params(length=0)
@@ -1255,14 +1302,17 @@ def vis_heatmap_corr_merged(mat, pval=None, categories=None, save_path=None,
 
 
 def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
-                         save_path=None, ncols=3, r2_label='LOO R²'):
+                         save_path=None, ncols=3, r2_label='LOO R²',
+                         unit='std rank'):
     """
     Regression diagnostic scatter for ONE city: one panel per resilience metric,
     each plotting the ACTUAL value (y, ground truth) against the leave-one-out
-    PREDICTED value (x) — both on the model's ranked-standardized scale — one
-    point per component (labelled with its index).  The dashed y=x line is perfect
-    prediction; the panel title carries the LOO R² and PASS/FAIL.  An
-    'insufficient data' metric gets a blank panel.
+    PREDICTED value (x) — both on the model's standardized scale — one point per
+    component (labelled with its index).  `unit` names that scale on the axes
+    ('std rank' for the rank/Spearman regression, 'std value' for the raw/Pearson
+    regression).  The dashed y=x line is perfect prediction; the panel title
+    carries the LOO R² and PASS/FAIL.  An 'insufficient data' metric gets a blank
+    panel.
     """
     import math
     metrics = list(res_cols)
@@ -1291,8 +1341,8 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
         ax.plot([lo, hi], [lo, hi], '--', color='grey', lw=1)      # y = x
         tag = ('PASS' if s['passed'] else 'FAIL') if s['status'] == 'ok' else 'n/a'
         ax.set_title(f"{m}\n{r2_label}={s['loo_r2']:+.2f} [{tag}]", fontsize=10)
-        ax.set_xlabel('predicted (std rank)', fontsize=8)
-        ax.set_ylabel('actual (std rank)', fontsize=8)
+        ax.set_xlabel(f'predicted ({unit})', fontsize=8)
+        ax.set_ylabel(f'actual ({unit})', fontsize=8)
         ax.tick_params(labelsize=7)
     for idx in range(n, nrows * ncols):
         axes[idx // ncols][idx % ncols].axis('off')
@@ -1403,7 +1453,7 @@ def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
 
 
 def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
-                                   color='#1976D2', point_size=90):
+                                   color='#1976D2', point_size=90, rank=False):
     """
     Scatter panels of feature pairs — one point per NMF component, uniform
     colour and size.
@@ -1412,9 +1462,19 @@ def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
     ----------
     df     : per-component feature table containing the pair columns.
     pairs  : list of (x_col, y_col) tuples to plot (e.g. the strongest
-             correlations).  weekday_ratio x-axes are drawn in log scale.
+             correlations).
+    rank   : False (default) plots the RAW feature values (the Pearson view;
+             weekday_ratio x/y axes are drawn in log scale).  True plots the
+             per-feature RANKS (average ranks for ties) — the Spearman view
+             (Spearman = Pearson on ranks); axes are linear and labelled '(rank)'.
     """
     import math
+    if rank:
+        cols = {c for pair in pairs for c in pair}
+        data = df[list(cols)].rank()          # rank each used column over components
+    else:
+        data = df
+    suffix = ' (rank)' if rank else ''
     n = len(pairs)
     ncols = max(1, min(ncols, n))
     nrows = math.ceil(n / ncols)
@@ -1428,16 +1488,16 @@ def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
     # Each (a, b) pair is drawn with b on the x axis and a on the y axis.
     for p, (yc, xc) in enumerate(pairs):
         ax = axes[p // ncols][p % ncols]
-        ax.scatter(df[xc], df[yc], s=point_size, color=color, alpha=0.8,
+        ax.scatter(data[xc], data[yc], s=point_size, color=color, alpha=0.8,
                    edgecolor='white', linewidth=0.6, zorder=2)
-        if xc == 'weekday_ratio':
+        if not rank and xc == 'weekday_ratio':
             ax.set_xscale('log')
             ax.axvline(1.0, color='grey', linestyle=':', linewidth=1)
-        if yc == 'weekday_ratio':
+        if not rank and yc == 'weekday_ratio':
             ax.set_yscale('log')
             ax.axhline(1.0, color='grey', linestyle=':', linewidth=1)
-        ax.set_xlabel(xc, fontsize=21)
-        ax.set_ylabel(yc, fontsize=21)
+        ax.set_xlabel(xc + suffix, fontsize=21)
+        ax.set_ylabel(yc + suffix, fontsize=21)
         ax.tick_params(labelsize=18)
 
     for p in range(n, nrows * ncols):

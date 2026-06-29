@@ -18,7 +18,8 @@ import os
 import pickle
 import random
 
-from config import BR_GRAPH_PATH, OUTPUT_DIR, MODEL_CACHE_DIR, SLOT_PER_DAY
+from config import (BR_GRAPH_PATH, OUTPUT_DIR, MODEL_CACHE_DIR, OPTUNA_CACHE_DIR,
+                    SLOT_PER_DAY)
 from utils_pattern_analysis.graph_io import load_graphs
 from utils_neural_network.preprocessing import (
     transform_to_line_graph_data, set_graph_targets,
@@ -127,8 +128,11 @@ def main():
     if DO_TUNING:
         print("\n── Hyperparameter Tuning ──")
         tuner = GraphTemporalTuner(predictor, IN_CHANNELS, OUT_CHANNELS, MODEL_CACHE_DIR)
+        # Persist under .cache/optuna/<task>/<task>.db, same scheme as the NMF tuner.
+        gru_db = os.path.join(OPTUNA_CACHE_DIR, 'tag_gru_tuning', 'tag_gru_tuning.db')
+        os.makedirs(os.path.dirname(gru_db), exist_ok=True)
         best  = tuner.run_study(
-            storage   = "sqlite:///tag_gru_tuning.db",
+            storage   = f"sqlite:///{gru_db}",
             study_name= "disaster_mobility_tuning",
             n_trials  = TUNE_TRIALS,
         )

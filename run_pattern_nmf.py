@@ -60,7 +60,9 @@ from config import (
     BR_GEO_CSV, FM_GEO_CSV, AGG_LEVEL,
     DATA_DIR, OUTPUT_DIR, SLOT_PER_DAY, SLOTS_ACTIVE,
 )
-from utils_pattern_analysis.graph_io import load_graphs_trimmed, build_distance_array
+from utils_pattern_analysis.graph_io import (
+    load_graphs_trimmed, build_distance_array, build_income_array,
+)
 from utils_pattern_analysis.decomposition import (
     h_slice_to_od_matrix, select_segment_columns,
 )
@@ -74,7 +76,7 @@ from utils_pattern_analysis.visualization import (
     vis_bar_function_by_peakslot, vis_line_resilience_curves,
     vis_bar_resilience_by_peakslot, vis_heatmap_corr_split,
     vis_hist_function_entropy,
-    vis_bar_component_distance, vis_scatter_reg_pred,
+    vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
     vis_heatmap_cross_city_r2,
 )
 from utils_pattern_analysis.space_function import (
@@ -83,7 +85,7 @@ from utils_pattern_analysis.space_function import (
 from utils_pattern_analysis.component_features import (
     temporal_features, functional_features, time_function_correlation,
     resilience_features, resilience_curves, component_function_entropy,
-    spatial_features,
+    spatial_features, socioeconomic_features,
 )
 from utils_pattern_analysis.ml_resilience import (
     run_city_resilience_linear, cross_city_resilience,
@@ -91,6 +93,9 @@ from utils_pattern_analysis.ml_resilience import (
 from utils_data_processing.build_graphs import load_city_geo
 from utils_data_processing.fetch_sld_landuse import (
     ensure_city_landuse_raw, load_city_landuse, CATEGORIES as SF_CATEGORIES,
+)
+from utils_data_processing.fetch_acs_income import (
+    ensure_city_income_raw, load_city_income, ACS_DATA_DIR,
 )
 
 import matplotlib as mpl
@@ -151,9 +156,21 @@ FILTER_FACTOR_BR = 1
 FILTER_FACTOR_FM = 2
 
 # Resilience regression: when True, each function's
-# outflow + inflow shares are merged into ONE feature 
-# when False the 12 directional shares are used as-is. 
+# outflow + inflow shares are merged into ONE feature
+# when False the 12 directional shares are used as-is.
 MERGE_FUNC_DIRECTIONS = True
+
+# Socioeconomic block: per-component ACS median household income (table B19013,
+# 5-year — block-group income needs the 5-year dataset).
+# INCOME_ENDPOINT_MODES — per-flow income aggregations to compute; each becomes a
+# median_income_<mode> column (a bar figure + a right-hand heatmap column):
+#   'combined' = loading-weighted mean of the flow's origin+destination income,
+#   'origin'   = the flow's origin block-group income only.
+# ACS 5-year vintage: 2013–2019 use 2010-census block-group boundaries (which the
+# mobility/SLD geo data uses → 100% match); 2020+ use 2020 boundaries (only ~64%
+# match here).  2019 is the latest 2010-vintage 5-year.
+ACS_INCOME_YEAR       = 2019
+INCOME_ENDPOINT_MODES = ['combined', 'origin']
 
 # Baton Rouge runs Apr 15 (Thu) → Sep 16 and is trimmed to Sep 12 (Ida + 14,
 # see BR_ANALYSIS_DAYS).  The last 33 days span Aug 11 (Wed) → Sep 12, with
@@ -182,6 +199,9 @@ OUTPUT_SPATIAL      = os.path.join(OUTPUT_CHAR, 'spatial')
 OUTPUT_SPATIAL_DIST_RAW = os.path.join(OUTPUT_SPATIAL, 'component_distance_raw_data')
 OUTPUT_NMF_BR       = os.path.join(OUTPUT_SPATIAL, 'component_spatial_characteristics_br')
 OUTPUT_NMF_FM       = os.path.join(OUTPUT_SPATIAL, 'component_spatial_characteristics_fm')
+# Socioeconomic: per-component ACS median household income bar figure + raw CSV.
+OUTPUT_SOCIO        = os.path.join(OUTPUT_CHAR, 'socioeconomic')
+OUTPUT_SOCIO_RAW    = os.path.join(OUTPUT_SOCIO, 'component_income_raw_data')
 OUTPUT_FUNC         = os.path.join(OUTPUT_CHAR, 'func')
 # CSV raw-data for the func figures, each in its own subfolder so the tables stay
 # out of the figure folder; the folder name says which figure the CSV backs.
@@ -213,11 +233,15 @@ AXIS_CATEGORIES = list(SF_CATEGORIES) + ['Mix']
 # heatmap + peak-slot / peak-period bar charts).
 OUTPUT_RESIL         = os.path.join(OUTPUT_PLOTS, 'resilience_corr')
 OUTPUT_FUNC_VS_RESIL = os.path.join(OUTPUT_RESIL, 'func_vs_resilience')
-# The Spearman (linear) heatmap now lives in its own subfolder so the lambda
-# sweep collects there; the Ridge heatmap sits directly in func_vs_resilience.
-OUTPUT_RESIL_CORR_HM = os.path.join(OUTPUT_FUNC_VS_RESIL, 'heatmap_resilience_corr')
-# CSV raw-data for the Ridge heatmap, kept out of the figure folder.
-OUTPUT_RESIL_REG_RAW = os.path.join(OUTPUT_FUNC_VS_RESIL, 'heatmap_resilience_reg_raw_data')
+# The resilience-correlation heatmap lives in a per-method subfolder
+# (heatmap_resilience_corr_<spearman|pearson>) so each method + the lambda sweep
+# collect separately.  Per-method path = f'{OUTPUT_RESIL_CORR_HM_BASE}_{method}'.
+OUTPUT_RESIL_CORR_HM_BASE = os.path.join(OUTPUT_FUNC_VS_RESIL, 'heatmap_resilience_corr')
+# Resilience REGRESSION (prediction) figures + raw CSVs, split by method into
+# resilience_reg_<method> subfolders (figures at top, CSVs under raw_data/), exactly
+# like the correlation heatmap above.  'spearman' = RANK regression, 'pearson' =
+# RAW-value regression (see RESIL_REG_METHODS).  Per-method dir = f'{BASE}_{method}'.
+OUTPUT_RESIL_REG_BASE = os.path.join(OUTPUT_FUNC_VS_RESIL, 'resilience_reg')
 OUTPUT_TL_BY_FUNC    = os.path.join(OUTPUT_FUNC_VS_RESIL, 'line_component_timeline_by_func')
 OUTPUT_RC_BY_FUNC    = os.path.join(OUTPUT_FUNC_VS_RESIL, 'line_component_resilience_curves_by_func')
 OUTPUT_TEMP_VS_RESIL = os.path.join(OUTPUT_RESIL, 'temporal_vs_resilience')
@@ -276,6 +300,24 @@ FUNC_COLS = ([f'share_from_{c}' for c in SF_CATEGORIES]
 #                      day-equivalents.  Smaller means more resilient
 RES_COLS = ['drop_depth', 'early_collapse', 'recovery_day', 'recovery_deficit',
             'cum_loss']
+
+# Extra single-value features appended (one cell each, no from/to split) to the
+# RIGHT of the functional resilience-correlation heatmap: the component's
+# loading-weighted mean flow distance (spatial) and the median household income
+# for each endpoint mode (socioeconomic).  All must already be columns of `feats`.
+EXTRA_CORR_COLS = ['mean_distance'] + [f'median_income_{m}' for m in INCOME_ENDPOINT_MODES]
+
+# Correlation method(s) for the resilience-vs-feature heatmap.  Each method is
+# drawn into its own heatmap_resilience_corr_<method> subfolder.  'spearman' =
+# rank correlation (robust to non-linearity); 'pearson' = linear on raw values.
+RESIL_CORR_METHODS = ['spearman', 'pearson']
+
+# Resilience REGRESSION (prediction) method(s) -> resilience_reg_<method> subfolders.
+# 'spearman' RANK-regresses (features AND the metric rank-transformed before the
+# Ridge fit -> a multivariate partial Spearman, matching the correlation heatmap);
+# 'pearson' regresses the RAW standardized values.  The rank flag fed to the Ridge
+# helpers is simply (method == 'spearman'); the scatter axis unit follows suit.
+RESIL_REG_METHODS = ['spearman', 'pearson']
 
 
 # ── Analysis helpers (one per analysis block, called once per city) ──────────
@@ -372,6 +414,49 @@ def analysis_spatial(label, H, mapping, gdf, weights, tag, lambda_ctx=None):
     return distances
 
 
+def analysis_socioeconomic(label, key, tag, gdf, H, mapping, weights,
+                           lambda_ctx=None, modes=INCOME_ENDPOINT_MODES,
+                           year=ACS_INCOME_YEAR):
+    """Per-component SOCIOECONOMIC characteristics block.  Ensures the raw ACS
+    median household income cache (table B19013, `year` 5-year) and maps each block
+    group's income to the flows; then for EACH endpoint mode in `modes` ('combined'
+    = origin+destination nan-aware mean, 'origin' = origin only) computes each
+    component's loading-weighted income from H and saves a per-mode bar figure
+    under component_characteristics/socioeconomic/.  RETURNS a DataFrame with one
+    median_income_<mode> column per mode (a raw CSV holds all of them) so the caller
+    adds them to the feature table, where they appear as right-hand columns of the
+    resilience-correlation heatmap; income is NOT a regression predictor.  RAISES if
+    the ACS data cannot be obtained (e.g. a missing CENSUS_API_KEY) — loud, not a
+    silent skip — so the run stops rather than producing the figure without income."""
+    os.makedirs(ACS_DATA_DIR, exist_ok=True)
+    raw_csv = os.path.join(ACS_DATA_DIR,
+                           f'{key}_block_group_acs_income_{year}_raw.csv')
+    ensure_city_income_raw(label, gdf['aggr_id'].tolist(), raw_csv, year=year)
+    income = load_city_income(raw_csv)
+    income_by_aggr = dict(zip(income['aggr_id'], income['median_household_income']))
+
+    lambda_tag = _lambda_tag(lambda_ctx)
+    os.makedirs(OUTPUT_SOCIO, exist_ok=True)
+    per_mode = []
+    for mode in modes:
+        income_array = build_income_array(mapping, income_by_aggr, mode=mode)
+        sf = socioeconomic_features(H, income_array, name=f'median_income_{mode}')
+        per_mode.append(sf)
+        vis_bar_component_income(
+            sf.rename(columns={f'median_income_{mode}': 'median_income'}), weights=weights,
+            title=f'{label}: per-component median household income ({mode})',
+            save_path=os.path.join(OUTPUT_SOCIO,
+                                   f'component_income_{mode}_{lambda_tag}{tag}.png'),
+        )
+    socio = pd.concat(per_mode, axis=1)             # one median_income_<mode> column per mode
+    os.makedirs(OUTPUT_SOCIO_RAW, exist_ok=True)
+    socio.to_csv(os.path.join(OUTPUT_SOCIO_RAW,
+                              f'socioeconomic_features_{lambda_tag}{tag}.csv'))
+    # The median_income_<mode> columns join `feats` and appear as right-hand
+    # columns of the resilience-correlation heatmap.
+    return socio
+
+
 def analysis_od_function(label, key, tag, gdf, H, mapping, weights,
                          lambda_ctx=None):
     """O×D functionality block.  Ensures the raw SLD cache,
@@ -457,31 +542,46 @@ def analysis_time_function_corr(feats, tag):
     )
 
 
-def analysis_resilience_corr(feats, tag, lambda_ctx=None):
-    """Resilience correlation block.  Splits its figures across two subfolders
-    of resilience_corr — func_vs_resilience gets the Spearman heatmap between
-    RES_COLS and the functional shares plus the top-pair scatter;
-    temporal_vs_resilience gets the weekday_ratio heatmap and the peak-slot /
-    peak-period bar charts.  The per-function curve stacks are drawn separately
-    by analysis_func_ordered_lines.  lambda_ctx tags the functional-share heatmap
-    filename so context-aware strengths can be compared."""
+def analysis_resilience_corr(feats, tag, lambda_ctx=None, methods=RESIL_CORR_METHODS):
+    """Resilience correlation block.  Draws the RES_COLS × feature heatmap once per
+    correlation method in `methods`, each into its own
+    heatmap_resilience_corr_<method> subfolder of func_vs_resilience (cell =
+    share_from/share_to split per category, plus single-cell mean_distance /
+    median_income on the RIGHT; lambda_ctx tags the filename).  The top-pair scatter
+    and the temporal_vs_resilience figures (weekday_ratio heatmap, peak-slot /
+    peak-period bars) use the FIRST method (Spearman by default).  The per-function
+    curve stacks are drawn separately by analysis_func_ordered_lines."""
     os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
-    rho, pval = time_function_correlation(feats, RES_COLS, TIME_COLS + FUNC_COLS)
-    # Functional-share heatmap — the 6 category columns only, each cell stacking
-    # share_from (upper) and share_to (lower).  weekday_ratio is split off into
-    # its own heatmap below.  Rows are coloured by their own max |rho|.
     lambda_tag = _lambda_tag(lambda_ctx)
-    vis_heatmap_corr_split(
-        rho, pval, time_cols=[], categories=SF_CATEGORIES,
-        save_path=os.path.join(OUTPUT_RESIL_CORR_HM,
-                               f'heatmap_resilience_corr_{lambda_tag}{tag}.png'),
-    )
+    feat_cols = TIME_COLS + FUNC_COLS + EXTRA_CORR_COLS
 
-    pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
-    vis_scatter_component_features(
-        feats, pairs,
-        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL, f'scatter_resilience_top_pairs{tag}.png'),
-    )
+    # Per correlation method, into its own heatmap_resilience_corr_<method> folder:
+    #   (1) the functional-share heatmap — each category cell stacks share_from
+    #       (upper) / share_to (lower); mean_distance and median_income are single
+    #       cells on the RIGHT; rows coloured by their own max |rho|;
+    #   (2) the top-|corr| pair scatter — RANK-transformed for spearman, RAW values
+    #       for pearson, so each scatter matches its heatmap's correlation.
+    rho_by_method = {}
+    for method in methods:
+        rho, pval = time_function_correlation(feats, RES_COLS, feat_cols, method=method)
+        rho_by_method[method] = (rho, pval)
+        out_dir = f'{OUTPUT_RESIL_CORR_HM_BASE}_{method}'
+        vis_heatmap_corr_split(
+            rho, pval, time_cols=[], categories=SF_CATEGORIES,
+            extra_cols=EXTRA_CORR_COLS,
+            save_path=os.path.join(out_dir,
+                                   f'heatmap_resilience_corr_{lambda_tag}{tag}.png'),
+        )
+        pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
+        vis_scatter_component_features(
+            feats, pairs, rank=(method == 'spearman'),
+            save_path=os.path.join(
+                out_dir, f'scatter_resilience_top_pairs_{lambda_tag}{tag}.png'),
+        )
+
+    # The temporal_vs_resilience figures (weekday_ratio heatmap + peak bars) use
+    # the first method's correlation (Spearman by default).
+    rho, pval = rho_by_method[methods[0]]
     os.makedirs(OUTPUT_TEMP_VS_RESIL, exist_ok=True)
     # The weekday_ratio column of the same correlation, on its own as a single
     # temporal feature against the resilience metrics.
@@ -501,22 +601,28 @@ def analysis_resilience_corr(feats, tag, lambda_ctx=None):
 
 
 def analysis_resilience_linear(feats, tag, lambda_ctx=None,
-                               merge_func_directions=True):
+                               merge_func_directions=True,
+                               methods=RESIL_REG_METHODS):
     """Multivariate Ridge counterpart to analysis_resilience_corr.  The functional
     predictors are either the 6 MERGED per-function shares (func_c = share_from_c +
     share_to_c, total share of the component's flow touching function c) when
     merge_func_directions is True, or the 12 directional shares (share_from_<c>,
     share_to_<c>) as-is when False; either way the component's loading-weighted
     mean flow distance (mean_distance) is appended as the final SPATIAL feature
-    (7 predictors merged, 13 unmerged).  One RANK ridge regression per resilience
-    metric (features AND the metric are rank-transformed, so it is Spearman-aligned
-    — a multivariate PARTIAL Spearman) predicts that metric's rank from those
-    features, so each standardized coefficient is that feature's rank-effect
-    CONTROLLING FOR the others (vs the Spearman block's one-at-a-time).  Outputs the
+    (7 predictors merged, 13 unmerged).  One ridge regression per resilience metric
+    predicts that metric from those features, so each standardized coefficient is
+    that feature's effect CONTROLLING FOR the others (vs the correlation block's
+    one-at-a-time).
+
+    Run ONCE PER METHOD in `methods`, each into its own resilience_reg_<method>
+    subfolder of func_vs_resilience: 'spearman' RANK-regresses (features AND the
+    metric rank-transformed, a multivariate PARTIAL Spearman matching the heatmap),
+    'pearson' regresses the RAW standardized values.  Each method writes the
     per-metric LOO predicted-vs-actual scatter (each panel titled with its
-    leave-one-out R² and PASS/FAIL) plus the coefficient + LOO-summary CSVs.
-    lambda_ctx tags every filename."""
-    os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
+    leave-one-out R² and PASS/FAIL) plus the coefficient + LOO-summary CSVs (under
+    that folder's raw_data/).  Returns {method: summary} (the per-metric LOO R²
+    table per method) for the cross-city within-city comparison.  lambda_ctx tags
+    every filename."""
     lambda_tag = _lambda_tag(lambda_ctx)
 
     if merge_func_directions:
@@ -533,22 +639,30 @@ def analysis_resilience_linear(feats, tag, lambda_ctx=None,
         func_cols = FUNC_COLS
     # mean_distance (the spatial feature, already in feats) is the final predictor.
     feature_cols = func_cols + ['mean_distance']
-    coef_mat, summary, pred_data = run_city_resilience_linear(
-        feats_m, RES_COLS, feature_cols)
 
-    # Per-city regression diagnostic: LOO predicted vs actual, one panel/metric.
-    vis_scatter_reg_pred(
-        pred_data, summary, RES_COLS,
-        title=f'{feats["city"].iloc[0]}: regression predicted vs actual (LOO)',
-        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL,
-                               f'scatter_resilience_reg_{lambda_tag}{tag}.png'),
-    )
-    os.makedirs(OUTPUT_RESIL_REG_RAW, exist_ok=True)
-    coef_mat.to_csv(os.path.join(OUTPUT_RESIL_REG_RAW,
-                                 f'linear_coef_{lambda_tag}{tag}.csv'))
-    summary.to_csv(os.path.join(OUTPUT_RESIL_REG_RAW,
-                                f'linear_loo_summary_{lambda_tag}{tag}.csv'))
-    return summary
+    summaries = {}
+    for method in methods:
+        rank = (method == 'spearman')   # spearman = rank regression, pearson = raw
+        out_dir = f'{OUTPUT_RESIL_REG_BASE}_{method}'
+        raw_dir = os.path.join(out_dir, 'raw_data')
+        coef_mat, summary, pred_data = run_city_resilience_linear(
+            feats_m, RES_COLS, feature_cols, rank=rank)
+        summaries[method] = summary
+
+        # Per-city regression diagnostic: LOO predicted vs actual, one panel/metric.
+        vis_scatter_reg_pred(
+            pred_data, summary, RES_COLS,
+            unit=('std rank' if rank else 'std value'),
+            title=f'{feats["city"].iloc[0]}: regression predicted vs actual '
+                  f'(LOO, {method})',
+            save_path=os.path.join(out_dir,
+                                   f'scatter_resilience_reg_{lambda_tag}{tag}.png'),
+        )
+        os.makedirs(raw_dir, exist_ok=True)
+        coef_mat.to_csv(os.path.join(raw_dir, f'linear_coef_{lambda_tag}{tag}.csv'))
+        summary.to_csv(os.path.join(raw_dir,
+                                    f'linear_loo_summary_{lambda_tag}{tag}.csv'))
+    return summaries
 
 
 def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
@@ -582,22 +696,28 @@ def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
 
 
 def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
-                        merge_func_directions=True):
+                        merge_func_directions=True,
+                        methods=RESIL_REG_METHODS):
     """Cross-city (leave-one-city-out) generalisation of the resilience
     regression: train on one city, TEST on the other (option A — each city
-    rank-transformed + standardized within itself, coefficients transferred, so
+    transformed + standardized within itself, coefficients transferred, so
     absolute-level differences between the two disasters are normalised away).
     With 2 cities this is a single hard probe (both directions), not a stable
-    estimate.  Saves a cross-city test-R² heatmap (with within-city LOO columns
-    for comparison) + a predicted-vs-actual scatter per direction, in
-    func_vs_resilience.  lambda_ctx tags the filenames.  merge_func_directions
-    matches analysis_resilience_linear: True (default) uses the 6 merged
-    func_<c> = share_from_c + share_to_c features, False the 12 directional
-    shares; mean_distance is appended either way (7 predictors merged, 13 not)."""
-    os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
+    estimate.  Run ONCE PER METHOD in `methods` (matching analysis_resilience_linear:
+    'spearman' transfers RANK-standardized coefficients, 'pearson' RAW-standardized),
+    each into its own resilience_reg_<method> subfolder: a cross-city test-R² heatmap
+    (with within-city LOO columns for comparison) + a predicted-vs-actual scatter per
+    direction, with the raw CSV under that folder's raw_data/.  loo_by_city maps each
+    city_code -> {method -> within-city LOO R² Series} (from analysis_resilience_linear).
+    lambda_ctx tags the filenames.  merge_func_directions matches the within-city
+    block: True (default) uses the 6 merged func_<c> = share_from_c + share_to_c
+    features, False the 12 directional shares; mean_distance is appended either way
+    (7 predictors merged, 13 not)."""
     lambda_tag = _lambda_tag(lambda_ctx)
 
-    # Per-city predictor tables (same recipe as analysis_resilience_linear).
+    # Per-city predictor tables (same recipe as analysis_resilience_linear).  The
+    # merge is method-independent (only the rank flag inside cross_city_resilience
+    # differs), so build the predictor tables once and reuse across methods.
     if merge_func_directions:
         # Merge same-category outflow + inflow into ONE feature per function.
         func_cols = [f'func_{c}' for c in SF_CATEGORIES]
@@ -613,34 +733,45 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
         cities = feats_by_city
     feature_cols = func_cols + ['mean_distance']
 
-    r2_table, pred = cross_city_resilience(cities, RES_COLS, feature_cols)
-    loo_table = pd.DataFrame(loo_by_city).reindex(index=RES_COLS)
+    for method in methods:
+        rank = (method == 'spearman')   # spearman = rank transfer, pearson = raw
+        out_dir = f'{OUTPUT_RESIL_REG_BASE}_{method}'
+        raw_dir = os.path.join(out_dir, 'raw_data')
 
-    vis_heatmap_cross_city_r2(
-        r2_table, loo=loo_table,
-        title='Cross-city resilience prediction (test R²; LOO cols = within-city)',
-        save_path=os.path.join(OUTPUT_FUNC_VS_RESIL, f'cross_city_r2_{lambda_tag}.png'))
-    os.makedirs(OUTPUT_RESIL_REG_RAW, exist_ok=True)
-    pd.concat([loo_table.add_prefix('LOO_'), r2_table], axis=1).to_csv(
-        os.path.join(OUTPUT_RESIL_REG_RAW, f'cross_city_r2_{lambda_tag}.csv'))
+        r2_table, pred = cross_city_resilience(
+            cities, RES_COLS, feature_cols, rank=rank)
+        # Within-city LOO for THIS method, as comparison columns in the heatmap.
+        loo_table = pd.DataFrame(
+            {code: loo_by_city[code][method] for code in loo_by_city}
+        ).reindex(index=RES_COLS)
 
-    # Predicted-vs-actual scatter per direction (reuse the within-city scatter).
-    for direction, pred_data in pred.items():
-        dir_summary = pd.DataFrame({
-            'loo_r2': {m: r2_table.loc[m, direction] for m in RES_COLS},
-            'passed': {m: (bool(r2_table.loc[m, direction] > 0)
-                           if pd.notna(r2_table.loc[m, direction]) else False)
-                       for m in RES_COLS},
-            'status': {m: ('ok' if pred_data[m] is not None else 'insufficient_data')
-                       for m in RES_COLS},
-        })
-        train, test = direction.split('->')
-        vis_scatter_reg_pred(
-            pred_data, dir_summary, RES_COLS, r2_label='test R²',
-            title=f'Cross-city: train {train} -> test {test}',
-            save_path=os.path.join(
-                OUTPUT_FUNC_VS_RESIL,
-                f'cross_city_scatter_{direction.replace("->", "_to_")}_{lambda_tag}.png'))
+        vis_heatmap_cross_city_r2(
+            r2_table, loo=loo_table,
+            title=f'Cross-city resilience prediction ({method}; test R²; '
+                  f'LOO cols = within-city)',
+            save_path=os.path.join(out_dir, f'cross_city_r2_{lambda_tag}.png'))
+        os.makedirs(raw_dir, exist_ok=True)
+        pd.concat([loo_table.add_prefix('LOO_'), r2_table], axis=1).to_csv(
+            os.path.join(raw_dir, f'cross_city_r2_{lambda_tag}.csv'))
+
+        # Predicted-vs-actual scatter per direction (reuse the within-city scatter).
+        for direction, pred_data in pred.items():
+            dir_summary = pd.DataFrame({
+                'loo_r2': {m: r2_table.loc[m, direction] for m in RES_COLS},
+                'passed': {m: (bool(r2_table.loc[m, direction] > 0)
+                               if pd.notna(r2_table.loc[m, direction]) else False)
+                           for m in RES_COLS},
+                'status': {m: ('ok' if pred_data[m] is not None else 'insufficient_data')
+                           for m in RES_COLS},
+            })
+            train, test = direction.split('->')
+            vis_scatter_reg_pred(
+                pred_data, dir_summary, RES_COLS, r2_label='test R²',
+                unit=('std rank' if rank else 'std value'),
+                title=f'Cross-city ({method}): train {train} -> test {test}',
+                save_path=os.path.join(
+                    out_dir,
+                    f'cross_city_scatter_{direction.replace("->", "_to_")}_{lambda_tag}.png'))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -734,6 +865,8 @@ def main():
         
         distances = analysis_spatial(label, H, mapping, gdf, weights, tag,
                                      lambda_ctx=ctx_lambda)
+        socio = analysis_socioeconomic(label, key, tag, gdf, H, mapping,
+                                       weights, lambda_ctx=ctx_lambda)
         M = analysis_od_function(label, key, tag, gdf, H, mapping, weights,
                                  lambda_ctx=ctx_lambda)
 
@@ -741,12 +874,15 @@ def main():
             # Temporal features read W[:n_nor].
             temporal_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, _INTERVAL_HOURS,
                               weekend_ratio_threshold=WEEKEND_RATIO_THRESHOLD),
-            
+
             # Functional profile reads M.
             functional_features(M, AXIS_CATEGORIES),
-            
+
             # Spatial: mean_distance, std_distance (reads H + OD centroid distances).
             spatial_features(H, distances),
+
+            # Socioeconomic: median_income per endpoint mode (loading-weighted, ACS).
+            socio,
             
             # Resilience reads W[n_dis:] against a baseline built from W[:n_nor].
             # The buffer columns [n_nor, n_dis) feed neither the resilience features
@@ -764,14 +900,16 @@ def main():
         analysis_func_ordered_lines(W, n_nor, n_dis, first_day_nor, first_day_dis,
                                     curves, feats, tag)
 
-        reg_summary = analysis_resilience_linear(
+        reg_summaries = analysis_resilience_linear(
             feats, tag, lambda_ctx=ctx_lambda,
             merge_func_directions=MERGE_FUNC_DIRECTIONS)
-        
-        # Stash for the cross-city (leave-one-city-out) test after the loop.
+
+        # Stash for the cross-city (leave-one-city-out) test after the loop.  Keep
+        # the per-method LOO R² so the cross-city heatmap's within-city columns
+        # match each method.
         city_code = tag.strip('_').upper()
         feats_by_city[city_code] = feats.copy()
-        loo_by_city[city_code]   = reg_summary['loo_r2']
+        loo_by_city[city_code]   = {m: s['loo_r2'] for m, s in reg_summaries.items()}
 
     # ── Cross-city generalisation (train one city, test the other) ─────────────
     if len(feats_by_city) >= 2:

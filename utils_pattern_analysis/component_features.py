@@ -40,7 +40,7 @@ time_function_correlation(df, time_cols, func_cols) -> (rho_df, pval_df)
 """
 import numpy as np
 import pandas as pd
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, pearsonr
 
 DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
         'Saturday', 'Sunday']
@@ -279,6 +279,36 @@ def spatial_features(H, distances):
                         index=pd.RangeIndex(H.shape[0], name='component'))
 
 
+def socioeconomic_features(H, income_array, name='median_income'):
+    """
+    Per-component loading-weighted median household income from the spatial factor
+    H and a per-flow income array (km-distance analogue spatial_features, but
+    NaN-AWARE because the Census suppresses some block-group incomes).
+
+    income_array[j] is flow j's median household income (USD), aligned to H's
+    columns (build via graph_io.build_income_array); NaN where unavailable.  For
+    component i the value is the loading-weighted mean over flows WITH a valid
+    income (missing-income flows are dropped, the weights renormalised):
+
+        value[i] = Σ_{j: valid} H[i,j]·income_j / Σ_{j: valid} H[i,j]
+
+    A component with no valid-income loading mass gets NaN.  `name` sets the single
+    output column (e.g. 'median_income_combined' / '_origin' for the two endpoint
+    modes).  Returns a DataFrame indexed by component with that one column.
+    """
+    H = np.asarray(H, dtype=float)
+    inc = np.asarray(income_array, dtype=float)
+    valid = ~np.isnan(inc)
+    inc_safe = np.where(valid, inc, 0.0)            # zeroed so NaN flows don't poison the sum
+    rows = []
+    for i in range(H.shape[0]):
+        wv  = np.where(valid, H[i], 0.0)            # weight only the valid-income flows
+        tot = wv.sum()
+        rows.append(float(np.sum(wv * inc_safe) / tot) if tot > 0 else np.nan)
+    return pd.DataFrame({name: rows},
+                        index=pd.RangeIndex(H.shape[0], name='component'))
+
+
 def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
     """
     Per-component DISASTER-period daily activity relative to a weekday/weekend-
@@ -416,25 +446,32 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
     return feats
 
 
-def time_function_correlation(df, time_cols, func_cols):
+def time_function_correlation(df, time_cols, func_cols, method='spearman'):
     """
-    Pairwise Spearman correlation between temporal and functional features
-    across components (rows of df).  Rows with NaN in a pair are dropped
-    pairwise.
+    Pairwise correlation between two feature-column groups across components
+    (rows of df).  Rows with NaN in a pair are dropped pairwise.
+
+    method : 'spearman' (rank correlation, default — robust to non-linearity and
+             outliers) or 'pearson' (linear correlation on the raw values).
 
     Returns
     -------
-    rho_df  : DataFrame [time_cols × func_cols] Spearman rho
+    rho_df  : DataFrame [time_cols × func_cols] correlation coefficient
     pval_df : DataFrame [time_cols × func_cols] two-sided p-values
     """
+    corr_fn = {'spearman': spearmanr, 'pearson': pearsonr}.get(method)
+    if corr_fn is None:
+        raise ValueError(f"method must be 'spearman' or 'pearson', got {method!r}")
     rho = pd.DataFrame(index=time_cols, columns=func_cols, dtype=float)
     pval = pd.DataFrame(index=time_cols, columns=func_cols, dtype=float)
     for t in time_cols:
         for f in func_cols:
             sub = df[[t, f]].dropna()
-            if len(sub) < 3:
+            # < 3 points, or a constant column (pearson is undefined / spearman NaN),
+            # gives NaN — guarding both keeps pearson from raising on constants.
+            if len(sub) < 3 or sub[t].nunique() < 2 or sub[f].nunique() < 2:
                 rho.loc[t, f], pval.loc[t, f] = np.nan, np.nan
                 continue
-            r, pv = spearmanr(sub[t], sub[f])
+            r, pv = corr_fn(sub[t], sub[f])
             rho.loc[t, f], pval.loc[t, f] = r, pv
     return rho, pval

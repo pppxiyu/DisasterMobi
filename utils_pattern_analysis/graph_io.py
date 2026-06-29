@@ -326,3 +326,36 @@ def build_distance_array(mapping, gdf, id_col='aggr_id'):
     co = coords.loc[origins][['cx', 'cy']].to_numpy()
     cd = coords.loc[dests  ][['cx', 'cy']].to_numpy()
     return np.linalg.norm(co - cd, axis=1) / 1000.0
+
+
+def build_income_array(mapping, income_by_aggr, mode='combined'):
+    """
+    Per-OD-flow median household income (USD) aligned to the NMF mapping / H-column
+    order — the socioeconomic analogue of build_distance_array.
+
+    mapping        : list of (origin_aggr_id, dest_aggr_id), one per flow (H column).
+    income_by_aggr : dict / Series  aggr_id -> block-group median household income
+                     (NaN where the Census suppressed it).
+    mode           : 'combined' -> nan-aware mean of the flow's origin & destination
+                     income; 'origin' -> the origin block group's income only.
+
+    Returns a float array (len = n_OD); a flow is NaN where its required endpoint
+    income(s) are missing (both endpoints missing in 'combined', the origin
+    missing in 'origin').
+    """
+    if not isinstance(income_by_aggr, dict):
+        income_by_aggr = dict(income_by_aggr)       # Series -> dict for fast lookups
+    o = np.array([income_by_aggr.get(orig, np.nan) for orig, _ in mapping],
+                 dtype=float)
+    if mode == 'origin':
+        return o
+    if mode != 'combined':
+        raise ValueError(f"mode must be 'combined' or 'origin', got {mode!r}")
+    d = np.array([income_by_aggr.get(dest, np.nan) for _, dest in mapping],
+                 dtype=float)
+    # nan-aware mean over the available endpoints (1 or 2); all-NaN flow -> NaN.
+    stacked = np.vstack([o, d])
+    valid = ~np.isnan(stacked)
+    cnt = valid.sum(axis=0)
+    tot = np.where(valid, stacked, 0.0).sum(axis=0)
+    return np.where(cnt > 0, tot / np.maximum(cnt, 1), np.nan)
