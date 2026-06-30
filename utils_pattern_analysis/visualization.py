@@ -1303,7 +1303,7 @@ def vis_heatmap_corr_merged(mat, pval=None, categories=None, save_path=None,
 
 def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
                          save_path=None, ncols=3, r2_label='LOO R²',
-                         unit='std rank'):
+                         unit='std rank', groups=None):
     """
     Regression diagnostic scatter for ONE city: one panel per resilience metric,
     each plotting the ACTUAL value (y, ground truth) against the leave-one-out
@@ -1313,6 +1313,10 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
     regression).  The dashed y=x line is perfect prediction; the panel title
     carries the LOO R² and PASS/FAIL.  An 'insufficient data' metric gets a blank
     panel.
+
+    `groups` (optional) dict metric -> per-point label array (e.g. the city-event
+    each pooled component belongs to): when given the points are coloured + a
+    legend is drawn, so a pooled scatter distinguishes its different city-events.
     """
     import math
     metrics = list(res_cols)
@@ -1331,8 +1335,21 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
             continue
         y_true, y_pred, comp_idx = pd_m
         # Prediction on x, ground truth on y (observed-vs-predicted calibration).
-        ax.scatter(y_pred, y_true, s=32, color='#1976D2', alpha=0.85,
-                   edgecolor='white', linewidth=0.5)
+        g = groups.get(m) if isinstance(groups, dict) else None
+        if g is not None:
+            g = np.asarray(g)
+            uniq = list(dict.fromkeys(g.tolist()))
+            cmap = plt.get_cmap('tab10')
+            for k, u in enumerate(uniq):
+                msk = (g == u)
+                ax.scatter(np.asarray(y_pred)[msk], np.asarray(y_true)[msk], s=32,
+                           color=cmap(k % 10), alpha=0.85, edgecolor='white',
+                           linewidth=0.5, label=str(u))
+            if idx == 0:
+                ax.legend(fontsize=6, loc='best', framealpha=0.6)
+        else:
+            ax.scatter(y_pred, y_true, s=32, color='#1976D2', alpha=0.85,
+                       edgecolor='white', linewidth=0.5)
         for xp, yt, ci in zip(y_pred, y_true, comp_idx):
             ax.annotate(str(int(ci)), (xp, yt), fontsize=6, color='grey',
                         xytext=(2, 2), textcoords='offset points')
@@ -1348,40 +1365,6 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
         axes[idx // ncols][idx % ncols].axis('off')
     if title:
         fig.suptitle(title, fontsize=13)
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
-def vis_heatmap_cross_city_r2(r2_table, loo=None, title=None, save_path=None,
-                              vmax=0.6):
-    """
-    Cross-city test-R² heatmap: rows = resilience metrics, columns = TRAIN->TEST
-    directions.  If `loo` (within-city LOO R², rows = metrics, cols = cities) is
-    given, those columns are prepended for comparison (within-city vs cross-city).
-    Diverging colour centred at 0 (green = beats the mean, red = worse than the
-    mean), clipped to ±vmax; each cell annotated with the R² (n/a if undefined).
-    """
-    tab = pd.concat([loo, r2_table], axis=1) if loo is not None else r2_table.copy()
-    V = tab.to_numpy(dtype=float)
-    n_r, n_c = V.shape
-    fig, ax = plt.subplots(figsize=(1.7 * n_c + 3.0, 0.7 * n_r + 2.2))
-    im = ax.imshow(np.clip(V, -vmax, vmax), cmap='RdYlGn', vmin=-vmax, vmax=vmax,
-                   aspect='auto')
-    for i in range(n_r):
-        for j in range(n_c):
-            v = V[i, j]
-            ax.text(j, i, 'n/a' if np.isnan(v) else f'{v:+.2f}',
-                    ha='center', va='center', fontsize=11, color='black')
-    ax.set_xticks(range(n_c))
-    ax.set_xticklabels(list(tab.columns), rotation=30, ha='right', fontsize=10)
-    ax.set_yticks(range(n_r))
-    ax.set_yticklabels(list(tab.index), fontsize=11)
-    ax.set_title(title or 'Cross-city test R²', fontsize=13)
-    fig.colorbar(im, ax=ax, pad=0.02, shrink=0.8).set_label('R² (clipped)', fontsize=9)
     fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)

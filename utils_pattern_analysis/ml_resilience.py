@@ -26,6 +26,7 @@ proof; a failing model's coefficients only describe the in-sample fit.  Ranking
 is global over the city's components (a mild optimism in the LOO check, like the
 full-data alpha selection).  Compositional features are best read in groups.
 """
+import warnings
 import numpy as np
 import pandas as pd
 from scipy.stats import rankdata
@@ -144,33 +145,33 @@ def run_city_resilience_linear(df_city, res_cols, feature_cols,
 
 
 def cross_city_resilience(feats_by_city, res_cols, feature_cols,
-                          alphas=RIDGE_ALPHAS, min_rows=MIN_ROWS, rank=True):
+                          alphas=RIDGE_ALPHAS, min_rows=MIN_ROWS, rank=True,
+                          split=None):
     """
-    Cross-city (leave-one-city-out) generalisation: train on one city, TEST on
-    another — the cleanest generalisation check (the test city is fully unseen).
+    Cross-city resilience generalisation driven by an explicit train/test split.
 
-    Option A (rank, level-robust): each city is rank-transformed + standardized
-    WITHIN ITSELF, so both cities sit on a common rank-standardized scale and
-    absolute-level differences between the two disasters are normalised away; the
-    train city's RidgeCV coefficients are then applied to the test city.  R² is
-    measured on the test city's (rank-standardized) actuals.
+    Each city-EVENT is rank/standardized WITHIN ITSELF (Option A, level-robust),
+    so absolute-level differences between disasters are normalised away; the units
+    are then POOLED.  Behaviour depends on `split` (lists of city-event codes):
 
-    feats_by_city : dict short_code -> per-component DataFrame (must contain
-                    feature_cols + res_cols).  Every ordered (train, test) pair is
-                    evaluated.  With 2 cities -> 2 directions per metric; this is a
-                    single hard probe, not a stable estimate (gets stronger as more
-                    cities are added).
+      * train and test DISJOINT  -> TRANSFER: fit ONE RidgeCV on the pooled train
+        units, predict each test unit.  r2_table columns = test codes.  R² measures
+        how well the relation learned on the (unseen-test) train set transfers.
+      * train and test the SAME set -> POOLED-LOO: pool the units' components and
+        leave-one-component-out CV (RidgeCV picks alpha, then LeaveOneOut).
+        r2_table has one column 'pooled_LOO'.  (One unit -> that unit's within-city LOO.)
+      * partial overlap -> warns (leakage; not an intended usage), treated as transfer.
+      * split is None -> warns and returns empty (caller should set CROSS_CITY_SPLIT).
 
     Returns
     -------
-    r2_table : DataFrame [res_cols x 'TRAIN->TEST' directions]  cross-city test R².
-    pred     : dict 'TRAIN->TEST' -> {metric -> (y_true, y_pred, comp_index) | None}
-               test-city predicted-vs-actual (rank-standardized) for the scatter.
+    r2_table : DataFrame [res_cols x columns]  test / pooled-LOO R².
+    pred     : dict column -> {metric -> (y_true, y_pred, comp_index) | None}.
+    groups   : dict column -> {metric -> array_of_city_event_per_point | None}.
+               Non-None only for the pooled-LOO column (to colour points by unit).
     """
     res_cols     = list(res_cols)
     feature_cols = list(feature_cols)
-    codes = list(feats_by_city)
-    pairs = [(a, b) for a in codes for b in codes if a != b]
 
     def _prep(df, target):
         sub = df[[target] + feature_cols].dropna()
@@ -185,20 +186,66 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
         y = (y - y.mean()) / (sy if sy > 0 else 1.0)
         return StandardScaler().fit_transform(X), y, sub.index.to_numpy()
 
-    r2, pred = {}, {}
-    for a, b in pairs:
-        d = f'{a}->{b}'
-        r2[d], pred[d] = {}, {}
+    if split is None:
+        warnings.warn("cross_city_resilience: no train/test split (CROSS_CITY_SPLIT "
+                      "is None); skipping the cross-city step.")
+        return pd.DataFrame(index=res_cols), {}, {}
+
+    present = set(feats_by_city)
+    train = [c for c in split.get('train', []) if c in present]
+    test  = [c for c in split.get('test', []) if c in present]
+    missing = (set(split.get('train', [])) | set(split.get('test', []))) - present
+    if missing:
+        warnings.warn(f"cross_city_resilience: split codes not found and ignored: "
+                      f"{sorted(missing)}")
+    if not train or not test:
+        warnings.warn(f"cross_city_resilience: empty train ({train}) or test ({test}) "
+                      f"after filtering to available units; skipping.")
+        return pd.DataFrame(index=res_cols), {}, {}
+
+    pooled_loo = (set(train) == set(test))
+    if not pooled_loo and (set(train) & set(test)):
+        warnings.warn(f"cross_city_resilience: train/test partially overlap "
+                      f"{sorted(set(train) & set(test))} (leakage); treating as transfer.")
+
+    r2, pred, groups = {}, {}, {}
+
+    if pooled_loo:
+        col = 'pooled_LOO'
+        r2[col], pred[col], groups[col] = {}, {}, {}
         for m in res_cols:
-            tr, te = _prep(feats_by_city[a], m), _prep(feats_by_city[b], m)
-            if tr is None or te is None:
-                r2[d][m], pred[d][m] = np.nan, None
+            parts = [(c, _prep(feats_by_city[c], m)) for c in train]
+            parts = [(c, p) for c, p in parts if p is not None]
+            if not parts or sum(p[0].shape[0] for _, p in parts) < min_rows:
+                r2[col][m], pred[col][m], groups[col][m] = np.nan, None, None
                 continue
-            Xtr, ytr, _ = tr
-            Xte, yte, cidx = te
-            ridge = RidgeCV(alphas=alphas).fit(Xtr, ytr)   # train city
-            ypred = ridge.predict(Xte)                     # transfer to test city
-            r2[d][m] = float(r2_score(yte, ypred))
-            pred[d][m] = (yte, ypred, cidx)
+            X = np.vstack([p[0] for _, p in parts])
+            y = np.concatenate([p[1] for _, p in parts])
+            cidx = np.concatenate([p[2] for _, p in parts])
+            unit = np.concatenate([np.array([c] * p[0].shape[0]) for c, p in parts])
+            alpha = float(RidgeCV(alphas=alphas).fit(X, y).alpha_)
+            y_pred = cross_val_predict(make_pipeline(StandardScaler(), Ridge(alpha=alpha)),
+                                       X, y, cv=LeaveOneOut())
+            r2[col][m] = float(r2_score(y, y_pred))
+            pred[col][m] = (y, y_pred, cidx)
+            groups[col][m] = unit
+    else:
+        for b in test:                               # pooled train -> each test unit
+            r2[b], pred[b], groups[b] = {}, {}, {}
+            for m in res_cols:
+                tr_parts = [p for p in (_prep(feats_by_city[t], m) for t in train)
+                            if p is not None]
+                te = _prep(feats_by_city[b], m)
+                if not tr_parts or te is None:
+                    r2[b][m], pred[b][m], groups[b][m] = np.nan, None, None
+                    continue
+                Xtr = np.vstack([p[0] for p in tr_parts])
+                ytr = np.concatenate([p[1] for p in tr_parts])
+                Xte, yte, cidx = te
+                ridge = RidgeCV(alphas=alphas).fit(Xtr, ytr)
+                ypred = ridge.predict(Xte)
+                r2[b][m] = float(r2_score(yte, ypred))
+                pred[b][m] = (yte, ypred, cidx)
+                groups[b][m] = None
     r2_table = pd.DataFrame(r2).reindex(index=res_cols)
-    return r2_table, pred
+    return r2_table, pred, groups

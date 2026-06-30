@@ -77,7 +77,6 @@ from utils_pattern_analysis.visualization import (
     vis_bar_resilience_by_peakslot, vis_heatmap_corr_split,
     vis_hist_function_entropy,
     vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
-    vis_heatmap_cross_city_r2,
 )
 from utils_pattern_analysis.space_function import (
     category_lookup_from_landuse, build_od_function_matrix,
@@ -184,6 +183,65 @@ FIRST_DAY_BR_DISASTER = 'Sunday'      # First day of BR's disaster portion (Aug 
 FIRST_DAY_FM_NORMAL   = 'Saturday'    # Sep 10 2022 (normal-segment start)
 FIRST_DAY_FM_DISASTER = 'Wednesday'   # Sep 28 2022 (disaster start, Ian landfall)
 
+# ── City-event registry — one entry per (city, disaster).  Add a city = add an entry. ──
+# This is the single source of truth for per-unit params and SUPERSEDES the per-city
+# BR_/FM_ constants above (DAYS_WINDOW_*, N_BEHAVIORS_*, CONTEXT_AWARE_*, FILTER_FACTOR_*,
+# FIRST_DAY_* ...), which main() no longer reads.  Only per-unit params live here; the rest
+# of the pipeline is global.  Paths are block_group (AGG_LEVEL is the global resolution
+# switch; SLD land-use only supports block_group).  Window = the trailing `window` days of
+# the trimmed graph = (window-buffer-disaster) normal + `buffer` pre-landfall + `disaster`
+# (landfall + recovery); `analysis_days` trims so landfall+14 sits at the sequence end.
+# `key` is the SLD/income filename prefix (city-level, shared across a city's events).
+# first_day_* are the weekday of the normal-window start / of the landfall day.
+_WIN, _BUF, _DIS = 33, 5, 15          # shared 33-day window: 13 normal + 5 buffer + 15 disaster
+CITY_EVENTS = [
+    dict(code='BR_Ida', label='Baton Rouge', key='Baton_Rouge',
+         graph='data/Baton_Rouge_Ida_2021_graph_intersection.pkl',
+         geo={'block_group': 'data/Baton_Rouge_block_group_geo.csv'},
+         analysis_days=151, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=11, l1_reg=0.5, filter_factor=0,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Wednesday', first_day_disaster='Sunday'),
+    dict(code='FM_Ian', label='Fort Myers', key='Fort_Myers',
+         graph='data/Fort_Myers_Ian_2022_graph_intersection.pkl',
+         geo={'block_group': 'data/Fort_Myers_block_group_geo.csv'},
+         analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=11, l1_reg=0.13, filter_factor=0,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    # New city-events: 87-day (L-56 -> L+30) block_group graphs, landfall at day 56
+    # -> analysis_days = 71.  Per-city k / l1 are TUNED (cum_loss LOO-CV, 2026-06-29,
+    # study nmf_loocv_cum_loss); filter_factor=0 = no OD filtering.
+    dict(code='WM_Dorian', label='Wilmington', key='Wilmington',
+         graph='data/Wilmington_Dorian_2019_graph_intersection.pkl',
+         geo={'block_group': 'data/Wilmington_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=9, l1_reg=1.626, filter_factor=0,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Sunday', first_day_disaster='Thursday'),
+    dict(code='WM_Isaias', label='Wilmington', key='Wilmington',
+         graph='data/Wilmington_Isaias_2020_graph_intersection.pkl',
+         geo={'block_group': 'data/Wilmington_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=9, l1_reg=0.315, filter_factor=0,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Thursday', first_day_disaster='Monday'),
+    dict(code='PC_Sally', label='Panama City', key='Panama_City',
+         graph='data/Panama_City_Sally_2020_graph_intersection.pkl',
+         geo={'block_group': 'data/Panama_City_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=8, l1_reg=1.469, filter_factor=0,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    dict(code='LC_Laura', label='Lake Charles', key='Lake_Charles',
+         graph='data/Lake_Charles_Laura_2020_graph_intersection.pkl',
+         geo={'block_group': 'data/Lake_Charles_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=10, l1_reg=0.549, filter_factor=0,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Sunday', first_day_disaster='Thursday'),
+]
+
 OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf')
 
 # All per-component characteristics live under component_characteristics, one
@@ -215,7 +273,7 @@ SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')
 # On-the-fly classification knobs for the space-function data (TF-IWF
 # reweighting, see utils_data_processing/fetch_sld_landuse.py).
 LANDUSE_WEIGHTING          = 'tf_iwf'   # 'tf_iwf' down-weights ubiquitous residential, 'raw_share' does not
-LANDUSE_IWF_SCALE          = 1.0        # IWF exponent.  Higher pulls labels toward rare functions
+LANDUSE_IWF_SCALE          = 1.52       # IWF exponent (tuned: cum_loss LOO-CV 2026-06-29).  Higher pulls labels toward rare functions
 LANDUSE_RESIDENTIAL_WEIGHT = 1.0        # Housing-unit to job equivalence; 1.0 treats one housing unit as one job
 LANDUSE_DOMINANT_THRESHOLD = 0.4        # Top-category share needed for a label, otherwise 'Mix'.
                                         # Lower gives fewer Mix
@@ -318,6 +376,15 @@ RESIL_CORR_METHODS = ['spearman', 'pearson']
 # 'pearson' regresses the RAW standardized values.  The rank flag fed to the Ridge
 # helpers is simply (method == 'spearman'); the scatter axis unit follows suit.
 RESIL_REG_METHODS = ['spearman', 'pearson']
+
+# Cross-city transfer split — the ONE knob you control.  Lists of city-event codes
+# (e.g. 'BR_Ida', 'FM_Ian'), which are the per-unit `code`/tag below.  The cross-city
+# step goes ONLY pooled(train) -> each test unit.  If train and test are the SAME set
+# it becomes a pooled leave-one-component-out instead.  A unit in neither list is
+# still decomposed/characterized but excluded from the cross-city step.  Both sides
+# are flexible.  None -> the cross-city step is skipped (with a warning).
+CROSS_CITY_SPLIT = {'train': ['FM_Ian', 'WM_Dorian', 'WM_Isaias', 'PC_Sally', 'LC_Laura'],
+                    'test':  ['BR_Ida']}
 
 
 # ── Analysis helpers (one per analysis block, called once per city) ──────────
@@ -697,29 +764,27 @@ def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
 
 def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
                         merge_func_directions=True,
-                        methods=RESIL_REG_METHODS):
-    """Cross-city (leave-one-city-out) generalisation of the resilience
-    regression: train on one city, TEST on the other (option A — each city
-    transformed + standardized within itself, coefficients transferred, so
-    absolute-level differences between the two disasters are normalised away).
-    With 2 cities this is a single hard probe (both directions), not a stable
-    estimate.  Run ONCE PER METHOD in `methods` (matching analysis_resilience_linear:
-    'spearman' transfers RANK-standardized coefficients, 'pearson' RAW-standardized),
-    each into its own resilience_reg_<method> subfolder: a cross-city test-R² heatmap
-    (with within-city LOO columns for comparison) + a predicted-vs-actual scatter per
-    direction, with the raw CSV under that folder's raw_data/.  loo_by_city maps each
-    city_code -> {method -> within-city LOO R² Series} (from analysis_resilience_linear).
-    lambda_ctx tags the filenames.  merge_func_directions matches the within-city
-    block: True (default) uses the 6 merged func_<c> = share_from_c + share_to_c
-    features, False the 12 directional shares; mean_distance is appended either way
-    (7 predictors merged, 13 not)."""
+                        methods=RESIL_REG_METHODS, split=None):
+    """Cross-city resilience generalisation driven by an explicit train/test `split`
+    (CROSS_CITY_SPLIT) of city-event codes.  Each unit is rank/standardized within
+    itself (Option A), then pooled; see cross_city_resilience for the two modes:
+      - train & test DISJOINT  -> TRANSFER: pooled(train) -> predict each test unit
+        (r2 columns = test units; LOO comparison column = that test unit's own
+        within-unit LOO).
+      - train & test the SAME set -> POOLED-LOO across the pool's components (one
+        'pooled_LOO' column; the scatter colours points by city-event).
+    Runs once per method (spearman=rank / pearson=raw) into resilience_reg_<method>/.
+    split=None -> the step is skipped with a warning.  loo_by_city maps city-event
+    code -> {method -> within-unit LOO R² Series}.  lambda_ctx tags the filenames."""
+    if split is None:
+        print("  [cross-city] CROSS_CITY_SPLIT is None -> skipping the cross-city step.")
+        return
     lambda_tag = _lambda_tag(lambda_ctx)
 
-    # Per-city predictor tables (same recipe as analysis_resilience_linear).  The
+    # Per-unit predictor tables (same recipe as analysis_resilience_linear).  The
     # merge is method-independent (only the rank flag inside cross_city_resilience
-    # differs), so build the predictor tables once and reuse across methods.
+    # differs), so build them once and reuse across methods.
     if merge_func_directions:
-        # Merge same-category outflow + inflow into ONE feature per function.
         func_cols = [f'func_{c}' for c in SF_CATEGORIES]
         cities = {}
         for code, city_feats in feats_by_city.items():
@@ -728,50 +793,46 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
                 merged_feats[f'func_{c}'] = city_feats[f'share_from_{c}'] + city_feats[f'share_to_{c}']
             cities[code] = merged_feats
     else:
-        # Keep outflow and inflow as the 12 separate directional shares.
         func_cols = FUNC_COLS
         cities = feats_by_city
     feature_cols = func_cols + ['mean_distance']
 
+    train = [c for c in split.get('train', []) if c in cities]
+    test  = [c for c in split.get('test', []) if c in cities]
+    pooled_loo = bool(train) and (set(train) == set(test))
+    train_lbl  = '+'.join(train)
+
     for method in methods:
         rank = (method == 'spearman')   # spearman = rank transfer, pearson = raw
         out_dir = f'{OUTPUT_RESIL_REG_BASE}_{method}'
-        raw_dir = os.path.join(out_dir, 'raw_data')
 
-        r2_table, pred = cross_city_resilience(
-            cities, RES_COLS, feature_cols, rank=rank)
-        # Within-city LOO for THIS method, as comparison columns in the heatmap.
-        loo_table = pd.DataFrame(
-            {code: loo_by_city[code][method] for code in loo_by_city}
-        ).reindex(index=RES_COLS)
+        r2_table, pred, groups = cross_city_resilience(
+            cities, RES_COLS, feature_cols, rank=rank, split=split)
+        if r2_table.shape[1] == 0:
+            continue                                    # skipped/empty (warning already emitted)
 
-        vis_heatmap_cross_city_r2(
-            r2_table, loo=loo_table,
-            title=f'Cross-city resilience prediction ({method}; test R²; '
-                  f'LOO cols = within-city)',
-            save_path=os.path.join(out_dir, f'cross_city_r2_{lambda_tag}.png'))
-        os.makedirs(raw_dir, exist_ok=True)
-        pd.concat([loo_table.add_prefix('LOO_'), r2_table], axis=1).to_csv(
-            os.path.join(raw_dir, f'cross_city_r2_{lambda_tag}.csv'))
-
-        # Predicted-vs-actual scatter per direction (reuse the within-city scatter).
-        for direction, pred_data in pred.items():
-            dir_summary = pd.DataFrame({
-                'loo_r2': {m: r2_table.loc[m, direction] for m in RES_COLS},
-                'passed': {m: (bool(r2_table.loc[m, direction] > 0)
-                               if pd.notna(r2_table.loc[m, direction]) else False)
+        # Predicted-vs-actual scatter per output column (test unit, or the pool).
+        for col, pred_data in pred.items():
+            col_summary = pd.DataFrame({
+                'loo_r2': {m: r2_table.loc[m, col] for m in RES_COLS},
+                'passed': {m: (bool(r2_table.loc[m, col] > 0)
+                               if pd.notna(r2_table.loc[m, col]) else False)
                            for m in RES_COLS},
                 'status': {m: ('ok' if pred_data[m] is not None else 'insufficient_data')
                            for m in RES_COLS},
             })
-            train, test = direction.split('->')
+            if pooled_loo:
+                title = f'Pooled-LOO ({method}): {train_lbl}'
+                fname = f'cross_city_scatter_pooledLOO_{lambda_tag}.png'
+            else:
+                title = f'Cross-city ({method}): train [{train_lbl}] -> test {col}'
+                fname = f'cross_city_scatter_{col}_{lambda_tag}.png'
             vis_scatter_reg_pred(
-                pred_data, dir_summary, RES_COLS, r2_label='test R²',
+                pred_data, col_summary, RES_COLS, r2_label='test R²',
                 unit=('std rank' if rank else 'std value'),
-                title=f'Cross-city ({method}): train {train} -> test {test}',
-                save_path=os.path.join(
-                    out_dir,
-                    f'cross_city_scatter_{direction.replace("->", "_to_")}_{lambda_tag}.png'))
+                groups=groups.get(col),         # colours pooled-LOO points by city-event
+                title=title,
+                save_path=os.path.join(out_dir, fname))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -782,83 +843,52 @@ def main():
     # Trimming keeps the FIRST analysis_days days, which drops the late
     # recovery tail and leaves landfall + 14 recovery days at the sequence end
     # for the trailing window taken in build_city_matrices.
-    br_gdf = load_city_geo('Baton Rouge', AGG_LEVEL, BR_GEO_CSV)
-    fm_gdf = load_city_geo('Fort Myers',  AGG_LEVEL, FM_GEO_CSV)
-
-    br_graphs = load_graphs_trimmed(BR_GRAPH_PATH, BR_ANALYSIS_DAYS,
-                                    SLOT_PER_DAY, label='Baton Rouge')
-    fm_graphs = load_graphs_trimmed(FM_GRAPH_PATH, FM_ANALYSIS_DAYS,
-                                    SLOT_PER_DAY, label='Fort Myers')
-
-    # ── Compute ────────────────────────────────────────────────────────────────
-
-    # The disaster argument of build_city_matrices covers everything after the
-    # clean normal segment (buffer plus disaster), so the returned n_nor marks
-    # the end of the clean normal columns.  The landfall column n_dis is n_nor
-    # plus the buffer slots.
-    print("\n── Baton Rouge ──")
-    X_br_all, n_nor_br, mapping_br = build_city_matrices(
-        br_graphs, DAYS_WINDOW_BR,
-        DAYS_BUFFER_BR + DAYS_DISASTER_IN_WIN_BR, FILTER_FACTOR_BR,
-    )
-    n_dis_br = n_nor_br + DAYS_BUFFER_BR * SLOTS_ACTIVE
-
-    print("\n── Fort Myers ──")
-    X_fm_all, n_nor_fm, mapping_fm = build_city_matrices(
-        fm_graphs, DAYS_WINDOW_FM,
-        DAYS_BUFFER_FM + DAYS_DISASTER_IN_WIN_FM, FILTER_FACTOR_FM,
-    )
-    n_dis_fm = n_nor_fm + DAYS_BUFFER_FM * SLOTS_ACTIVE
-
-    # All three segments selected -> fit_time_cols=None -> the exact original
-    # full-window fit_transform path.  A subset fits the basis on those columns
-    # only and projects the full window onto it.
     _ALL_SEGMENTS = {'normal', 'buffer', 'disaster'}
-    fit_time_cols_br = (None if set(NMF_FIT_SEGMENTS_BR) == _ALL_SEGMENTS
-                        else select_segment_columns(NMF_FIT_SEGMENTS_BR,
-                                                    n_nor_br, n_dis_br, X_br_all.shape[1]))
-    fit_time_cols_fm = (None if set(NMF_FIT_SEGMENTS_FM) == _ALL_SEGMENTS
-                        else select_segment_columns(NMF_FIT_SEGMENTS_FM,
-                                                    n_nor_fm, n_dis_fm, X_fm_all.shape[1]))
+    units = {}   # code -> everything the per-unit analysis loop needs
+    for cfg in CITY_EVENTS:
+        label, code = cfg['label'], cfg['code']
+        print()
+        print(f"── {label} [{code}] ──")
+        gdf = load_city_geo(label, AGG_LEVEL, cfg['geo'])
+        graphs = load_graphs_trimmed(cfg['graph'], cfg['analysis_days'],
+                                     SLOT_PER_DAY, label=label)
+        X_all, n_nor, mapping = build_city_matrices(
+            graphs, cfg['window'], cfg['buffer'] + cfg['disaster'], cfg['filter_factor'])
+        n_dis = n_nor + cfg['buffer'] * SLOTS_ACTIVE
+        # All three fit segments -> fit_time_cols=None (exact original full-window fit);
+        # a subset fits the basis on those columns and projects the full window onto it.
+        fit_time_cols = (None if set(cfg['fit_segments']) == _ALL_SEGMENTS
+                         else select_segment_columns(cfg['fit_segments'],
+                                                     n_nor, n_dis, X_all.shape[1]))
+        print(f"── NMF: {label} [{code}] ──")
+        if cfg['context_aware']:
+            landuse = load_landuse_for_context(label, cfg['key'], gdf)
+            W, H, weights = decompose_city_context(
+                X_all, cfg['n_behaviors'], mapping, landuse,
+                lambda_ctx=cfg['lambda_ctx'], feature_mode=FLOW_FEATURE_MODE,
+                l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
+        else:
+            W, H, weights = decompose_city(
+                X_all, cfg['n_behaviors'], l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
+        units[code] = dict(
+            label=label, key=cfg['key'], tag='_' + code, gdf=gdf, H=H, W=W,
+            mapping=mapping, weights=weights, n_nor=n_nor, n_dis=n_dis,
+            first_day_nor=cfg['first_day_normal'], first_day_dis=cfg['first_day_disaster'],
+            ctx_lambda=(cfg['lambda_ctx'] if cfg['context_aware'] else None))
 
-    print("\n── NMF: Baton Rouge ──")
-    if CONTEXT_AWARE_BR:
-        landuse_br = load_landuse_for_context('Baton Rouge', 'Baton_Rouge', br_gdf)
-        W_br, H_br, weights_br = decompose_city_context(
-            X_br_all, N_BEHAVIORS_BR, mapping_br, landuse_br,
-            lambda_ctx=LAMBDA_CTX_BR, feature_mode=FLOW_FEATURE_MODE,
-            l1_reg=L1_REG_BR, fit_time_cols=fit_time_cols_br)
-    else:
-        W_br, H_br, weights_br = decompose_city(
-            X_br_all, N_BEHAVIORS_BR, l1_reg=L1_REG_BR, fit_time_cols=fit_time_cols_br)
-
-    print("\n── NMF: Fort Myers ──")
-    if CONTEXT_AWARE_FM:
-        landuse_fm = load_landuse_for_context('Fort Myers', 'Fort_Myers', fm_gdf)
-        W_fm, H_fm, weights_fm = decompose_city_context(
-            X_fm_all, N_BEHAVIORS_FM, mapping_fm, landuse_fm,
-            lambda_ctx=LAMBDA_CTX_FM, feature_mode=FLOW_FEATURE_MODE,
-            l1_reg=L1_REG_FM, fit_time_cols=fit_time_cols_fm)
-    else:
-        W_fm, H_fm, weights_fm = decompose_city(
-            X_fm_all, N_BEHAVIORS_FM, l1_reg=L1_REG_FM, fit_time_cols=fit_time_cols_fm)
-
-    # ── Analysis ───────────────────────────────────────────────────────────────
-
-    # Per-city context strength tags the func entropy figure/CSV; None (baseline)
-    # when context-aware NMF is off, so the filename still distinguishes runs.
-    ctx_lambda_br = LAMBDA_CTX_BR if CONTEXT_AWARE_BR else None
-    ctx_lambda_fm = LAMBDA_CTX_FM if CONTEXT_AWARE_FM else None
+    # ── Analysis ──
 
     feats_by_city = {}   # short code -> per-component feats, for the cross-city test
     loo_by_city   = {}   # short code -> within-city LOO R² (for the comparison)
 
-    for label, key, tag, gdf, H, mapping, weights, W, n_nor, n_dis, first_day_nor, first_day_dis, ctx_lambda in (
-        ('Baton Rouge', 'Baton_Rouge', '_br', br_gdf, H_br, mapping_br, weights_br,
-         W_br, n_nor_br, n_dis_br, FIRST_DAY_BR_NORMAL, FIRST_DAY_BR_DISASTER, ctx_lambda_br),
-        ('Fort Myers',  'Fort_Myers',  '_fm', fm_gdf, H_fm, mapping_fm, weights_fm,
-         W_fm, n_nor_fm, n_dis_fm, FIRST_DAY_FM_NORMAL, FIRST_DAY_FM_DISASTER, ctx_lambda_fm),
-    ):
+    # Each unit's per-component feats + within-unit LOO are keyed by its city-event
+    # code ('BR_Ida', 'WM_Dorian', ...), which is what CROSS_CITY_SPLIT lists.
+    for code, u in units.items():
+        label, key, tag = u['label'], u['key'], u['tag']
+        gdf, H, mapping, weights, W = u['gdf'], u['H'], u['mapping'], u['weights'], u['W']
+        n_nor, n_dis = u['n_nor'], u['n_dis']
+        first_day_nor, first_day_dis, ctx_lambda = (
+            u['first_day_nor'], u['first_day_dis'], u['ctx_lambda'])
         print(f"\n── {label}: analysis ──")
         analysis_component_signature(W, n_nor, n_dis, first_day_nor, first_day_dis, tag,
                                      gdf=gdf, H=H, mapping=mapping)
@@ -904,19 +934,18 @@ def main():
             feats, tag, lambda_ctx=ctx_lambda,
             merge_func_directions=MERGE_FUNC_DIRECTIONS)
 
-        # Stash for the cross-city (leave-one-city-out) test after the loop.  Keep
-        # the per-method LOO R² so the cross-city heatmap's within-city columns
+        # Stash for the cross-city test after the loop, keyed by the city-event code.
+        # Keep the per-method LOO R² so the cross-city heatmap's within-unit columns
         # match each method.
-        city_code = tag.strip('_').upper()
-        feats_by_city[city_code] = feats.copy()
-        loo_by_city[city_code]   = {m: s['loo_r2'] for m, s in reg_summaries.items()}
+        feats_by_city[code] = feats.copy()
+        loo_by_city[code]   = {m: s['loo_r2'] for m, s in reg_summaries.items()}
 
-    # ── Cross-city generalisation (train one city, test the other) ─────────────
-    if len(feats_by_city) >= 2:
+    # ── Cross-city generalisation (explicit train-set -> test-set, CROSS_CITY_SPLIT) ──
+    if feats_by_city:
         print("\n── Cross-city resilience test ──")
-        # loo_by_city and lambda_ctx are just for display or filename
-        analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=ctx_lambda_br,
-                            merge_func_directions=MERGE_FUNC_DIRECTIONS)
+        analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
+                            merge_func_directions=MERGE_FUNC_DIRECTIONS,
+                            split=CROSS_CITY_SPLIT)
 
 
 if __name__ == '__main__':
