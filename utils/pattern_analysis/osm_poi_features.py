@@ -1,12 +1,14 @@
 """
-Spatiotemporal feature extraction using OpenStreetMap data (via srai).
+OSM/POI feature extraction per Tucker component (via srai).
+Only used by archive/run_pattern_tucker.py, behind its RUN_SPATIAL_FEATURES flag.
+Unrelated to component_features.spatial_features() (the production flow-distance
+feature).
 
 Functions
 ---------
 union_filters          – merge per-category OSM tag filters
 aggregate_to_categories– sum fine-grained OSM counts into high-level categories
 get_component_features – weighted POI profiles per decomposition component
-tf_iwf                 – TF-IWF normalisation for component × POI matrices
 get_comp_features_df   – full pipeline: load OSM, embed, aggregate, profile
 vis_heatmap_component_similarity – cosine-similarity heatmap between two cities' components
 
@@ -104,8 +106,8 @@ def get_component_features(U, spatial_mapping, share_features):
     Parameters
     ----------
     U              : ndarray (zones × components)
-    spatial_mapping: dict {index → tract_name}
-    share_features : DataFrame (tract_name × POI categories)
+    spatial_mapping: dict {index → aggr_id}
+    share_features : DataFrame (aggr_id × POI categories)
 
     Returns
     -------
@@ -118,37 +120,14 @@ def get_component_features(U, spatial_mapping, share_features):
     return pd.DataFrame(matrix, index=names, columns=share_features.columns)
 
 
-def tf_iwf(df, scale_iwf=1, normalize=None):
-    """
-    Computes TF-IWF feature vectors for a (components × POI types) count matrix.
-
-    normalize : None | 'L2' | 'total'
-    """
-    counts    = df.to_numpy(dtype=float)
-    row_tots  = counts.sum(axis=1, keepdims=True)
-    tf        = np.divide(counts, row_tots, out=np.zeros_like(counts), where=row_tots != 0)
-    nt        = counts.sum(axis=0)
-    iwf       = np.log(nt.sum() / (nt + 1e-9)) ** scale_iwf
-    result    = tf * iwf
-
-    if normalize == "L2":
-        norms  = np.linalg.norm(result, axis=1, keepdims=True)
-        result = np.divide(result, norms, out=np.zeros_like(result), where=norms != 0)
-    elif normalize == "total":
-        sums   = result.sum(axis=1, keepdims=True)
-        result = np.divide(result, sums, out=np.zeros_like(result), where=sums != 0)
-
-    return pd.DataFrame(result, index=df.index, columns=df.columns)
-
-
 def get_comp_features_df(tracts_gdf, U, s_mapping, scale_iwf=1, norm_method='total'):
     """
-    Full pipeline: load OSM POI counts for tracts, embed, aggregate to
-    functional categories, and compute per-component feature profiles.
+    Full pipeline: load OSM POI counts for the city's zones, embed, aggregate
+    to functional categories, and compute per-component feature profiles.
 
     Parameters
     ----------
-    tracts_gdf  : GeoDataFrame with 'aggr_id' column, CRS EPSG:4326
+    tracts_gdf  : zone GeoDataFrame with 'aggr_id' column, CRS EPSG:4326
     U           : spatial factor matrix (zones × components)
     s_mapping   : dict {tensor_index → aggr_id}
     """
@@ -175,8 +154,8 @@ def get_comp_features_df(tracts_gdf, U, s_mapping, scale_iwf=1, norm_method='tot
 
 def vis_heatmap_component_similarity(df1, df2, output_dir='outputs', tag=''):
     """
-    Cosine-similarity heatmap between rows of df1 (Baton Rouge) and df2 (New Orleans),
-    based on OSM land-use feature vectors per component.
+    Cosine-similarity heatmap between rows of df1 (basis city) and df2 (target
+    city), based on OSM land-use feature vectors per component.
     Saves to: <output_dir>/component_similarity<tag>.png
     """
     import os

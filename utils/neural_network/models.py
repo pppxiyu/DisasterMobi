@@ -7,11 +7,6 @@ EarlyStopper              – tracks validation loss and signals when to stop
 GraphGRUCell              – single GRU step with TAGConv graph convolutions
 GraphGRUPredictor         – wraps GraphGRUCell into a sequence-to-one predictor
 TempoPhysicsGraphGRUPredictor – adds a learnable physics (Gamma) gate to GraphGRUPredictor
-StackedGraphGRUPredictor  – two-layer GRU with residual connections
-
-Functions
----------
-weighted_mse_loss – MSE that penalises non-zero targets more heavily
 """
 import numpy as np
 import torch
@@ -39,17 +34,6 @@ class EarlyStopper:
             self.counter += 1
             if self.counter >= self.patience:
                 self.stop = True
-
-
-def weighted_mse_loss(pred, target, non_zero_weight=15.0, epsilon=0.5):
-    """
-    MSE where non-zero targets receive a higher weight.
-
-    Useful for sparse flow data where most edges have zero flow.
-    """
-    weights = torch.ones_like(target)
-    weights[torch.abs(target) > epsilon] = non_zero_weight
-    return torch.mean(weights * (pred - target) ** 2)
 
 
 # ── Building block ────────────────────────────────────────────────────────────
@@ -197,26 +181,3 @@ class TempoPhysicsGraphGRUPredictor(nn.Module):
         raw_reduced  = raw_pred * (1 + gated_gamma)
         return (raw_reduced - self.target_mean) / self.target_std
 
-
-class StackedGraphGRUPredictor(nn.Module):
-    """Two-layer Graph GRU with a residual skip connection between layers."""
-
-    def __init__(self, in_channels, hidden_channels, out_channels, k_hops=3):
-        super().__init__()
-        self.gru1 = GraphGRUCell(in_channels,     hidden_channels, k_hops=k_hops)
-        self.gru2 = GraphGRUCell(hidden_channels, hidden_channels, k_hops=k_hops)
-        self.readout = nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_channels // 2, out_channels),
-        )
-
-    def forward(self, x_seq_batch):
-        h1 = h2 = None
-        for snapshot in x_seq_batch:
-            h1 = self.gru1(x=snapshot.x, edge_index=snapshot.edge_index,
-                            edge_weight=snapshot.edge_attr, h=h1)
-            h2_new = self.gru2(x=h1, edge_index=snapshot.edge_index,
-                                edge_weight=snapshot.edge_attr, h=h2)
-            h2 = h2_new + h1   # residual
-        return self.readout(h2)

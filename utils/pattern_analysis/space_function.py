@@ -29,7 +29,6 @@ Functions
 ---------
 category_lookup_from_landuse(landuse_df, ...) -> dict{aggr_id: category}
 build_od_function_matrix(H, mapping, cat_lookup, categories) -> (M[k×C×C], retained[k])
-od_function_to_dataframe(M, categories, weights) -> tidy long-format DataFrame
 """
 import numpy as np
 import pandas as pd
@@ -165,19 +164,3 @@ def build_flow_poi_feature(mapping, landuse_df, flow_scale, mode='outer',
     labels = ([f'{a}*{b}' for a in categories for b in categories]
               if mode == 'outer' else list(categories))
     return Y, labels, mask
-
-
-def od_function_to_dataframe(M, categories, weights=None):
-    """
-    Flatten [k × C × C] proportions into a tidy long-format DataFrame with
-    columns: component, weight, origin_function, dest_function, proportion.
-    """
-    rows = []
-    for comp in range(M.shape[0]):
-        w = float(weights[comp]) if weights is not None else np.nan
-        for a, o in enumerate(categories):
-            for b, d in enumerate(categories):
-                rows.append((comp, w, o, d, M[comp, a, b]))
-    return pd.DataFrame(rows, columns=['component', 'weight',
-                                       'origin_function', 'dest_function',
-                                       'proportion'])

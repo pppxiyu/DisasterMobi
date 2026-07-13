@@ -94,7 +94,8 @@ def periodic_trim(data, cycle_len, trim_start, trim_end):
 
 
 def calculate_total_flows(graphs):
-    """Returns total edge flow for each graph in the list."""
+    """Returns total edge flow for each graph in the list.
+    Only used by archive/run_pattern_temporal_decay.py."""
     return [sum(d.get('flow', 0) for _, _, d in G.edges(data=True)) for G in graphs]
 
 
@@ -236,6 +237,7 @@ def filter_inactive_locations_2d(X, X_impact, edge_names, threshold=10):
 def graphs_to_3d_tensor(graph_list):
     """
     Converts a list of DiGraphs into a 3-D NumPy tensor (Origin × Dest × Time).
+    Called by archive/run_pattern_tucker.py and by filter_inactive_locations_2d.
 
     Returns
     -------
@@ -279,6 +281,7 @@ def filter_inactive_locations(tensor1, tensor2, spatial_mapping, threshold=10):
 def calculate_segment_average(tensor, segment_len):
     """
     Splits the time axis (axis 2) into segments and averages them.
+    Only used by archive/run_pattern_tucker.py.
     Input:  (I, J, T)
     Output: (I, J, segment_len)
 

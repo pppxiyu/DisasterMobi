@@ -1,33 +1,18 @@
 """
-Inter-city and inter-period component matching.
+Inter-city and inter-period Tucker component matching.
+Only used by archive/run_pattern_tucker.py.
 
 Functions
 ---------
-calculate_dtw_matrix_standard  – pairwise DTW distance matrix
 calculate_correlation_matrix   – pairwise Pearson correlation matrix
-reconstruct_v_no_with_dtw      – reconstruct NO components from BR using DTW weights
 process_weight_matrix          – softmax-style weight matrix from a correlation matrix
-reconstruct_v_no_with_coor     – reconstruct via matrix multiplication
+reconstruct_v_no_with_coor     – reconstruct via matrix multiplication ("v_no" = the
+                                 target city's temporal factors; the name dates from
+                                 the New Orleans era, the logic is city-agnostic)
 get_global_temporal_trends     – core-energy-weighted U3 signatures
 broadcast_matrix_by_weekday    – tile a 7-day pattern to any length with weekday alignment
 """
 import numpy as np
-from dtw import dtw
-
-
-def calculate_dtw_matrix_standard(V, V_no, n_components=10):
-    """
-    Pairwise DTW distance matrix between the first n components of V and V_no.
-    Returns an (n × n) distance matrix.
-    """
-    n = min(n_components, V.shape[1], V_no.shape[1])
-    dtw_matrix = np.zeros((n, n))
-    for i in range(n):
-        for j in range(n):
-            a = np.asarray(V[:, i]).reshape(-1)
-            b = np.asarray(V_no[:, j]).reshape(-1)
-            dtw_matrix[i, j] = dtw(a, b, distance_only=True).distance
-    return dtw_matrix
 
 
 def calculate_correlation_matrix(V, V_no):
@@ -44,17 +29,6 @@ def calculate_correlation_matrix(V, V_no):
             c = np.corrcoef(V[:, i], V_no[:, j])[0, 1]
             corr[i, j] = np.nan_to_num(c)
     return corr
-
-
-def reconstruct_v_no_with_dtw(V_basis, dtw_results, n_components=5, temperature=0.5):
-    """
-    Reconstructs target components from a basis using DTW-based kernel weights.
-    Returns (weights_normalized, V_reconstructed).
-    """
-    V_b    = V_basis[:, :n_components]
-    w      = np.exp(-dtw_results / temperature)
-    w_norm = w / w.sum(axis=0, keepdims=True)
-    return w_norm, V_b @ w_norm
 
 
 def process_weight_matrix(corr_results, temperature=0.2):

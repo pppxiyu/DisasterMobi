@@ -1,12 +1,18 @@
 """
 Shared configuration: file paths and time-slot constants used by all pipelines.
 
-City #1 = Baton Rouge (Hurricane Ida, 2021).
-City #2 = Fort Myers   (Hurricane Ian, 2022).   ← replaced New Orleans (2026-06)
+TWO city-definition mechanisms coexist in this repo:
+  * The production NMF pipeline (run_pattern_nmf.py) defines its own 5-city-event
+    registry, CITY_EVENTS (BR_Ida, FM_Ian, WM_Dorian, WM_Isaias, LC_Laura), and does
+    NOT read the per-city BR_/FM_ constants below.
+  * The BR_/FM_ constants and PROPHET_* below serve the archived exploration scripts
+    (archive/run_pattern_*.py) and the prediction pipeline (run_prediction_*.py),
+    which still operate on the original two cities:
+      City #1 = Baton Rouge (Hurricane Ida, 2021).
+      City #2 = Fort Myers  (Hurricane Ian, 2022).   <- replaced New Orleans (2026-06)
 
 The 2026-06 datasets are BLOCK-GROUP resolution, 2-hour interval, and use a
-bare-name convention (no `_2h_block_group` suffix).  A legacy `census_tract`
-branch is kept for reproducing older runs (those used New Orleans as city #2).
+bare-name convention (no `_2h_block_group` suffix).
 """
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -16,31 +22,19 @@ MODEL_CACHE_DIR = '.cache/model'   # NN checkpoints (best_model.pth); under the 
 OPTUNA_CACHE_DIR = '.cache/optuna' # Optuna studies: .cache/optuna/<task>/<task>.db (NMF + GRU tuners)
 
 # ── Spatial resolution ───────────────────────────────────────────────────────
-# 'block_group' = current data (Baton Rouge + Fort Myers, bare-name pkls).
-# 'census_tract' = legacy data (Baton Rouge + New Orleans, suffix-name pkls).
 AGG_LEVEL = 'block_group'
 
-if AGG_LEVEL == 'block_group':
-    # Current bare-name block-group files (2h).
-    BR_GRAPH_PATH = 'data/Baton_Rouge_Ida_2021_graph_intersection.pkl'
-    FM_GRAPH_PATH = 'data/Fort_Myers_Ian_2022_graph_intersection.pkl'
-else:
-    # Legacy census-tract files; city #2 was New Orleans.
-    BR_GRAPH_PATH = 'data/Baton_Rouge_Ida_2021_graph_intersection_2h.pkl'
-    FM_GRAPH_PATH = 'data/New_Orleans_Ida_2021_graph_intersection_2h.pkl'
+BR_GRAPH_PATH = 'data/Baton_Rouge_Ida_2021_graph_intersection.pkl'
+FM_GRAPH_PATH = 'data/Fort_Myers_Ian_2022_graph_intersection.pkl'
 
 # ── Analysis-window alignment (disaster placement) ────────────────────────────
-BR_ANALYSIS_DAYS = 151    # trim BR data, counting from start end
-FM_ANALYSIS_DAYS = 44     # trim Fort Myers'data, counting from start end
+BR_ANALYSIS_DAYS = 151    # keep the FIRST 151 days of the Baton Rouge graphs
+FM_ANALYSIS_DAYS = 44     # keep the FIRST 44 days of the Fort Myers graphs
 
 # Per-resolution geography CSVs (columns: geography_id, geometry_wkt, …).
-# Used by the AGG_LEVEL-aware loader (load_city_geo in build_graphs).
-# The active block-group geometry for Baton Rouge and Fort Myers lives directly
-# under data/; the census_tract entries are legacy (Baton Rouge + New Orleans).
-BR_GEO_CSV = {'census_tract': 'data/cubique_raw/Baton_Rouge_census_tract_geo.csv',  # legacy
-              'block_group' : 'data/Baton_Rouge_block_group_geo.csv'}
-FM_GEO_CSV = {'census_tract': 'data/cubique_raw/New_Orleans_census_tract_geo.csv',  # legacy NO
-              'block_group' : 'data/Fort_Myers_block_group_geo.csv'}
+# Used by the AGG_LEVEL-aware loader (load_city_geo in utils/data_processing).
+BR_GEO_CSV = {'block_group': 'data/Baton_Rouge_block_group_geo.csv'}
+FM_GEO_CSV = {'block_group': 'data/Fort_Myers_block_group_geo.csv'}
 
 # ── Temporal resolution ───────────────────────────────────────────────────────
 # 2h (current):

@@ -4,7 +4,7 @@ Geometry loading for the analysis pipeline.
 This module loads each city's per-resolution geography CSV (block-group or
 census-tract, a Snowflake `geography_registry` export with columns
 `geography_id`, `geometry_wkt`) into a GeoDataFrame for the spatial steps of the
-pattern-analysis scripts (OD arc maps, distance-decay, choropleths, land-use).
+pattern-analysis scripts (distance arrays, choropleths, land-use joins).
 
 Data / graph GENERATION lives elsewhere
 ---------------------------------------
@@ -12,7 +12,7 @@ The raw-trips → OD-matrix → temporal-graph pipeline (net vs. all-legs flow,
 adjacency, distances, pickling) is NOT in this repo any more.  It is generated
 by the notebook
 
-    notebook_drafts/Cubique/main_20260607.ipynb   (get_accum_od_matrix, …)
+    notebook_drafts/Cubique/main_20260627.ipynb   (get_accum_od_matrix, …)
 
 which is the source of the `data/*.pkl` graphs used here.  This file keeps only
 the geometry loaders that the analysis scripts import; to (re)build graphs, run

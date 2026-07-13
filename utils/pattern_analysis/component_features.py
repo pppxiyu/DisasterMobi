@@ -34,12 +34,17 @@ Functions
 ---------
 temporal_features(W, n_nor, first_day, slots_per_day, interval_hours) -> DataFrame
 functional_features(M, categories, drop) -> DataFrame
+component_function_entropy(M, categories, drop, base) -> DataFrame  (outflow/inflow Shannon entropy)
+spatial_features(H, distances) -> DataFrame  (loading-weighted mean/std flow distance, km)
+socioeconomic_features(H, values, name) -> DataFrame  (loading-weighted median income)
 resilience_curves(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
 resilience_features(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
+recovery_rate_features(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame  (exp-recovery rate lambda)
 time_function_correlation(df, time_cols, func_cols) -> (rho_df, pval_df)
 """
 import numpy as np
 import pandas as pd
+from scipy.optimize import curve_fit
 from scipy.stats import spearmanr, pearsonr
 
 DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
@@ -408,13 +413,22 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
                          components stay in the rank correlation).
       recovery_deficit = 1 − mean of the last 3 days of r   shortfall still left
                          at the window end (0 recovered, >0 not, <0 overshoot)
-      cum_loss         = Σ_d max(0, 1 − r(d))   resilience-triangle area: total
-                         activity lost over the disaster window (day-equivalents;
-                         smaller = more resilient).  Above-baseline excess is NOT
-                         credited against losses.
+      cum_loss         = Σ_d (1 − r(d))   NET cumulative deviation from baseline over
+                         the disaster window (day-equivalents; >0 = net loss, <0 = net
+                         gain).  UNCLIPPED: above-baseline surges cancel below-baseline
+                         drops, so the metric is LINEAR/additive across components (a
+                         baseline-share-weighted sum of component cum_loss equals the
+                         total-curve cum_loss; no Jensen/clipping gap).
 
-    Returns DataFrame indexed by component with those five columns (the RES_COLS
-    used by the resilience correlation/regression blocks in run_pattern_nmf).
+    Returns DataFrame indexed by component with all five columns.
+
+    KEEP LONG-TERM (owner decision, 2026-07-12): since 2026-07-12 the analyses
+    consume ONLY cum_loss (run_pattern_nmf.RES_COLS = ['cum_loss']); drop_depth,
+    early_collapse, recovery_day and recovery_deficit have no consumer anywhere.
+    They are deliberately retained here so a retired metric can be restored by
+    adding its name back to RES_COLS.  If a dead-code cleanup flags these
+    metrics (or this function) as unused, do NOT delete them — surface this
+    note and ask the owner to decide.
     """
     r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
                           smooth=smooth)
@@ -440,10 +454,70 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
         'early_collapse':   (n_days - 1) - np.nanargmin(safe, axis=0).astype(float),
         'recovery_day':     (last_below + 1).astype(float),
         'recovery_deficit': 1.0 - np.nanmean(safe[-3:], axis=0),
-        'cum_loss':         np.nansum(np.clip(1.0 - safe, 0, None), axis=0),
+        'cum_loss':         np.nansum(1.0 - safe, axis=0),
     }, index=pd.RangeIndex(k, name='component'))
     feats.loc[all_nan, :] = np.nan
     return feats
+
+
+def recovery_rate_features(W, n_nor, first_day, slots_per_day, n_dis=None,
+                           smooth=3, max_rate=5.0, min_points=3):
+    """
+    Exponential-recovery rate λ per component (added 2026-07-12 as the second
+    resilience metric next to cum_loss).
+
+    Each component's recovery segment — the smoothed relative curve r_k(d) from
+    its lowest point d_min onward — is fitted with the exponential-recovery
+    model written on the deficit scale:
+
+        D(d) = D0 · exp(−λ · (d − d_min)),   D(d) = 1 − r(d)
+
+    i.e. Q(t) = Q_target − (Q_target − Q_min)·e^(−λt) with Q_target = 1 (the
+    pre-disaster baseline) and D0 fixed at the OBSERVED maximum deficit
+    1 − min(r), so only λ is fitted (non-linear least squares, λ bounded to
+    [0, max_rate]).  Fixing D0 mirrors the archived StepWiseModel fit and keeps
+    the one-parameter fit stable at n ≈ 15 days.
+
+    READING DIRECTION: λ is a RATE — HIGHER = FASTER recovery = MORE resilient,
+    the OPPOSITE direction to cum_loss (higher = worse).  1/λ is the e-folding
+    time in days; ln(2)/λ is the deficit half-life.
+
+    NaN cases (the metric is undefined, and the affected component is dropped
+    from λ-analyses only — every consumer handles metrics independently):
+      * the component never fell below baseline (D0 <= 0: nothing to recover);
+      * fewer than `min_points` days from d_min to the window end;
+      * the all-NaN curve of a zero-baseline component;
+      * a failed fit.
+
+    Returns DataFrame ['recovery_lambda'] indexed by component (1/days).
+    """
+    r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
+                          smooth=smooth)
+    arr = r.to_numpy()
+    n_days, k = arr.shape
+    lam = np.full(k, np.nan)
+    for j in range(k):
+        deficit = 1.0 - arr[:, j]
+        if np.isnan(deficit).all():
+            continue
+        d_min = int(np.nanargmax(deficit))
+        d0 = deficit[d_min]
+        if not np.isfinite(d0) or d0 <= 0:
+            continue
+        tail = deficit[d_min:]
+        ok = np.isfinite(tail)
+        t = np.arange(len(tail), dtype=float)[ok]
+        y = tail[ok]
+        if len(y) < min_points:
+            continue
+        try:
+            popt, _ = curve_fit(lambda t_, l: d0 * np.exp(-l * t_), t, y,
+                                p0=[0.3], bounds=(0.0, max_rate), maxfev=10000)
+            lam[j] = popt[0]
+        except Exception:
+            pass
+    return pd.DataFrame({'recovery_lambda': lam},
+                        index=pd.RangeIndex(k, name='component'))
 
 
 def time_function_correlation(df, time_cols, func_cols, method='spearman'):

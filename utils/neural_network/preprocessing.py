@@ -7,38 +7,14 @@ an endpoint in G.
 
 Functions
 ---------
-derive_relational_edge_features  – adds avg/diff node features to edges
 transform_to_line_graph_data     – DiGraph → PyG Data (Line Graph)
 set_graph_targets                – attaches flow targets to each PyG Data object
 get_original_index               – maps post-split index to full-series index
 add_disaster_time_feature        – stamps each graph with a monotonic disaster-time counter
 """
-import numpy as np
 import networkx as nx
 import torch
 from torch_geometric.utils import from_networkx
-
-
-def derive_relational_edge_features(graphs, feature_names):
-    """
-    For each feature in feature_names, adds 'avg_<feat>' and 'diff_<feat>'
-    to every edge based on the values of its two endpoint nodes.
-
-    Accepts a single graph or a list of graphs.
-    """
-    single = not isinstance(graphs, list)
-    if single:
-        graphs = [graphs]
-
-    for G in graphs:
-        for u, v, d in G.edges(data=True):
-            for feat in feature_names:
-                u_val = np.array(G.nodes[u].get(feat, 0))
-                v_val = np.array(G.nodes[v].get(feat, 0))
-                d[f'avg_{feat}']  = (u_val + v_val) / 2.0
-                d[f'diff_{feat}'] = np.abs(u_val - v_val)
-
-    return graphs[0] if single else graphs
 
 
 def transform_to_line_graph_data(G, feature_keys=None):

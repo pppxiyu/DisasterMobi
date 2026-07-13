@@ -20,13 +20,13 @@ import random
 
 from config import (BR_GRAPH_PATH, OUTPUT_DIR, MODEL_CACHE_DIR, OPTUNA_CACHE_DIR,
                     SLOT_PER_DAY)
-from utils_pattern_analysis.graph_io import load_graphs
-from utils_neural_network.preprocessing import (
+from utils.pattern_analysis.graph_io import load_graphs
+from utils.neural_network.preprocessing import (
     transform_to_line_graph_data, set_graph_targets,
     get_original_index, add_disaster_time_feature,
 )
-from utils_neural_network.trainer import GraphTemporalPred, GraphTemporalTuner
-from utils_neural_network.visualization import plot_test_results
+from utils.neural_network.trainer import GraphTemporalPred, GraphTemporalTuner
+from utils.neural_network.visualization import plot_test_results
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -52,8 +52,8 @@ K_HOPS          = 2
 
 MODEL_NAME = 'temporal_physics'   # 'basic' | 'temporal_physics'
 
-# Path to temporal decay results (produced by run_pattern_temporal_decay.py)
-DECAY_RESULTS_PATH = os.path.join(OUTPUT_DIR, 'temporal_decay_results_br.pkl')
+# Path to temporal decay results (produced by archive/run_pattern_temporal_decay.py)
+DECAY_RESULTS_PATH = os.path.join(OUTPUT_DIR, 'archive', 'temporal_decay_results_br.pkl')
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -71,9 +71,12 @@ def main():
         with open(DECAY_RESULTS_PATH, 'rb') as f:
             decay_results = pickle.load(f)
         meta        = decay_results['impact_metadata']
-        decay_model = decay_results['gamma_model']
+        # 'recovery_model' is the current key (a StepWiseModel); 'gamma_model' is the
+        # legacy key of the same object in pickles written before 2026-07-12.
+        decay_model = decay_results.get('recovery_model',
+                                        decay_results.get('gamma_model'))
 
-        n_days_back = 10   # must match what was used in run_pattern_temporal_decay.py
+        n_days_back = 10   # must match what was used in archive/run_pattern_temporal_decay.py
         start_orig  = get_original_index(
             meta['impact_period']['start_index'], len(graphs), n_days_back, SLOT_PER_DAY,
         )
@@ -145,7 +148,7 @@ def main():
         if decay_model is None:
             raise RuntimeError(
                 "temporal_physics model requires decay results. "
-                "Run run_pattern_temporal_decay.py first."
+                "Run archive/run_pattern_temporal_decay.py first."
             )
         ds = predictor.train_dataset.dataset
         model_kwargs = {

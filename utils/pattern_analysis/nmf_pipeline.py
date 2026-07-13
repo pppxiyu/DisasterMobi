@@ -1,31 +1,33 @@
 """
-Shared building blocks for the single-NMF (paper-style) decomposition pipeline.
+Orchestration layer for the NMF decomposition pipelines: matrix construction
+plus the decompose-and-normalize calls.  The factorization algorithms themselves
+live in decomposition.py; this module wires them to the graph data.
 
-Both run_pattern_nmf.py and run_pattern_distance_decay_paired.py rely on
-exactly the same matrix construction and NMF call, so the two helpers below
-live here instead of being duplicated in each run script.
+Two distinct pipelines share this module:
 
-Functions
----------
-build_city_matrices(graphs, days_window, days_disaster_in_window, filter_factor)
-    Take the last `days_window` days of a city's graph sequence, trim overnight
-    slots, flatten to a 2-D [OD × time] matrix, and filter out low-activity
-    OD pairs.  Returns (X_all, n_nor, mapping) where n_nor is the column index
-    that separates the normal portion from the disaster portion (visualisation
-    only — the NMF runs on the combined matrix).
+SINGLE-NMF pipeline (production: run_pattern_nmf.py + tune_nmf_optuna.py)
+    One NMF over the combined normal + disaster matrix, which keeps OD-pair row
+    ordering and component identities consistent across periods, so no
+    alignment / matching step is needed between W blocks; W is later split at
+    column n_nor purely for plotting and feature extraction.
+    build_city_matrices(graphs, days_window, days_disaster_in_window, filter_factor)
+        Take the last `days_window` days of a city's graph sequence, trim
+        overnight slots, flatten to a 2-D [OD × time] matrix, and filter out
+        low-activity OD pairs.  Returns (X_all, n_nor, mapping).
+    decompose_city(X_all, n_behaviors, l1_reg, fit_time_cols)
+        Single NMF (optionally fit on a column subset then projected) +
+        normalization + importance print.  Returns (W, H, weights).
+    decompose_city_context(...)
+        Context-aware variant: same interface, adds the land-use side matrix
+        via nmf_context_multiplicative (Chen et al. 2018).
+    print_projection_diagnostics(...)
+        Internal fit/held-out relative-error report for the subset-fit path.
 
-decompose_city(X_all, n_behaviors, l1_reg=0.0)
-    Run a single NMF on the combined matrix (using the shared
-    decompose_mobility_patterns / normalize_nmf_components helpers) and print
-    the importance ranking of the resulting components.  Returns
-    (W, H, weights).
-
-Why both at once?
------------------
-The paper's framework decomposes the *combined* normal + disaster matrix with
-a single NMF.  This keeps the OD-pair row ordering and component identities
-consistent across periods, so no alignment / matching step is needed between
-W blocks.  W is later split at column n_nor purely for plotting.
+PAIRED pipeline (only used by archive/run_pattern_distance_decay_paired.py)
+    The OPPOSITE design: two INDEPENDENT NMFs, one per segment, whose
+    components are then matched by cosine similarity.
+    build_paired_matrices(...)   – split the window into normal/disaster halves
+    decompose_city_paired(...)   – two NMFs + cosine matching
 """
 import textwrap
 
@@ -34,15 +36,15 @@ import numpy as np
 from config import (
     SLOT_PER_DAY, SLOT_TRIM_START, SLOT_TRIM_END, SLOTS_ACTIVE,
 )
-from utils_pattern_analysis.graph_io import (
+from utils.pattern_analysis.graph_io import (
     periodic_trim, graphs_to_2d_matrix, filter_inactive_locations_2d,
     print_matrix_diagnostics,
 )
-from utils_pattern_analysis.decomposition import (
+from utils.pattern_analysis.decomposition import (
     decompose_mobility_patterns, fit_nmf_basis_and_project,
     normalize_nmf_components, nmf_context_multiplicative, project_W_onto_H,
 )
-from utils_pattern_analysis.space_function import build_flow_poi_feature
+from utils.pattern_analysis.space_function import build_flow_poi_feature
 
 
 def build_city_matrices(graphs, days_window, days_disaster_in_window,
@@ -231,7 +233,7 @@ def decompose_city_context(X_all, n_behaviors, mapping, landuse_df,
 
 
 # ── Paired (two-segment) NMF helpers ─────────────────────────────────────────
-# Used by run_pattern_distance_decay_paired.py — splits the same trailing
+# Used by archive/run_pattern_distance_decay_paired.py — splits the same trailing
 # window into normal vs. disaster halves, runs NMF on each separately, and
 # uses warm-start so component identities are preserved across periods.
 

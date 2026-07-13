@@ -1,30 +1,26 @@
 """
 Matrix factorization (NMF) and tensor decomposition (Tucker) functions.
 
-NMF section
+NMF section (production: run_pattern_nmf.py via nmf_pipeline.py)
 -----------
+  select_segment_columns                 – time-column indices for named segments
   decompose_mobility_patterns            – standard NMF
-  h_slice_to_od_matrix                   – converts a spatial component to OD DataFrame
+  fit_nmf_basis_and_project              – fit H on a column subset, project the full window
+  normalize_nmf_components               – unit-L2 W columns, scale absorbed into H
+  nmf_context_multiplicative             – context-aware shared-factor NMF (Chen et al. 2018)
+  project_W_onto_H                       – re-solve W with H frozen
 
-Tucker section
+Tucker section (only used by archive/run_pattern_tucker.py)
 --------------
   non_negative_tucker_hals               – custom HALS Tucker with temporal regularisation
   non_negative_tucker_decomposition      – convenience wrapper around tensorly's NNTucker
   check_reconstruction_error_detailed    – per-zero / per-nonzero error diagnostics
-  project_onto_spatial_basis             – fix U1/U2 from normal data and solve for disaster U3/G
-  get_scaled_lambda                      – data-adaptive Laplacian regularisation weight
-  calculate_laplacian_from_graph         – build L aligned to tensor node ordering
-  regularized_update                     – Laplacian-regularised eigenvector update
-  nmf_graph_update                       – graph-regularised multiplicative NMF update
-  process_core_tensor                    – top-n values/locations in the core tensor
-  check_core_ratio                       – core size appropriateness test (section 2.2.2)
 """
 import warnings
 from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
-import networkx as nx
 
 from sklearn.decomposition import NMF
 
@@ -38,8 +34,6 @@ from tensorly.tucker_tensor import (
 from tensorly.decomposition import non_negative_tucker
 from tensorly.decomposition._tucker import initialize_tucker
 from tensorly.solvers.nnls import hals_nnls, fista, active_set_nnls
-from scipy.linalg import eigh
-from scipy import sparse
 
 
 # ── NMF ──────────────────────────────────────────────────────────────────────
@@ -78,14 +72,14 @@ def decompose_mobility_patterns(X, n_behaviors=5, l1_reg=0.0):
     alpha_W = l1_reg / n_features if l1_reg > 0 else 0.0
     alpha_H = l1_reg / n_samples  if l1_reg > 0 else 0.0
 
-    print(f"NMF (normal): ")
+    print("NMF:")
     print(f"    input shape {X.shape}, n_components={n_behaviors}, l1_reg={l1_reg}, ")
     print(f"    min={X.min():.4f}, max={X.max():.4f}, zeros={np.mean(X==0)*100:.1f}%")
     model = NMF(n_components=n_behaviors, init='nndsvd', solver='cd',
                 random_state=42, max_iter=5000,
                 alpha_W=alpha_W, alpha_H=alpha_H, l1_ratio=1.0)
     W = model.fit_transform(X)
-    print(f"NMF (normal):")
+    print("NMF:")
     print(f"    n_iter={model.n_iter_}, reconstruction_err={model.reconstruction_err_:.4f}")
     return W, model.components_
 
@@ -158,18 +152,6 @@ def normalize_nmf_components(W, H):
     H_n = H * col_norms[:, np.newaxis]              # broadcast over columns
     weights = col_norms * np.linalg.norm(H, axis=1)
     return W_n, H_n, weights
-
-
-def h_slice_to_od_matrix(h_slice, spatial_mapping):
-    """
-    Converts a row of H (shape (1, N) or (N,)) and its edge mapping to a
-    wide-format OD matrix DataFrame.
-    """
-    flows       = h_slice.flatten()
-    origins     = [e[0] for e in spatial_mapping]
-    destinations= [e[1] for e in spatial_mapping]
-    df_long     = pd.DataFrame({'origin': origins, 'destination': destinations, 'flow': flows})
-    return df_long.pivot(index='origin', columns='destination', values='flow').fillna(0)
 
 
 # ── Context-aware NMF (shared-factor, Chen et al. 2018) ──────────────────────
@@ -469,108 +451,3 @@ def check_reconstruction_error_detailed(original, core, factors):
     print(f"Zero-location max abs err: {max_hallucination:.6f}")
     return rel_err, rmse_zero, diff
 
-
-def project_onto_spatial_basis(tensor_dis, factors_norm, ranks, max_iter=10):
-    """
-    Fixes U1, U2 from normal-period factors and solves for U3 and G using
-    disaster-period data. Returns (core_dis, factors_dis).
-    """
-    U1_fix, U2_fix = factors_norm[0], factors_norm[1]
-    Y_init     = tl.tenalg.multi_mode_dot(tensor_dis, [U1_fix.T, U2_fix.T], modes=[0, 1])
-    Y_unfolded = tl.unfold(Y_init, 2)
-    U3_dis, _, _= np.linalg.svd(Y_unfolded, full_matrices=False)
-    U3_dis      = U3_dis[:, :ranks[2]]
-    factors_dis = [U1_fix, U2_fix, U3_dis]
-
-    for _ in range(max_iter):
-        Y          = tl.tenalg.multi_mode_dot(tensor_dis,
-                                               [factors_dis[0].T, factors_dis[1].T], modes=[0, 1])
-        Y_unfolded = tl.unfold(Y, 2)
-        U, _, _    = np.linalg.svd(Y_unfolded, full_matrices=False)
-        factors_dis[2] = U[:, :ranks[2]]
-
-    core_dis = tl.tenalg.multi_mode_dot(tensor_dis, [f.T for f in factors_dis])
-    return core_dis, factors_dis
-
-
-def get_scaled_lambda(X, L, alpha=0.1):
-    """Data-adaptive Laplacian regularisation weight."""
-    norm_X_sq = (sparse.linalg.norm(X) ** 2 if sparse.issparse(X)
-                 else np.linalg.norm(X, axis=None) ** 2)
-    norm_L    = (sparse.linalg.norm(L) if sparse.issparse(L)
-                 else np.linalg.norm(L, ord='fro'))
-    return alpha * (norm_X_sq / norm_L)
-
-
-def calculate_laplacian_from_graph(G, spatial_mapping):
-    """Returns the combinatorial Laplacian L = D - A aligned to the tensor ordering."""
-    ordered = [spatial_mapping[i] for i in range(len(spatial_mapping))]
-    return nx.laplacian_matrix(G, nodelist=ordered, weight=None).toarray()
-
-
-def regularized_update(Y_unfolded, L, rank, lmbda):
-    """Solves (C - λL)u = γu and returns the top `rank` eigenvectors."""
-    C = np.dot(Y_unfolded, Y_unfolded.T)
-    eigvals, eigvecs = eigh(C - lmbda * L)
-    idx = np.argsort(eigvals)[::-1]
-    return eigvecs[:, idx[:rank]]
-
-
-def nmf_graph_update(Y_unfolded, U, L, lmbda, epsilon=1e-9):
-    """
-    Multiplicative update for a spatial factor with graph regularisation.
-    Objective: ||Y - UH||² + λ Tr(UᵀLU)
-    """
-    D = np.diag(np.diag(L))
-    A = D - L
-    numerator   = np.maximum(np.dot(Y_unfolded, Y_unfolded.T), 0) @ U
-    denominator = (U @ U.T @ numerator) + epsilon
-    numerator   = numerator   + lmbda * (A @ U)
-    denominator = denominator + lmbda * (D @ U) + epsilon
-    return U * (numerator / denominator)
-
-
-def process_core_tensor(core, n=3, plot_distribution=False, time_comp=None):
-    """
-    Returns the top-n (index, abs_value) pairs in the core tensor.
-    If time_comp is set, only the corresponding 2-D slice is examined.
-    """
-    working = core[:, :, time_comp] if time_comp is not None else core
-    if plot_distribution:
-        import os as _os
-        import matplotlib.pyplot as _plt
-        import seaborn as _sns
-        _plt.figure(figsize=(10, 4))
-        _sns.histplot(working.flatten(), kde=False, color='skyblue')
-        _plt.tight_layout()
-        _os.makedirs('outputs', exist_ok=True)
-        _plt.savefig('outputs/core_distribution.png', bbox_inches='tight', dpi=150)
-        _plt.close()
-
-    core_abs    = np.abs(working)
-    flat_idx    = np.argsort(core_abs.ravel())[::-1][:n]
-    top_idx     = np.unravel_index(flat_idx, working.shape)
-    top_vals    = core_abs.ravel()[flat_idx]
-
-    results = []
-    for i in range(len(top_vals)):
-        loc = (top_idx[0][i], top_idx[1][i], time_comp) if time_comp is not None \
-              else (top_idx[0][i], top_idx[1][i], top_idx[2][i])
-        results.append({"abs_value": top_vals[i], "location": loc})
-    return results
-
-
-def check_core_ratio(G, alpha=0.25):
-    """
-    Tests whether the core G is appropriately sized (section 2.2.2).
-    Returns (is_appropriate: bool, ratios: dict).
-    """
-    is_ok, ratios = True, {}
-    for n in range(G.ndim):
-        axes  = tuple(j for j in range(G.ndim) if j != n)
-        v_n   = np.sum(G, axis=axes)
-        ratio = np.min(v_n) / np.max(v_n)
-        ratios[f"Mode {n}"] = ratio
-        if ratio <= alpha:
-            is_ok = False
-    return is_ok, ratios

@@ -3,15 +3,15 @@ Download per-block-group ACS median household income (table B19013) from the
 Census Bureau API, as a socioeconomic per-zone attribute for the NMF components.
 
 Mirrors fetch_sld_landuse's cache pattern: the RAW Census value is cached once to
-data/space_function/<city>_block_group_acs_income_raw.csv
+data/socioeconomic/<city>_block_group_acs_income_<year>_raw.csv
 (columns: aggr_id, geoid20, median_household_income); downstream code reads that
 cache and aggregates the per-block-group income to each component.
 
 Data source
 -----------
 Census ACS 5-Year Detailed Tables API (block-group income REQUIRES the 5-year
-dataset).  No key is required at this volume; an optional CENSUS_API_KEY env var
-is appended when present.
+dataset).  A key IS required (the Census Data API is no longer keyless): the
+CENSUS_API_KEY env var or the plain-text KEY_FILE under data/socioeconomic/.
 
     https://api.census.gov/data/<year>/acs/acs5
         ?get=B19013_001E&for=block group:*&in=state:<SS> county:<CCC> tract:*
@@ -20,11 +20,20 @@ B19013_001E = median household income in the past 12 months (inflation-adjusted
 dollars of the survey year).  Census suppresses/omits some block groups and
 returns negative "jam" sentinels (e.g. -666666666); those are stored as NaN.
 
-Public API
-----------
-  fetch_acs_income_for_counties(county_prefixes, year, var) -> DataFrame [geoid20, median_household_income]
-  ensure_city_income_raw(city_label, aggr_ids, out_csv, year) -> path | None   (cache-aware, RAW only)
+KNOWN LATENT BUGS (deliberately left unfixed; masked in production because the
+caches already exist, and worked around by data/evacuation_orders/
+fetch_evacuation_data.py, which duplicates this fetch rather than importing it):
+  1. _resolve_api_key builds KEY_FILE from the cwd-relative config.DATA_DIR, so
+     the key is only found when the process cwd is the repo root.
+  2. The query dict is passed to requests, which encodes the space in
+     'block group' as '+'; the Census API requires %20 and rejects '+'.
+
+Functions
+---------
+  ensure_city_income_raw(city_label, aggr_ids, out_csv, year) -> path  (cache-aware,
+      RAW only; raises RuntimeError on any failure — it never returns None)
   load_city_income(raw_csv) -> DataFrame [aggr_id, geoid20, median_household_income]
+  fetch_acs_income_for_counties(...)  – internal fetch step of ensure_city_income_raw
 """
 import os
 
@@ -33,7 +42,7 @@ import pandas as pd
 
 from config import DATA_DIR
 # Reuse the SLD fetcher's GEOID + HTTP machinery (single source of truth).
-from utils_data_processing.fetch_sld_landuse import (
+from utils.data_processing.fetch_sld_landuse import (
     aggr_id_to_geoid20, _county_prefixes, _http_get_json, HTTP_TIMEOUT,
 )
 

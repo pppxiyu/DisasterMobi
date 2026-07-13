@@ -1,43 +1,20 @@
 """
 Time-series decomposition and disaster-impact modelling.
+Only used by archive/run_pattern_temporal_decay.py.
 
 Provides:
   - Prophet-based baseline decomposition and forecasting
-  - GammaModel  / StepWiseModel  for fitting the impact/recovery curve
-  - Full pipeline helpers used by both the standalone script and visualization.
+  - StepWiseModel for fitting the impact/recovery curve
+  - The full temporal-decay pipeline (run_temporal_decay_analysis_pipeline).
 """
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.special import gamma
 from scipy.optimize import curve_fit
 from prophet import Prophet
 
 
 # ── Impact-curve models ───────────────────────────────────────────────────────
-
-class GammaModel:
-    """Gamma-PDF shaped impact curve."""
-
-    def __init__(self, A, alpha, beta, t0):
-        self.A     = A      # amplitude (negative = drop)
-        self.alpha = alpha  # shape  (>1 gives the hump)
-        self.beta  = beta   # scale  (stretches recovery)
-        self.t0    = t0     # time offset
-
-    def predict(self, t):
-        t = np.asanyarray(t)
-        shifted = t - self.t0
-        mask = shifted > 0
-        res  = np.zeros_like(shifted, dtype=float)
-        res[mask] = (
-            self.A
-            * (shifted[mask] ** (self.alpha - 1))
-            * np.exp(-shifted[mask] / self.beta)
-            / (gamma(self.alpha) * self.beta ** self.alpha)
-        )
-        return res
-
 
 class StepWiseModel:
     """Two-stage model: linear drop then exponential recovery."""
@@ -59,34 +36,6 @@ class StepWiseModel:
 
 
 # ── Curve fitting ─────────────────────────────────────────────────────────────
-
-def fit_gamma_shape(data):
-    y_raw = np.array(data)
-    is_negative = np.nanmean(y_raw) < 0
-    y_fit = np.abs(y_raw)
-    t = np.arange(len(y_fit))
-    mask = ~np.isnan(y_fit)
-
-    def gamma_func(t, A, a, b, t0):
-        s = t - t0
-        res = np.zeros_like(s)
-        m = s > 1e-5
-        res[m] = A * (s[m] ** (a - 1) * np.exp(-s[m] / b)) / (gamma(a) * b ** a)
-        return res
-
-    p0 = [np.nansum(y_fit[mask]), 2.0, 5.0, -2.0]
-    try:
-        popt, _ = curve_fit(
-            gamma_func, t[mask], y_fit[mask], p0=p0,
-            bounds=([0, 1.001, 0.1, -20], [np.inf, 20, 50, 20]),
-            maxfev=10000
-        )
-        A_final = -popt[0] if is_negative else popt[0]
-        return GammaModel(A_final, popt[1], popt[2], popt[3])
-    except Exception as e:
-        print(f"Gamma fit failed: {e}")
-        return None
-
 
 def fit_stepwise_shape(data):
     """Fit a linear-drop then exponential-recovery curve, robust to NaN/Inf."""
@@ -259,10 +208,10 @@ def run_temporal_decay_analysis_pipeline(
     5. Identify impact period.
     6. Fit StepWise recovery model.
 
-    Returns dict: gamma_model, decay_series, prophet_results,
-                  comparison_df, impact_metadata.
+    Returns dict: recovery_model (the fitted StepWiseModel), decay_series,
+                  prophet_results, comparison_df, impact_metadata.
     """
-    from utils_pattern_analysis.visualization import (
+    from utils.pattern_analysis.visualization import (
         vis_line_total_flows, vis_line_pct_change, vis_line_recovery_fit,
     )
 
@@ -307,51 +256,10 @@ def run_temporal_decay_analysis_pipeline(
         vis_line_recovery_fit(decay_series, fit, output_dir=output_dir)
 
     return {
-        "gamma_model":      fit,
+        "recovery_model":   fit,
         "decay_series":     decay_series,
         "prophet_results":  dec,
         "comparison_df":    df_mv,
         "impact_metadata":  metadata,
     }
 
-
-def run_temporal_decay_analysis_pipeline_simplified(
-    flows, n_days_back, frequency, slots_per_day, show_plots,
-    start_date='2021-04-15', **kwargs,
-):
-    """
-    Lighter version that returns the full de-baselined series (Actual - Baseline)
-    without fitting a decay model. Used inside vis_line_temporal_patterns.
-    """
-    split = int(slots_per_day * n_days_back)
-    flows_pre, flows_post = flows[:-split], flows[-split:]
-
-    dec = decompose_with_prophet(flows_pre, start_date=start_date, freq=frequency)
-
-    if show_plots:
-        import matplotlib.pyplot as _plt
-        from utils_pattern_analysis.visualization import vis_line_total_flows
-        for key in ('trend', 'noise'):
-            vis_line_total_flows(dec[key], output_dir='outputs', tag=f'_prophet_{key}')
-
-    future = forecast_with_prophet(dec['model'], periods=split, freq=frequency)
-
-    hist_daily  = np.array(dec['seasonalities'].get('daily',  0))
-    hist_weekly = np.array(dec['seasonalities'].get('weekly', 0))
-    baseline_pre  = (hist_daily + hist_weekly).tolist()
-    baseline_post = future['forecast']
-    full_baseline = baseline_pre + baseline_post
-
-    if show_plots:
-        import os as _os
-        import matplotlib.pyplot as _plt
-        _plt.figure(figsize=(12, 6))
-        _plt.plot(list(flows), label='Actual', alpha=0.4, color='gray')
-        _plt.plot(full_baseline, label='Baseline', color='red', linewidth=2)
-        _plt.axvline(x=len(flows_pre), color='black', linestyle=':', label='Impact Start')
-        _plt.legend(); _plt.tight_layout()
-        _os.makedirs('outputs', exist_ok=True)
-        _plt.savefig('outputs/flow_series_prophet_baseline_vs_actual.png', bbox_inches='tight', dpi=150)
-        _plt.close()
-
-    return [a - b for a, b in zip(list(flows), full_baseline)]

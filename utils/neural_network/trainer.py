@@ -14,8 +14,8 @@ import torch
 import torch.nn as nn
 import optuna
 
-from utils_neural_network.dataset import TemporalGraphDataset, temporal_collate_fn
-from utils_neural_network.models import (
+from utils.neural_network.dataset import TemporalGraphDataset, temporal_collate_fn
+from utils.neural_network.models import (
     EarlyStopper,
     GraphGRUPredictor,
     TempoPhysicsGraphGRUPredictor,

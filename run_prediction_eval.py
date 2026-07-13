@@ -16,7 +16,7 @@ import pickle
 import numpy as np
 
 from config import OUTPUT_DIR, MODEL_CACHE_DIR
-from utils_neural_network.visualization import (
+from utils.neural_network.visualization import (
     plot_test_results, plot_prediction_scatter, plot_gated_physical_function,
 )
 
@@ -56,7 +56,7 @@ def main():
 
     if PLOT_PHYSICS_GATE:
         import torch
-        from utils_neural_network.models import TempoPhysicsGraphGRUPredictor
+        from utils.neural_network.models import TempoPhysicsGraphGRUPredictor
 
         # Rebuild the model skeleton just enough to load weights and plot
         # You will need to supply the same gamma_params used during training.

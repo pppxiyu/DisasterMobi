@@ -1,7 +1,11 @@
 """
-Visualisation helpers for pattern analysis (temporal decay, NMF, Tucker).
+Visualisation helpers for pattern analysis.
+
+Most functions serve the production NMF pipeline (run_pattern_nmf.py).  The
+functions marked "only used by archive/..." in their docstrings serve the
+archived exploration scripts and can be skipped by production readers.
+contextily is imported for the archive-only vis_map_spatial_factors basemap.
 """
-import json
 import os
 import numpy as np
 import pandas as pd
@@ -11,12 +15,9 @@ import matplotlib.colors as mcolors
 import matplotlib.ticker as ticker
 import seaborn as sns
 import contextily as cx
-import pydeck as pdk
-import ipywidgets as widgets
-from IPython.display import display, clear_output
 
 
-# ── Flow time-series ──────────────────────────────────────────────────────────
+# ── Flow time-series (only used by archive/run_pattern_temporal_decay.py) ─────
 
 def vis_line_total_flows(flow_list, output_dir='outputs', tag=''):
     """Line plot of a single flow time-series.
@@ -93,114 +94,9 @@ def vis_line_recovery_fit(original_data, model, output_dir='outputs', tag=''):
 
 # ── Temporal signatures ───────────────────────────────────────────────────────
 
-def vis_line_temporal_patterns(
-    W, selected_indices=None, normalize=False, moving_avg=None,
-    de_baseline=False, de_baseline_plot=False, n_days_back=None,
-    frequency=None, slots_per_day=None, interval_hours=3, start_date='2021-04-15',
-    stack=False, show_impact_line=True, use_line_types=True, return_series=False,
-    output_dir='outputs', tag='',
-):
-    """
-    Line subplots of selected temporal factor columns from W (e.g. NMF W matrix).
-    Supports baseline removal, normalization, smoothing, and stacked overlay.
-    Saves to: <output_dir>/temporal_patterns<tag>.png
-    """
-    if de_baseline and (n_days_back is None or frequency is None or slots_per_day is None):
-        raise ValueError("de_baseline requires n_days_back, frequency, and slots_per_day.")
-
-    indices = (list(range(W.shape[1])) if selected_indices is None
-               else [selected_indices] if isinstance(selected_indices, int)
-               else selected_indices)
-    if not indices:
-        print("No indices selected."); return
-
-    num_plots = 1 if stack else len(indices)
-    fig, axes = plt.subplots(num_plots, 1, figsize=(16, 7 if stack else 4 * num_plots),
-                              sharex=True)
-    if num_plots == 1:
-        axes = [axes]
-
-    colors     = plt.cm.tab10(np.linspace(0, 1, len(indices)))
-    line_types = ['-', (0, (10, 5)), ':']
-    all_series = []
-
-    for i, idx in enumerate(indices):
-        data = W[:, idx]
-
-        if de_baseline:
-            from utils_pattern_analysis.temporal import run_temporal_decay_analysis_pipeline_simplified
-            data = np.array(run_temporal_decay_analysis_pipeline_simplified(
-                flows=data.tolist(), n_days_back=n_days_back, frequency=frequency,
-                slots_per_day=slots_per_day, show_plots=de_baseline_plot,
-                start_date=start_date,
-            ))
-
-        if normalize:
-            m, s = np.mean(data), np.std(data)
-            data = (data - m) / s if s > 0 else data - m
-
-        ax = axes[0] if stack else axes[i]
-        ls = line_types[i % len(line_types)] if use_line_types else '-'
-
-        if stack and n_days_back and slots_per_day:
-            imp_start = len(data) - int(n_days_back * slots_per_day)
-            data = data - np.mean(data[:imp_start])
-
-        if not stack:
-            ax.plot(data, color='black', linewidth=1.2,
-                    alpha=0.4 if moving_avg else 1.0, label='Signal')
-
-        if show_impact_line and n_days_back is not None and slots_per_day is not None:
-            imp_start = len(data) - int(n_days_back * slots_per_day)
-            ax.axvline(x=imp_start, color='red', linestyle='--', linewidth=2.5,
-                       label='Impact Start' if i == 0 else '', alpha=0.8)
-
-        if isinstance(moving_avg, int) and moving_avg > 1:
-            smoothed = pd.Series(data).rolling(window=moving_avg, center=True).mean()
-            ax.plot(smoothed, color=colors[i] if stack else 'blue', linestyle=ls,
-                    linewidth=3, label=f'Comp {idx}' if stack else f'{moving_avg}-step MA')
-        elif stack:
-            ax.plot(data, color=colors[i], linestyle=ls, linewidth=2, alpha=0.7,
-                    label=f'Comp {idx}')
-
-        _tick_step = slots_per_day if slots_per_day else (24 // interval_hours)
-        if not stack:
-            ax.set_xlim(left=0)
-            ax.xaxis.set_major_locator(ticker.MultipleLocator(_tick_step))
-            ax.set_ylabel(f"Comp {idx}", fontsize=18, fontweight='bold')
-            ax.tick_params(axis='both', which='major', labelsize=14)
-            ax.grid(axis='y', linestyle='--', alpha=0.3)
-            if de_baseline or normalize:
-                ax.axhline(0, color='gray', linestyle='-', linewidth=1.2, alpha=0.5)
-
-        final = smoothed.values if (isinstance(moving_avg, int) and moving_avg > 1) else data
-        all_series.append(final)
-
-    if stack:
-        axes[0].set_xlim(left=0)
-        axes[0].xaxis.set_major_locator(ticker.MultipleLocator(_tick_step))
-        axes[0].set_ylabel("Relative Intensity\n(Centred to Normal Mean)",
-                            fontsize=20, labelpad=20)
-        axes[0].tick_params(axis='both', which='major', labelsize=16)
-        axes[0].axhline(0, color='black', linestyle='-', linewidth=1.5, alpha=0.6)
-        axes[0].grid(True, linestyle=':', alpha=0.4)
-        axes[0].legend(loc='lower center', bbox_to_anchor=(0.5, 1.02),
-                       fontsize=12, ncol=min(len(indices), 6),
-                       frameon=False, handlelength=6.0)
-
-    os.makedirs(output_dir, exist_ok=True)
-    plt.xlabel(f"Time Step ({interval_hours}H intervals)", fontsize=20, labelpad=15)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'temporal_patterns{tag}.png'), bbox_inches='tight', dpi=150)
-    plt.close()
-
-    if return_series:
-        return np.array(all_series).T
-
-
 def vis_heatmap_temporal_signature(
     matrix, first_day="Monday", show_days=True, show_components=True,
-    index_range=None, slots_per_day=5, interval_hours=3,
+    index_range=None, slots_per_day=8, interval_hours=2,
     output_dir='outputs', tag='',
 ):
     """
@@ -263,7 +159,7 @@ def vis_heatmap_temporal_signature(
     plt.close()
 
 
-# ── Spatial plots ─────────────────────────────────────────────────────────────
+# ── Tucker factor plots (only used by archive/run_pattern_tucker.py) ──────────
 
 def vis_heatmap_spatial_profiles(factors, output_dir='outputs', tag=''):
     """Side-by-side heatmaps of origin (U1) and destination (U2) spatial factor matrices.
@@ -317,44 +213,6 @@ def vis_map_spatial_factors(U_ori, gdf, spatial_mapping,
     plt.close()
 
 
-def vis_line_temporal_signatures(factors, interval_hours=None, subplots=True,
-                                  output_dir='outputs', tag=''):
-    """Line plots of Tucker temporal factor U3 columns, either as subplots or overlaid.
-    Saves to: <output_dir>/temporal_signatures<tag>.png
-
-    Parameters
-    ----------
-    interval_hours : int, optional
-        Hours per time slot (e.g. 3 for 3h data, 2 for 2h data).
-        Pass 24 // SLOT_PER_DAY from config.  If None, the axis label omits
-        the interval size (safe fallback for exploratory calls).
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    interval_label = f"{interval_hours}h" if interval_hours is not None else "?"
-    U_time    = factors[2]
-    n_trends  = U_time.shape[1]
-    if subplots:
-        fig, axes = plt.subplots(n_trends, 1, figsize=(10, 3 * n_trends), sharex=True)
-        if n_trends == 1: axes = [axes]
-        for i in range(n_trends):
-            axes[i].plot(U_time[:, i], color=f'C{i}', linewidth=2)
-            axes[i].set_title(f"Temporal Trend {i}", fontweight='bold')
-            axes[i].set_ylabel("Intensity")
-            axes[i].grid(True, linestyle=':', alpha=0.6)
-        plt.xlabel(f"Time Step ({interval_label} intervals)")
-    else:
-        plt.figure(figsize=(10, 5))
-        for i in range(n_trends):
-            plt.plot(U_time[:, i], label=f"Trend {i}", linewidth=2)
-        plt.title("Temporal Signatures (U3) – Overlaid", fontweight='bold')
-        plt.xlabel(f"Time Step ({interval_label} intervals)")
-        plt.ylabel("Relative Intensity"); plt.legend()
-        plt.grid(True, linestyle=':', alpha=0.6)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'temporal_signatures{tag}.png'), bbox_inches='tight', dpi=150)
-    plt.close()
-
-
 def vis_heatmap_core_interaction(core, time_slice=0, sum_temporal=False, threshold=0.1,
                                   output_dir='outputs', tag=''):
     """Heatmap of the Tucker core tensor G[:, :, time_slice]: origin-component ×
@@ -383,7 +241,7 @@ def vis_heatmap_core_interaction(core, time_slice=0, sum_temporal=False, thresho
     plt.close()
 
 
-def vis_heatmap_component_mapping(weights, basis_name='BR', target_name='NO',
+def vis_heatmap_component_mapping(weights, basis_name, target_name,
                                    output_dir='outputs', tag=''):
     """Annotated heatmap of the softmax-weighted component mapping matrix
     (rows=basis components, cols=target components).
@@ -408,167 +266,6 @@ def vis_heatmap_component_mapping(weights, basis_name='BR', target_name='NO',
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
     plt.close()
-
-
-def vis_heatmap_od_error(X, error_matrix, t_idx, spatial_mapping=None, n=5,
-                          output_dir='outputs', tag=''):
-    """
-    Side-by-side heatmaps of signed percentage error (where X>0) and absolute
-    error (where X=0) for a single time step t_idx.
-    Saves to: <output_dir>/od_error_t<t_idx><tag>.png
-    """
-    X_sl  = X[:, :, t_idx]
-    E_sl  = error_matrix[:, :, t_idx]
-    with np.errstate(divide='ignore', invalid='ignore'):
-        pe    = np.nan_to_num((E_sl / X_sl) * 100, nan=0, posinf=0, neginf=0)
-    labels = [spatial_mapping[i] if spatial_mapping else f"Tract {i}"
-              for i in range(X.shape[0])]
-
-    mask_nz = X_sl > 0
-    valid_pe = pe[mask_nz]
-    top_idx  = np.argsort(np.abs(valid_pe))[::-1][:n]
-    o_idx, d_idx = np.where(mask_nz)
-    print(f"### Top {n} Errors (t={t_idx}) ###")
-    for i in top_idx:
-        print(f"  {labels[o_idx[i]]} → {labels[d_idx[i]]}: PE={valid_pe[i]:.2f}%")
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    pe_lim = np.percentile(np.abs(pe[mask_nz]), 95) if np.any(mask_nz) else 100
-    sns.heatmap(pe, mask=(X_sl == 0), cmap="RdBu_r", center=0,
-                vmin=-pe_lim, vmax=pe_lim, ax=axes[0],
-                cbar_kws={'label': 'Percentage Error (%)'})
-    axes[0].set_title("Percentage Error (X > 0)")
-
-    abs_lim = np.max(np.abs(E_sl[X_sl == 0])) if np.any(X_sl == 0) else 1
-    sns.heatmap(E_sl, mask=(X_sl != 0), cmap="mako",
-                vmin=-abs_lim, vmax=0, ax=axes[1],
-                cbar_kws={'label': 'Absolute Error (Hallucination)'})
-    axes[1].set_title("Absolute Error (X = 0)")
-    os.makedirs(output_dir, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'od_error_t{t_idx}{tag}.png'), bbox_inches='tight', dpi=150)
-    plt.close()
-
-
-# ── OD flow map (pydeck) ─────────────────────────────────────────────────────
-
-def vis_map_od_flow(
-    od_matrices, gdfs, frame_titles=None, id_col='aggr_id', min_flow=0,
-    cmap_name='plasma', alpha_range=(0.3, 0.8), curve_rad=0.15, arrow_size=0.006,
-    max_line_width=15, vmax=None, delay=1.0, save_dir='',
-):
-    """
-    Saves an animated OD flow map as an HTML file (pydeck).
-    Interactive playback only works inside Jupyter; otherwise saves the first frame.
-    """
-    num_frames = len(od_matrices)
-    if not isinstance(gdfs, list):
-        gdfs = [gdfs] * num_frames
-    if frame_titles is None:
-        frame_titles = [f"Timestep {i+1}" for i in range(num_frames)]
-
-    max_flow_val = vmax
-    if max_flow_val is None:
-        max_flow_val = 0
-        for od_df in od_matrices:
-            tmp   = od_df.copy(); tmp.index.name = 'origin'
-            melted = tmp.reset_index().melt(id_vars='origin', var_name='destination', value_name='flow')
-            melted['flow'] = pd.to_numeric(melted['flow'], errors='coerce').fillna(0)
-            lm    = melted[melted['origin'] != melted['destination']]['flow'].max()
-            if not np.isnan(lm) and lm > max_flow_val:
-                max_flow_val = lm
-
-    norm = mcolors.Normalize(vmin=min_flow, vmax=max_flow_val, clip=True)
-    cmap = cm.get_cmap(cmap_name)
-    min_a, max_a = alpha_range
-
-    def get_color(flow):
-        fn = norm(flow) if max_flow_val > min_flow else 1.0
-        r, g, b = [int(c * 255) for c in cmap(fn)[:3]]
-        return [r, g, b, int((min_a + fn * (max_a - min_a)) * 255)]
-
-    frames_data = []
-    for idx, (od_df, gdf) in enumerate(zip(od_matrices, gdfs)):
-        coords = gdf.set_index(id_col)[['lon', 'lat']]
-        tmp = od_df.copy(); tmp.index.name = 'origin'
-        edges = tmp.reset_index().melt(id_vars='origin', var_name='destination', value_name='flow')
-        edges['flow'] = pd.to_numeric(edges['flow'], errors='coerce').fillna(0)
-        edges = edges[(edges['origin'] != edges['destination']) & (edges['flow'] > min_flow)]
-        edges = edges.sort_values('flow', ascending=True).dropna()
-
-        for col in ('start_lon','start_lat','end_lon','end_lat'):
-            src = 'origin' if 'lon' in col or ('lat' in col and 'start' in col) else 'destination'
-            axis = 'lon' if 'lon' in col else 'lat'
-            edges[col] = edges[src].map(coords[axis])
-        edges = edges.dropna(subset=['start_lon','start_lat','end_lon','end_lat']).copy()
-
-        paths, arrows = [], []
-        if not edges.empty:
-            edges['color']      = edges['flow'].apply(get_color)
-            edges['line_width'] = edges['flow'].apply(
-                lambda x: float((norm(x) if max_flow_val > min_flow else 1.0)
-                                  * (max_line_width - 1) + 1)
-            )
-            for _, row in edges.iterrows():
-                x0, y0, x2, y2 = row.start_lon, row.start_lat, row.end_lon, row.end_lat
-                dx, dy = x2-x0, y2-y0
-                nx_v, ny_v = dy, -dx
-                cxp = x0 + dx*.5 + nx_v*curve_rad
-                cyp = y0 + dy*.5 + ny_v*curve_rad
-                t   = np.linspace(0,1,20)
-                bx  = (1-t)**2*x0 + 2*(1-t)*t*cxp + t**2*x2
-                by  = (1-t)**2*y0 + 2*(1-t)*t*cyp + t**2*y2
-                paths.append([[lo, la] for lo, la in zip(bx, by)])
-                tx, ty = x2-cxp, y2-cyp
-                ln = np.hypot(tx,ty)
-                if ln > 0: tx, ty = tx/ln, ty/ln
-                al = arrow_size * (1 + row.line_width * .15)
-                aw = al * .6
-                tip_x, tip_y = x2 - tx*.002, y2 - ty*.002
-                bx2, by2    = tip_x - tx*al, tip_y - ty*al
-                px, py      = -ty, tx
-                arrows.append([[[tip_x,tip_y],
-                                 [bx2+px*aw, by2+py*aw],
-                                 [bx2-px*aw, by2-py*aw]]])
-            edges['path']          = paths
-            edges['arrow_polygon'] = arrows
-
-        gdf_base = gdf[[id_col, gdf.geometry.name]].copy()
-        if gdf_base.crs != "EPSG:4326":
-            gdf_base = gdf_base.to_crs("EPSG:4326")
-        frames_data.append({
-            "edges":   edges.to_dict(orient="records") if not edges.empty else [],
-            "nodes":   coords.reset_index().to_dict(orient="records"),
-            "geojson": json.loads(gdf_base.to_json()),
-        })
-
-    initial_coords = gdfs[0].set_index(id_col)[['lon','lat']]
-    view = pdk.ViewState(longitude=initial_coords['lon'].mean(),
-                          latitude=initial_coords['lat'].mean(),
-                          zoom=9, pitch=0, bearing=0)
-
-    def render_frame(index):
-        fd = frames_data[index]
-        layers = [
-            pdk.Layer("GeoJsonLayer", fd['geojson'], stroked=True, filled=True,
-                      get_fill_color=[150,150,150,40], get_line_color=[100,100,100,150],
-                      line_width_min_pixels=1),
-            pdk.Layer("PathLayer", fd['edges'], get_path='path', get_color='color',
-                      width_units='"pixels"', get_width='line_width'),
-            pdk.Layer("PolygonLayer", fd['edges'], get_polygon='arrow_polygon',
-                      get_fill_color='color', filled=True, stroked=False),
-            pdk.Layer("ScatterplotLayer", fd['nodes'], get_position=['lon','lat'],
-                      get_fill_color=[255,255,255,255], get_line_color=[0,0,0,255],
-                      stroked=True, filled=True, radius_scale=100,
-                      radius_min_pixels=3, radius_max_pixels=12),
-        ]
-        deck = pdk.Deck(layers=layers, initial_view_state=view,
-                        tooltip={"html": "<b>O:</b>{origin} <b>D:</b>{destination} <b>F:</b>{flow}"},
-                        map_provider="carto", map_style="light")
-        deck.to_html(save_dir)
-        print(f"Frame {index} saved to {save_dir}")
-
-    render_frame(0)
 
 
 # ── NMF component timeline (Figure-5 style) ───────────────────────────────────
@@ -732,7 +429,7 @@ def vis_line_nmf_component_timeline(
     plt.close()
 
 
-# ── Distance decay (Figure 7 style) ─────────────────────────────────────────
+# ── Distance decay (only used by archive/run_pattern_distance_decay_paired.py) ─
 #
 # Pure plotting helper for per-component distance-decay fits.  The truncated
 # power-law fitting itself happens upstream (see run_pattern_nmf.py's
@@ -1236,64 +933,131 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
     return fig
 
 
-def vis_heatmap_corr_merged(mat, pval=None, categories=None, save_path=None,
-                            cmap='RdBu_r', annot_fs=17, caption=None):
-    """
-    Row-scaled heatmap with ONE value per cell — the MERGED-cell sibling of
-    vis_heatmap_corr_split.  Use it when each function's outflow and inflow are
-    combined into a single feature (so there is no upper/lower from/to split):
-    every (metric, function) pair is one solid cell.
+def vis_bar_cross_city_resi_pred(df, gt_col='cum_loss_gt',
+                                 pred_cols=(('Prediction (kNN)', 'cum_loss_pred_knn', 'kNN'),
+                                            ('Prediction (ridge)', 'cum_loss_pred_ridge', 'ridge')),
+                                 baseline_col='cum_loss_baseline', baseline_label='Baseline',
+                                 save_path=None, title=None):
+    """Publication (Nature-style) grouped bar: per city-event (x), the CITY-LEVEL
+    cum_loss as side-by-side bars — Ground truth, one bar per prediction in `pred_cols`
+    (each a (legend_label, column, mae_tag); columns absent from df are skipped), and (if
+    `baseline_col` is present) a baseline labelled `baseline_label` — y in day-equivalents.
+    Nature styling: Arial sans, no top/right spines, restrained palette, no legend frame.
+    Per-bar values are printed VERTICALLY (no horizontal collisions) and the legend sits
+    BELOW the axes (long labels do not overlap the bars); MAE vs GT annotated.  PNG >=300 dpi."""
+    codes = list(df.index)
+    _PRED_COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7']       # blue, green, purple
+    # (legend_label, mae_tag, values, color); GT has no MAE tag.
+    series = [('Ground truth', None, df[gt_col].to_numpy(dtype=float), '#767676')]
+    for i, (lab, col, tag) in enumerate(pred_cols):
+        if col in df.columns:
+            series.append((lab, tag, df[col].to_numpy(dtype=float),
+                           _PRED_COLORS[i % len(_PRED_COLORS)]))
+    if baseline_col in df.columns:
+        series.append((baseline_label, baseline_label, df[baseline_col].to_numpy(dtype=float),
+                       '#E28E2C'))
+    gt = series[0][2]
+    mae_txt = "    ".join(f"MAE({tag})={np.nanmean(np.abs(gt - vals)):.3f}"
+                          for lab, tag, vals, _ in series[1:])
+    nature_rc = {
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+        'font.size': 8, 'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 0.8, 'legend.frameon': False,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+    }
+    with plt.rc_context(nature_rc):
+        n = len(series)
+        x = np.arange(len(codes))
+        w = 0.8 / n
+        fig, ax = plt.subplots(figsize=(1.35 * len(codes) + 1.4, 3.9))
+        for i, (lab, _tag, vals, color) in enumerate(series):
+            offset = (i - (n - 1) / 2) * w
+            bars = ax.bar(x + offset, vals, width=w * 0.92, label=lab, color=color,
+                          edgecolor='black', linewidth=0.7)
+            for bar in bars:
+                h = bar.get_height()
+                if np.isnan(h):
+                    continue
+                # Vertical labels above each bar -> no horizontal overlap between neighbours.
+                ax.annotate(f'{h:.2f}', (bar.get_x() + bar.get_width() / 2, max(h, 0)),
+                            xytext=(0, 2), textcoords='offset points', rotation=90,
+                            ha='center', va='bottom', fontsize=5.5, color='#3a3a3a')
+        ax.set_xticks(x)
+        ax.set_xticklabels(codes, rotation=20, ha='right')
+        ax.set_ylabel('cum_loss (day-equivalents)')
+        ax.set_xlabel('city-event')
+        ax.margins(y=0.22)                                  # headroom for vertical labels
+        # Legend BELOW the axes so the long labels never overlap the bars.
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.20), ncol=2, fontsize=7,
+                  columnspacing=1.4, handlelength=1.3)
+        ax.text(0.99, 0.99, mae_txt, transform=ax.transAxes, ha='right', va='top',
+                fontsize=6.5, color='#4D4D4D')
+        if title:
+            ax.set_title(title, fontsize=8.5)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+    return fig
 
-    Rows are any metric set (mat.index = y-labels), columns are the merged
-    features (mat.columns, labelled by `categories` if given).  Each row is
-    coloured by its own max |value| so colours compare WITHIN a row while the
-    printed numbers compare everywhere — same convention as the split version.
-    Pass `pval` (same shape as mat) for significance stars, or None for a plain
-    coefficient heatmap.
-    """
-    rows   = list(mat.index)
-    labels = list(categories) if categories is not None else list(mat.columns)
-    n_r, n_c = len(rows), mat.shape[1]
 
-    V = mat.to_numpy(dtype=float)
-    scale = np.nanmax(np.abs(V), axis=1, keepdims=True)
-    scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
-    C = V / scale
-
-    fig, ax = plt.subplots(figsize=(2.0 * n_c + 2.4, 1.2 * n_r + 2.2),
-                           constrained_layout=True)
-    ax.imshow(C, cmap=cmap, vmin=-1, vmax=1, aspect='auto',
-              extent=[0, n_c, n_r, 0], interpolation='nearest')
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    for x in range(n_c + 1):
-        ax.axvline(x, color='white', lw=2)
-    for y in range(n_r + 1):
-        ax.axhline(y, color='white', lw=2)
-
-    def _stars(i, j):
-        if pval is None:
-            return ''
-        p = pval.iloc[i, j]
-        return '' if np.isnan(p) else ('**' if p < 0.01 else ('*' if p < 0.05 else ''))
-
-    for i in range(n_r):
-        for j in range(n_c):
-            v = V[i, j]
-            if np.isnan(v):
-                continue
-            ax.text(j + 0.5, i + 0.5, f'{v:.2f}{_stars(i, j)}',
-                    ha='center', va='center', fontsize=annot_fs,
-                    color='white' if abs(C[i, j]) > 0.6 else 'black')
-
-    ax.set_xticks(np.arange(n_c) + 0.5)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=18)
-    ax.set_yticks(np.arange(n_r) + 0.5)
-    ax.set_yticklabels(rows, fontsize=18)
-    ax.tick_params(length=0)
-    if caption:
-        ax.text(1.0, 1.01, caption, transform=ax.transAxes, ha='right',
-                va='bottom', fontsize=14, color='dimgrey')
+def vis_scatter_intensity_resilience(df, intensity_col, metric_cols, group_col=None,
+                                     ncols=3, save_path=None, title=None):
+    """Per-metric panels of each component's resilience metric (y) vs its event-level
+    Saffir-Simpson arrival intensity (x), pooled over ALL city-events.  Each intensity
+    level shows BOTH: the individual components as a jittered scatter (left of the
+    integer position, coloured by `group_col` e.g. the city-event) AND, beside them
+    (right of the integer), a BOX PLOT summarising the metric's distribution at that
+    intensity.  Each panel title carries the Spearman rho between intensity and the
+    metric across all pooled components."""
+    import math
+    from scipy.stats import spearmanr
+    metrics = list(metric_cols)
+    n = len(metrics)
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.6 * nrows),
+                             squeeze=False)
+    x_raw = df[intensity_col].to_numpy(dtype=float)
+    jitter = np.random.default_rng(0).uniform(-0.12, 0.12, size=len(df))
+    groups = df[group_col].to_numpy() if group_col else None
+    uniq = list(dict.fromkeys(groups.tolist())) if groups is not None else [None]
+    cmap = plt.get_cmap('tab10')
+    levels = sorted(np.unique(x_raw[~np.isnan(x_raw)]).tolist())
+    PT_OFF, BOX_OFF = -0.18, 0.18                # scatter on the left, box on the right
+    for idx, m in enumerate(metrics):
+        ax = axes[idx // ncols][idx % ncols]
+        y = df[m].to_numpy(dtype=float)
+        # Scatter the individual components (kept), shifted just left of each integer.
+        for k, u in enumerate(uniq):
+            msk = (groups == u) if groups is not None else np.ones(len(df), bool)
+            ax.scatter(x_raw[msk] + PT_OFF + jitter[msk], y[msk], s=26,
+                       color=cmap(k % 10), alpha=0.8, edgecolor='white',
+                       linewidth=0.4, label=str(u), zorder=3)
+        # Box plot of the distribution at each intensity level, beside the points.
+        box_data = [y[(x_raw == L) & ~np.isnan(y)] for L in levels]
+        ax.boxplot(box_data, positions=[L + BOX_OFF for L in levels], widths=0.22,
+                   showfliers=False, patch_artist=True, manage_ticks=False,
+                   boxprops=dict(facecolor='#e0e0e0', alpha=0.75, linewidth=0.8),
+                   medianprops=dict(color='black', linewidth=1.2),
+                   whiskerprops=dict(color='grey', linewidth=0.8),
+                   capprops=dict(color='grey', linewidth=0.8))
+        ok = ~np.isnan(y) & ~np.isnan(x_raw)
+        rho = (spearmanr(x_raw[ok], y[ok]).correlation if ok.sum() > 2 else float('nan'))
+        ax.set_title(f"{m}\nSpearman rho={rho:+.2f} (n={int(ok.sum())})", fontsize=10)
+        ax.set_xlabel('Saffir-Simpson arrival intensity (1=ExtraTrop .. 8=Cat5)', fontsize=8)
+        ax.set_ylabel(m, fontsize=8)
+        ax.set_xticks(levels)
+        ax.set_xticklabels([str(int(L)) for L in levels])
+        ax.tick_params(labelsize=7)
+        if idx == 0 and groups is not None:
+            ax.legend(fontsize=6, loc='best', framealpha=0.6, title='city-event')
+    for idx in range(n, nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis('off')
+    if title:
+        fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150)
@@ -1365,6 +1129,39 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
         axes[idx // ncols][idx % ncols].axis('off')
     if title:
         fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_heatmap_pair_r2(mat, title=None, save_path=None, vmax=0.6,
+                        xlabel='test', ylabel='train'):
+    """Square pairwise cross-city R² heatmap: rows = train unit, cols = test unit,
+    each cell = the transfer R² of that (train, test) pair (the diagonal is the
+    within-unit leave-one-component-out).  Diverging colour centred at 0 (green =
+    beats the mean, red = worse), clipped to ±vmax; each cell annotated (n/a if
+    undefined)."""
+    V = mat.to_numpy(dtype=float)
+    n_r, n_c = V.shape
+    fig, ax = plt.subplots(figsize=(1.15 * n_c + 2.6, 1.0 * n_r + 2.0))
+    im = ax.imshow(np.clip(V, -vmax, vmax), cmap='RdYlGn', vmin=-vmax, vmax=vmax,
+                   aspect='auto')
+    for i in range(n_r):
+        for j in range(n_c):
+            v = V[i, j]
+            ax.text(j, i, 'n/a' if np.isnan(v) else f'{v:+.2f}',
+                    ha='center', va='center', fontsize=10, color='black')
+    ax.set_xticks(range(n_c))
+    ax.set_xticklabels(list(mat.columns), rotation=30, ha='right', fontsize=9)
+    ax.set_yticks(range(n_r))
+    ax.set_yticklabels(list(mat.index), fontsize=9)
+    ax.set_xlabel(xlabel, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=10)
+    ax.set_title(title or 'Pairwise cross-city R²', fontsize=12)
+    fig.colorbar(im, ax=ax, pad=0.02, shrink=0.8).set_label('R² (clipped)', fontsize=9)
     fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)

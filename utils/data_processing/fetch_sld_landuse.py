@@ -43,13 +43,13 @@ derived column — per-category shares and the dominant_category label — is
 recomputed on-the-fly from the raw data, so the classification (category map,
 TF-IWF scale, residential weight) can be tuned per run without re-downloading.
 
-Public API
-----------
+Functions
+---------
   aggr_id_to_geoid20(aggr_id)
-  fetch_sld_for_counties(county_prefixes, ...)            -> DataFrame (raw SLD fields)
   ensure_city_landuse_raw(city_label, aggr_ids, out_csv)  -> path | None  (cache-aware, RAW only)
   classify_dominant_function(df, ..., iwf_scale)          -> DataFrame (+ shares + label)
-  load_city_landuse(raw_csv, ..., iwf_scale)              -> DataFrame  (raw → on-the-fly classify)
+  pooled_iwf_weights(dfs, ...)                            -> global cross-city IWF weights
+  fetch_sld_for_counties(...)  – internal fetch step of ensure_city_landuse_raw
 """
 import os
 import json
@@ -102,12 +102,12 @@ RESIDENTIAL_WEIGHT = 1.0   # housing-unit ↔ job equivalence (modelling knob)
 DOMINANT_THRESHOLD = 0.5   # >50% (reweighted) share → that category, else "Mix"
 
 # Category reweighting before labelling.  'tf_iwf' applies Term-Frequency /
-# Inverse-Word-Frequency (mirrors spatial_features.tf_iwf) so the near-ubiquitous
+# Inverse-Word-Frequency so the near-ubiquitous
 # residential category is down-weighted and rare/concentrated functions surface;
 # 'raw_share' uses plain score shares (residential then dominates almost
-# everywhere).  These are DEFAULTS only — the classification (incl. IWF_SCALE)
-# is computed on-the-fly by load_city_landuse; the run script passes its own
-# scale so it can be tuned without touching the cached raw data.
+# everywhere).  These are DEFAULTS only — the classification is computed
+# on-the-fly by classify_dominant_function; the run script passes its own pooled
+# IWF vector so the recipe can be tuned without touching the cached raw data.
 WEIGHTING = 'tf_iwf'
 IWF_SCALE = 1.0
 
@@ -223,11 +223,41 @@ def fetch_sld_for_counties(county_prefixes, layer=DEFAULT_LAYER,
 
 # ── Classification ────────────────────────────────────────────────────────────
 
+def _score_matrix(df, residential_weight=RESIDENTIAL_WEIGHT):
+    """Per-block-group [BG x CATEGORIES] RAW score matrix: residential = counthu ×
+    residential_weight (housing proxy), each employment category = sum of its E8 fields;
+    negative SLD sentinels and NaNs clamped to 0.  Factored out so the TF-IWF rarity
+    weights can be computed either per-city (default) or POOLED across cities."""
+    def col(name):
+        return (df[name].astype(float).clip(lower=0).fillna(0.0)
+                if name in df else pd.Series(0.0, index=df.index))
+    score = pd.DataFrame(index=df.index)
+    score['residential'] = col('counthu') * residential_weight   # housing proxy
+    for cat, fields in FUNCTION_FIELD_MAP.items():                # employment categories
+        score[cat] = sum(col(c) for c in fields)
+    return score[CATEGORIES]
+
+
+def pooled_iwf_weights(dfs, residential_weight=RESIDENTIAL_WEIGHT, iwf_scale=IWF_SCALE):
+    """CROSS-CITY (global) TF-IWF category weights: pool the per-BG score mass over ALL the
+    given raw-SLD DataFrames, so every city shares ONE rarity weighting instead of a per-city
+    nt.  Returns the length-CATEGORIES vector iwf[c] = (ln(sum(nt)/nt[c]))**iwf_scale with
+    nt = total category mass over the pooled block groups.  Pass to
+    classify_dominant_function(iwf=...) to make `func_<cat>` cross-city comparable."""
+    S = np.vstack([_score_matrix(df, residential_weight).to_numpy(dtype=float) for df in dfs])
+    nt = S.sum(axis=0)
+    return np.log(nt.sum() / (nt + 1e-9)) ** iwf_scale
+
+
 def classify_dominant_function(df, residential_weight=RESIDENTIAL_WEIGHT,
                                dominant_threshold=DOMINANT_THRESHOLD,
-                               weighting=WEIGHTING, iwf_scale=IWF_SCALE):
+                               weighting=WEIGHTING, iwf_scale=IWF_SCALE, iwf=None):
     """
     Add per-category shares and a `dominant_category` label to each block group.
+
+    `iwf`: optional precomputed TF-IWF weight vector (e.g. from `pooled_iwf_weights` for a
+    CROSS-CITY recipe); when None the weights are computed from THIS df's own per-category
+    mass (per-city, the default).  Ignored when weighting='raw_share'.
 
     Raw scores
     ----------
@@ -239,9 +269,8 @@ def classify_dominant_function(df, residential_weight=RESIDENTIAL_WEIGHT,
     Housing units (residential) and job counts live on different scales AND
     housing is near-ubiquitous, so a plain `score / row_total` share labels
     almost every block group "residential".  To get a discriminative label we
-    reweight by how *distinctive* each category is, using TF-IWF — the same
-    Term-Frequency / Inverse-Word-Frequency formula as
-    `utils_pattern_analysis.spatial_features.tf_iwf` (documents = block groups,
+    reweight by how *distinctive* each category is, using TF-IWF — a
+    Term-Frequency / Inverse-Word-Frequency formula (documents = block groups,
     "words" = the functional categories):
 
         tf [i,c]  = score[i,c] / sum_c score[i,c]            (within-BG fraction)
@@ -268,27 +297,19 @@ def classify_dominant_function(df, residential_weight=RESIDENTIAL_WEIGHT,
     """
     df = df.copy()
 
-    def col(name):
-        return (df[name].astype(float).clip(lower=0).fillna(0.0)
-                if name in df else pd.Series(0.0, index=df.index))
-
-    score = pd.DataFrame(index=df.index)
-    score['residential'] = col('counthu') * residential_weight   # housing proxy
-    for cat, fields in FUNCTION_FIELD_MAP.items():               # employment categories
-        score[cat] = sum(col(c) for c in fields)
-    score = score[CATEGORIES]
-
+    score = _score_matrix(df, residential_weight)
     raw_total = score.sum(axis=1)                     # for the Unknown test
     S = score.to_numpy(dtype=float)
 
     if weighting == 'tf_iwf':
         row_tot = S.sum(axis=1, keepdims=True)
         tf      = np.divide(S, row_tot, out=np.zeros_like(S), where=row_tot != 0)
-        nt      = S.sum(axis=0)                        # total mass per category
-        iwf     = np.log(nt.sum() / (nt + 1e-9)) ** iwf_scale
-        weighted = tf * iwf
-        print("    TF-IWF category weights (lower = more ubiquitous → down-weighted):")
-        print("      " + ", ".join(f"{c}={w:.3f}" for c, w in zip(CATEGORIES, iwf)))
+        if iwf is None:                               # per-city weights (default)
+            nt   = S.sum(axis=0)                       # total mass per category (this city)
+            iwf  = np.log(nt.sum() / (nt + 1e-9)) ** iwf_scale
+            print("    TF-IWF category weights (lower = more ubiquitous → down-weighted):")
+            print("      " + ", ".join(f"{c}={w:.3f}" for c, w in zip(CATEGORIES, iwf)))
+        weighted = tf * np.asarray(iwf, dtype=float)  # per-city OR the passed cross-city vec
     elif weighting == 'raw_share':
         weighted = S
     else:
@@ -325,8 +346,8 @@ def ensure_city_landuse_raw(city_label, aggr_ids, out_csv,
 
     ONLY raw SLD columns are stored (aggr_id, geoid20, population, housing,
     employment-by-sector).  No derived columns (shares, dominant_category) are
-    written — those are computed on-the-fly by load_city_landuse, so the
-    classification can be re-tuned (e.g. a different TF-IWF scale) without
+    written — those are computed on-the-fly by classify_dominant_function, so
+    the classification can be re-tuned (e.g. a different TF-IWF scale) without
     re-downloading or rewriting the cached data.
 
     If `out_csv` exists and `force` is False, the download is skipped.
@@ -391,29 +412,3 @@ def ensure_city_landuse_raw(city_label, aggr_ids, out_csv,
         print(f"  ⚠ {city_label}: raw SLD download FAILED ({e!r}). "
               f"Continuing without land-use data.")
         return None
-
-
-def load_city_landuse(raw_csv, residential_weight=RESIDENTIAL_WEIGHT,
-                      weighting=WEIGHTING, iwf_scale=IWF_SCALE,
-                      dominant_threshold=DOMINANT_THRESHOLD):
-    """
-    Read a cached RAW SLD CSV and compute the functional classification
-    ON-THE-FLY (per-category shares + dominant_category) with the given
-    TF-IWF scale / weighting.  Nothing is written back to disk — the returned
-    DataFrame is for in-memory use (e.g. the O×D functional analysis).
-
-    Raises FileNotFoundError if the raw CSV is absent (call
-    ensure_city_landuse_raw first).
-    """
-    if not os.path.exists(raw_csv):
-        raise FileNotFoundError(
-            f"Raw SLD CSV not found: {raw_csv}. Call ensure_city_landuse_raw first."
-        )
-    df = pd.read_csv(raw_csv)
-    if 'geoid20' in df.columns:
-        df['geoid20'] = df['geoid20'].astype(str)
-    return classify_dominant_function(
-        df, residential_weight=residential_weight,
-        weighting=weighting, iwf_scale=iwf_scale,
-        dominant_threshold=dominant_threshold,
-    )
