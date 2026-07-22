@@ -937,7 +937,8 @@ def vis_bar_cross_city_resi_pred(df, gt_col='cum_loss_gt',
                                  pred_cols=(('Prediction (kNN)', 'cum_loss_pred_knn', 'kNN'),
                                             ('Prediction (ridge)', 'cum_loss_pred_ridge', 'ridge')),
                                  baseline_col='cum_loss_baseline', baseline_label='Baseline',
-                                 save_path=None, title=None):
+                                 save_path=None, title=None,
+                                 ylabel='cum_loss (day-equivalents)'):
     """Publication (Nature-style) grouped bar: per city-event (x), the CITY-LEVEL
     cum_loss as side-by-side bars — Ground truth, one bar per prediction in `pred_cols`
     (each a (legend_label, column, mae_tag); columns absent from df are skipped), and (if
@@ -985,7 +986,7 @@ def vis_bar_cross_city_resi_pred(df, gt_col='cum_loss_gt',
                             ha='center', va='bottom', fontsize=5.5, color='#3a3a3a')
         ax.set_xticks(x)
         ax.set_xticklabels(codes, rotation=20, ha='right')
-        ax.set_ylabel('cum_loss (day-equivalents)')
+        ax.set_ylabel(ylabel)
         ax.set_xlabel('city-event')
         ax.margins(y=0.22)                                  # headroom for vertical labels
         # Legend BELOW the axes so the long labels never overlap the bars.
@@ -996,6 +997,161 @@ def vis_bar_cross_city_resi_pred(df, gt_col='cum_loss_gt',
         if title:
             ax.set_title(title, fontsize=8.5)
         fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_bar_curve_mae(df, save_path=None, title=None, colors=None,
+                      ylabel='city-curve MAE (fraction of the normal baseline)'):
+    """Publication (Nature-style) grouped bar: per city-event (x), the ERROR of each
+    curve-prediction method as side-by-side bars, one bar per column of `df` in column
+    order, y = the mean absolute deviation between the predicted and observed city
+    relative curve over the disaster window.  Unlike vis_bar_cross_city_resi_pred there
+    is no ground-truth bar, because every bar IS an error and lower is better; the
+    five-unit mean of each method is annotated in the corner instead of an MAE-vs-GT
+    line.  Bar values are printed VERTICALLY and the legend sits BELOW the axes, so
+    neither collides with a neighbour.  PNG >= 300 dpi."""
+    codes = list(df.index)
+    methods = list(df.columns)
+    palette = colors or ['#0F4D92', '#E28E2C', '#7B5EA7', '#767676', '#4C9F70']
+    mean_txt = "    ".join(f"mean({m})={np.nanmean(df[m].to_numpy(dtype=float)):.4f}"
+                           for m in methods)
+    nature_rc = {
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+        'font.size': 8, 'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 0.8, 'legend.frameon': False,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+    }
+    with plt.rc_context(nature_rc):
+        n = max(len(methods), 1)
+        x = np.arange(len(codes))
+        w = 0.8 / n
+        fig, ax = plt.subplots(figsize=(1.35 * len(codes) + 1.4, 3.9))
+        for i, m in enumerate(methods):
+            vals = df[m].to_numpy(dtype=float)
+            offset = (i - (n - 1) / 2) * w
+            bars = ax.bar(x + offset, vals, width=w * 0.92, label=m,
+                          color=palette[i % len(palette)],
+                          edgecolor='black', linewidth=0.7)
+            for bar in bars:
+                h = bar.get_height()
+                if np.isnan(h):
+                    continue
+                ax.annotate(f'{h:.3f}', (bar.get_x() + bar.get_width() / 2, max(h, 0)),
+                            xytext=(0, 2), textcoords='offset points', rotation=90,
+                            ha='center', va='bottom', fontsize=5.5, color='#3a3a3a')
+        ax.set_xticks(x)
+        ax.set_xticklabels(codes, rotation=20, ha='right')
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel('city-event')
+        ax.margins(y=0.22)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.20), ncol=2, fontsize=7,
+                  columnspacing=1.4, handlelength=1.3)
+        ax.text(0.99, 0.99, mean_txt, transform=ax.transAxes, ha='right', va='top',
+                fontsize=6.5, color='#4D4D4D')
+        if title:
+            ax.set_title(title, fontsize=8.5)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_curves_city_pred(days, gt, method_curves, save_path=None, title=None,
+                         ylabel='daily mobility (flow volume per day)'):
+    """Publication-style overlay of ONE city-event's mobility curve over the
+    disaster window: the ground-truth curve (solid dark) plus one line per
+    prediction method.  `days` is the x vector (days since landfall), `gt` the
+    ground-truth values, `method_curves` an ORDERED dict label -> same-length
+    array (NaNs allowed).  Each method's MAE vs the ground truth is appended to
+    its LEGEND label (the legend sits below the axes), so no text is ever drawn
+    over the curves."""
+    _COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7', '#E28E2C', '#B0413E']
+    nature_rc = {
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+        'font.size': 8, 'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 0.8, 'legend.frameon': False,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+    }
+    gt = np.asarray(gt, dtype=float)
+    with plt.rc_context(nature_rc):
+        fig, ax = plt.subplots(figsize=(6.0, 3.6))
+        ax.plot(days, gt, color='#3a3a3a', lw=1.8, marker='o', ms=3,
+                label='Ground truth', zorder=5)
+        for i, (lab, vals) in enumerate(method_curves.items()):
+            vals = np.asarray(vals, dtype=float)
+            mae = np.nanmean(np.abs(vals - gt))
+            ax.plot(days, vals, color=_COLORS[i % len(_COLORS)], lw=1.2,
+                    ls='--', marker='.', ms=2.5,
+                    label=f'{lab}  (MAE {mae:.3g})')
+        ax.set_xlabel('days since landfall')
+        ax.set_ylabel(ylabel)
+        ax.margins(y=0.08)
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.18),
+                  ncol=2, fontsize=7, columnspacing=1.6, handlelength=1.6)
+        if title:
+            ax.set_title(title, fontsize=8.5)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_component_curves_grid(curves_obs, method_curves, save_path=None,
+                              title=None, ncols=4, weights=None):
+    """Per-component curve grid for ONE city-event: each panel shows a
+    component's OBSERVED relative curve (solid dark) and one dashed line per
+    method in `method_curves` (dict label -> DataFrame [days × k] aligned with
+    `curves_obs`).  The baseline r = 1 is drawn as a grey rule.  `weights`
+    (optional, length k, positionally aligned with `curves_obs.columns`) is the
+    city-aggregation weight; when given it is appended to each panel title."""
+    _COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7', '#E28E2C', '#B0413E']
+    nature_rc = {
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 0.7, 'legend.frameon': False,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+    }
+    import math
+    k = curves_obs.shape[1]
+    days = curves_obs.index.to_numpy()
+    nrows = math.ceil(k / ncols)
+    with plt.rc_context(nature_rc):
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(2.4 * ncols, 1.9 * nrows),
+                                 squeeze=False, sharex=True)
+        for j in range(nrows * ncols):
+            ax = axes[j // ncols][j % ncols]
+            if j >= k:
+                ax.axis('off')
+                continue
+            ax.axhline(1.0, color='#BBBBBB', lw=0.7, zorder=1)
+            ax.plot(days, curves_obs.iloc[:, j], color='#3a3a3a', lw=1.3,
+                    zorder=5, label='observed')
+            for i, (lab, dfm) in enumerate(method_curves.items()):
+                ax.plot(days, dfm.iloc[:, j], color=_COLORS[i % len(_COLORS)],
+                        lw=1.0, ls='--', label=lab)
+            ttl = f'component {curves_obs.columns[j]}'
+            if weights is not None:
+                ttl += f'  ($w$ = {weights[j]:.2f})'
+            ax.set_title(ttl, fontsize=7)
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='lower center',
+                   ncol=min(4, 1 + len(method_curves)), fontsize=7,
+                   bbox_to_anchor=(0.5, -0.01))
+        if title:
+            fig.suptitle(title, fontsize=9)
+        fig.tight_layout(rect=(0, 0.04, 1, 0.97))
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
             fig.savefig(save_path, dpi=300, bbox_inches='tight')

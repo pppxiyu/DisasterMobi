@@ -39,7 +39,8 @@ spatial_features(H, distances) -> DataFrame  (loading-weighted mean/std flow dis
 socioeconomic_features(H, values, name) -> DataFrame  (loading-weighted median income)
 resilience_curves(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
 resilience_features(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
-recovery_rate_features(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame  (exp-recovery rate lambda)
+recovery_curve_features(W, n_nor, first_day, slots_per_day, n_dis, ...) -> DataFrame  (surge-plus-relaxation recovery params: recovery_alpha, recovery_level, surge_strength, surge_rate)
+daily_baselines(W, n_nor, first_day, slots_per_day, n_dis) -> DataFrame  (day-type-matched baseline per disaster day)
 time_function_correlation(df, time_cols, func_cols) -> (rho_df, pval_df)
 """
 import numpy as np
@@ -460,64 +461,155 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
     return feats
 
 
-def recovery_rate_features(W, n_nor, first_day, slots_per_day, n_dis=None,
-                           smooth=3, max_rate=5.0, min_points=3):
+def recovery_curve_features(W, n_nor, first_day, slots_per_day, n_dis=None,
+                            smooth=3, max_rate=5.0, min_points=5,
+                            min_fit_r2=0.0, min_std=0.02, min_r0=1e-6,
+                            level_bounds=(0.05, 5.0), surge_bounds=(-10.0, 10.0),
+                            surge_rate_bounds=(0.1, 3.0), include_surge=True):
     """
-    Exponential-recovery rate λ per component (added 2026-07-12 as the second
-    resilience metric next to cum_loss).
+    Surge-plus-relaxation recovery model per component — the parameters of the
+    resilience curve, fitted jointly (2026-07-14; supersedes the free-plateau
+    logistic, which had no way to express the transient above-baseline surges
+    and late-deepening dips the data contains, so those shapes contaminated
+    the fitted rate).
 
-    Each component's recovery segment — the smoothed relative curve r_k(d) from
-    its lowest point d_min onward — is fitted with the exponential-recovery
-    model written on the deficit scale:
+    Model (a logistic relaxation toward the end level L — the single-unit
+    reduction of Li, Wang & Chen 2024's KDD spatiotemporal decay dynamics —
+    PLUS an externally-forced transient pulse in the unit-hydrograph
+    superposition tradition, Nash 1957; the pulse escapes the free-response
+    amplitude bound |r−1| <= |1−r0| that a forcing-free family obeys):
 
-        D(d) = D0 · exp(−λ · (d − d_min)),   D(d) = 1 − r(d)
+        r(t) = L / (1 + (L/r0 − 1)·e^(−α·t))  +  B·t·e^(−b·t)
 
-    i.e. Q(t) = Q_target − (Q_target − Q_min)·e^(−λt) with Q_target = 1 (the
-    pre-disaster baseline) and D0 fixed at the OBSERVED maximum deficit
-    1 − min(r), so only λ is fitted (non-linear least squares, λ bounded to
-    [0, max_rate]).  Fixing D0 mirrors the archived StepWiseModel fit and keeps
-    the one-parameter fit stable at n ≈ 15 days.
+    anchored at the OBSERVED landfall-day value r0 = r(0) (the pulse vanishes
+    at t = 0, so the anchor holds for any parameters).  FOUR fitted
+    quantities (joint non-linear least squares, multi-start):
+      * recovery_alpha (α) — the recovery RATE toward L, bounded
+        [0, max_rate].  HIGHER = FASTER recovery = MORE resilient, the
+        OPPOSITE direction to cum_loss.  Because the pulse absorbs the
+        transient hump/dip and L absorbs the end-level offset, this α is the
+        DECONTAMINATED ("clean") rate — the quantity the STEP-7 forecast
+        transfers.
+      * recovery_level (L) — the level the base relaxes toward, bounded
+        `level_bounds` (> 1 = settles above the normal baseline).
+      * surge_strength (B) — the SIGNED amplitude of the forced transient,
+        bounded `surge_bounds`: B > 0 = above-baseline surge (return flows,
+        repair/relief activity), B < 0 = transient deepening dip (a
+        late-bottoming drop).  The pulse peaks at height |B|/(b·e).
+      * surge_rate (b) — the pulse relaxation rate, bounded
+        `surge_rate_bounds`; the pulse peaks at t = 1/b days.
+    α = 0 keeps the base at r0 for the whole window, whatever L.
 
-    READING DIRECTION: λ is a RATE — HIGHER = FASTER recovery = MORE resilient,
-    the OPPOSITE direction to cum_loss (higher = worse).  1/λ is the e-folding
-    time in days; ln(2)/λ is the deficit half-life.
-
-    NaN cases (the metric is undefined, and the affected component is dropped
-    from λ-analyses only — every consumer handles metrics independently):
-      * the component never fell below baseline (D0 <= 0: nothing to recover);
-      * fewer than `min_points` days from d_min to the window end;
+    NaN cases (all four parameters undefined together; the component then
+    supplies no training row to the α analyses — every consumer handles
+    metrics independently, and the cross-city CURVE prediction still predicts
+    every TEST component from its features alone):
       * the all-NaN curve of a zero-baseline component;
-      * a failed fit.
+      * r0 not finite or <= min_r0 (the logistic base diverges);
+      * fewer than min_points finite days (4 parameters need >= 5 points);
+      * a constant curve (std < min_std: the parameters are unidentifiable);
+      * a failed fit;
+      * QUALITY GATE (owner decision): joint-fit R² below min_fit_r2.
 
-    Returns DataFrame ['recovery_lambda'] indexed by component (1/days).
+    Returns DataFrame ['recovery_alpha', 'recovery_level', 'surge_strength',
+    'surge_rate'] indexed by component (α, b in 1/days; L, B relative to the
+    normal baseline).
+
+    include_surge=False fits the SAME curves WITHOUT the pulse term (the plain
+    free-plateau logistic, 2 parameters); surge_strength/surge_rate come back
+    NaN.  The α is then the surge-CONTAMINATED rate (humps/dips load onto it) —
+    an ablation backbone, not the metric.  Gates are identical.
     """
     r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
                           smooth=smooth)
     arr = r.to_numpy()
     n_days, k = arr.shape
-    lam = np.full(k, np.nan)
+    out = np.full((k, 4), np.nan)
+    lo, hi = level_bounds
+    b_lo, b_hi = surge_bounds
+    sr_lo, sr_hi = surge_rate_bounds
+    t_all = np.arange(n_days, dtype=float)
     for j in range(k):
-        deficit = 1.0 - arr[:, j]
-        if np.isnan(deficit).all():
+        y = arr[:, j]
+        ok = np.isfinite(y)
+        if not ok.any():
             continue
-        d_min = int(np.nanargmax(deficit))
-        d0 = deficit[d_min]
-        if not np.isfinite(d0) or d0 <= 0:
+        r0 = y[0]
+        t, yo = t_all[ok], y[ok]
+        if (not np.isfinite(r0) or r0 <= min_r0 or len(yo) < min_points
+                or float(np.std(yo)) < min_std):
             continue
-        tail = deficit[d_min:]
-        ok = np.isfinite(tail)
-        t = np.arange(len(tail), dtype=float)[ok]
-        y = tail[ok]
-        if len(y) < min_points:
+
+        def _model(t_, a, L, B, b):
+            return (L / (1.0 + (L / r0 - 1.0) * np.exp(-a * t_))
+                    + B * t_ * np.exp(-b * t_))
+
+        def _model_ns(t_, a, L):
+            return L / (1.0 + (L / r0 - 1.0) * np.exp(-a * t_))
+
+        end = float(np.clip(np.mean(yo[-3:]), lo, hi))
+        if include_surge:
+            # Multi-start: monotone, positive surge, negative dip, fast, slow.
+            starts = [(0.3, end, 0.0, 0.5), (0.5, 1.0, 2.0, 0.3),
+                      (0.5, 1.0, -1.0, 0.5), (1.0, end, 1.0, 1.0),
+                      (0.2, end, 0.5, 0.2)]
+            model, lo_b, hi_b = _model, [0.0, lo, b_lo, sr_lo], [max_rate, hi, b_hi, sr_hi]
+        else:
+            starts = [(0.3, end), (0.5, 1.0), (1.0, end)]
+            model, lo_b, hi_b = _model_ns, [0.0, lo], [max_rate, hi]
+        best = None
+        for p0 in starts:
+            try:
+                popt, _ = curve_fit(model, t, yo, p0=list(p0),
+                                    bounds=(lo_b, hi_b), maxfev=30000)
+                sse = float(np.sum((yo - model(t, *popt)) ** 2))
+                if best is None or sse < best[0]:
+                    best = (sse, popt)
+            except Exception:
+                continue
+        if best is None:
             continue
-        try:
-            popt, _ = curve_fit(lambda t_, l: d0 * np.exp(-l * t_), t, y,
-                                p0=[0.3], bounds=(0.0, max_rate), maxfev=10000)
-            lam[j] = popt[0]
-        except Exception:
-            pass
-    return pd.DataFrame({'recovery_lambda': lam},
+        ss_tot = float(np.sum((yo - yo.mean()) ** 2))
+        fit_r2 = (1.0 - best[0] / ss_tot) if ss_tot > 0 else 0.0
+        if fit_r2 < min_fit_r2:
+            continue
+        out[j] = ([float(v) for v in best[1]] if include_surge
+                  else [float(best[1][0]), float(best[1][1]), np.nan, np.nan])
+    return pd.DataFrame(out, columns=['recovery_alpha', 'recovery_level',
+                                      'surge_strength', 'surge_rate'],
                         index=pd.RangeIndex(k, name='component'))
+
+
+def daily_baselines(W, n_nor, first_day, slots_per_day, n_dis=None):
+    """
+    Day-type-matched pre-disaster baseline per DISASTER day — the denominator
+    of _daily_relative_curve, exposed so a relative curve (or a predicted one)
+    can be scaled back to absolute daily activity: magnitude(d) = r(d) ×
+    baseline(day-type of d).  Same n_nor / n_dis (buffer) semantics as
+    _daily_relative_curve.
+
+    Returns a DataFrame [n_disaster_days × k]; entry (d, j) is component j's
+    mean normal-period daily total for day d's day type (weekday/weekend).
+    """
+    if n_dis is None:
+        n_dis = n_nor
+    W = np.asarray(W, dtype=float)
+    n_days = W.shape[0] // slots_per_day
+    if n_days * slots_per_day != W.shape[0]:
+        raise ValueError("W length is not a multiple of slots_per_day")
+    if n_nor % slots_per_day or n_dis % slots_per_day:
+        raise ValueError("n_nor / n_dis must be multiples of slots_per_day")
+    days_nor = n_nor // slots_per_day
+    days_dis = n_dis // slots_per_day
+    daily = W.reshape(n_days, slots_per_day, W.shape[1]).sum(axis=1)
+    di0 = DAYS.index(first_day.capitalize())
+    is_wd = np.array([((di0 + d) % 7) < 5 for d in range(n_days)])
+    base_wd = daily[:days_nor][is_wd[:days_nor]].mean(axis=0)
+    base_we = daily[:days_nor][~is_wd[:days_nor]].mean(axis=0)
+    rows = [base_wd if is_wd[d] else base_we for d in range(days_dis, n_days)]
+    return pd.DataFrame(np.vstack(rows),
+                        index=pd.RangeIndex(n_days - days_dis,
+                                            name='day_since_landfall'))
 
 
 def time_function_correlation(df, time_cols, func_cols, method='spearman'):

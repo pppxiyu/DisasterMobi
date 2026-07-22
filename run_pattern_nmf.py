@@ -65,10 +65,10 @@ STEP 3 — Characterise each unit's components (the within-city analyses).
     STEP-1 land-use labels (C categories).  The block
     results are assembled into one feature table with one row per component,
     holding the temporal, functional, spatial and socioeconomic predictors
-    plus the two resilience targets (cum_loss, and the exponential-recovery
-    rate recovery_lambda fitted from each component's lowest point onward —
-    higher = faster recovery), and correlation and Ridge-regression
-    analyses relate those predictors to the targets.  Two per-event-constant
+    plus the two resilience targets — cum_loss, and the recovery rate
+    recovery_alpha of the landfall-day-anchored logistic recovery model
+    (higher = faster recovery back to baseline) — and correlation and
+    Ridge-regression analyses relate those predictors to the targets.  Two per-event-constant
     LEVEL covariates are appended last, so that only the cross-city steps see
     them: hurricane_intensity, the storm's Saffir-Simpson intensity at
     arrival, and evac_level, the population-weighted strength of the event's
@@ -92,6 +92,36 @@ STEP 6 — Cross-city prediction.
     each city's cum_loss (the cumulative daily activity deficit over the
     disaster window, in day-equivalents — the resilience target)
     against the decomposition-free similarity baseline.
+STEP 7 — Cross-city curve prediction.
+    The output is upgraded from the cum_loss scalar to the whole mobility
+    trajectory.  Each component's FITTED curve is the surge-plus-relaxation
+    model r(t) = L/(1 + (L/r0−1)e^(−α·t)) + B·t·e^(−b·t), anchored at the
+    OBSERVED landfall-day value r0 (Li, Wang & Chen 2024's problem setting:
+    the initial post-disaster state and the normal level are the inputs, the
+    recovery process is the prediction).  The end level L and the signed
+    forced pulse (B, b) absorb the settle-away-from-baseline and hump/dip
+    transients the data contains, so the jointly-fitted rate α is CLEAN.  The
+    FORECAST is the PLATEAU INVERSION: the recovery RATE does not transfer
+    across cities (its within-city Ridge R² is negative in all five units)
+    but cum_loss does (up to 0.70), so the forecast holds the rate at the
+    pooled-train mean and lets the ONE predictable quantity set the ONE free
+    family parameter — each component's curve is the family logistic itself
+    (B = 0) with the plateau L solved so the curve's net signed loss lands
+    halfway between the backbone's own loss and the component's cross-city
+    predicted cum_loss (halfway = fixed shrinkage against prediction noise).
+    That predicted cum_loss is itself assembled by QUANTILE MAPPING (the
+    comonotone one-dimensional optimal-transport assignment): the rank-path
+    kNN orders the components within the city, the pooled-train cum_loss
+    quantiles give the values their shape, a ratio of observable backbone-loss
+    spreads rescales them to the held city's own dispersion, and an additive
+    shift pins the weight_normal aggregate to the STEP-6 D+comp predicted
+    city total.
+    weight_normal aggregation turns the component curves into the city
+    trajectory, compared against the observed curve alongside three reference
+    lines: a city-wise forecast (one rate for the whole city, a single
+    logistic — the decomposition-free counterpart), the component's own
+    UNGATED full fit (the model family's ceiling), and the pooled-train mean
+    rate alone (the L = 1, zero-shrinkage special case).
 
 Output tree (outputs/nmf/)
 --------------------------
@@ -114,6 +144,11 @@ Output tree (outputs/nmf/)
         raw_data/ at the root; per-method leave-one-out scatters, R² matrix and
         pairwise heatmap under cross_city_pred_rank/ (spearman) and
         cross_city_pred_raw_value/ (pearson)
+    cross_city_curve_pred/       the STEP-7 outputs: bar_cross_city_curve_mae.png
+        (the city-level whole-curve error of each forecast line, per city-event),
+        per-unit city_magnitude_curve_<code>.png and component_curves_<code>.png,
+        curve_pred_metrics.csv, and raw_data/ (per-day city curves by method +
+        the per-component α/L table + the plotted MAE table)
 
 Adding a city-event means adding one CITY_EVENTS entry and providing its graph
 pkl, its geo CSV, and its land-use (EPA Smart Location Database) and income
@@ -128,6 +163,7 @@ import os
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq, least_squares
 
 from config import (
     BR_GRAPH_PATH, FM_GRAPH_PATH, BR_ANALYSIS_DAYS, FM_ANALYSIS_DAYS,
@@ -150,7 +186,8 @@ from utils.pattern_analysis.visualization import (
     vis_hist_function_entropy,
     vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
     vis_heatmap_pair_r2, vis_scatter_intensity_resilience,
-    vis_bar_cross_city_resi_pred,
+    vis_bar_cross_city_resi_pred, vis_bar_curve_mae, vis_curves_city_pred,
+    vis_component_curves_grid,
 )
 from utils.pattern_analysis.space_function import (
     category_lookup_from_landuse, build_od_function_matrix,
@@ -158,7 +195,8 @@ from utils.pattern_analysis.space_function import (
 from utils.pattern_analysis.component_features import (
     temporal_features, functional_features, time_function_correlation,
     resilience_features, resilience_curves, component_function_entropy,
-    spatial_features, socioeconomic_features, recovery_rate_features,
+    spatial_features, socioeconomic_features, recovery_curve_features,
+    daily_baselines,
 )
 from utils.pattern_analysis.ml_resilience import (
     run_city_resilience_linear, cross_city_resilience,
@@ -299,20 +337,94 @@ FUNC_COLS = ([f'share_from_{c}' for c in SF_CATEGORIES]
 #                     cancel drops, which makes it linear in r and additive
 #                     across components — the property the city-level
 #                     reconstruction relies on).  HIGHER = WORSE.
-#   recovery_lambda — the exponential-recovery rate λ of the deficit
-#                     D(d) = D0·e^(−λ·(d − d_min)) fitted from each component's
-#                     lowest point onward (component_features.
-#                     recovery_rate_features; added 2026-07-12).  A RATE:
-#                     HIGHER = FASTER recovery = MORE resilient — the OPPOSITE
-#                     reading direction to cum_loss.  NaN for components that
-#                     never fell below baseline (nothing to recover).
-# The city-level reconstruction (STEP 6) stays cum_loss-only.
-# HISTORY (2026-07-12): the analyses previously also carried drop_depth,
-# early_collapse, recovery_day and recovery_deficit.  They were retired from
-# every analysis, figure and output; resilience_features still COMPUTES all
-# five (kept long-term, see the note in component_features.resilience_features),
-# so restoring one is just adding its name back to this list.
-RES_COLS = ['cum_loss', 'recovery_lambda']
+#   recovery_alpha  — the CLEAN recovery rate α of the surge-plus-relaxation
+#                     model r(t) = L/(1 + (L/r0−1)e^(−α·t)) + B·t·e^(−b·t),
+#                     anchored at the OBSERVED landfall-day value r(0) (the
+#                     logistic base is the single-unit reduction of Li, Wang &
+#                     Chen 2024's spatiotemporal decay dynamics; the pulse term
+#                     is an externally-forced transient in the unit-hydrograph
+#                     superposition tradition; component_features.
+#                     recovery_curve_features).  A RATE: HIGHER = FASTER
+#                     recovery = MORE resilient — the OPPOSITE direction to
+#                     cum_loss.  "Clean" because the jointly-fitted companions
+#                     absorb what used to contaminate the rate: recovery_level
+#                     (L, the end level), surge_strength (B, the SIGNED
+#                     transient amplitude: >0 above-baseline surge, <0
+#                     late-deepening dip) and surge_rate (b, pulse peak at 1/b
+#                     days).  The companions RIDE IN THE FEATURE TABLES for the
+#                     STEP-7 oracle but are NOT RES_COLS metrics and are NOT
+#                     forecast: the STEP-7 prediction synthesizes the monotone
+#                     L = 1, B = 0 slice because neither L nor B transfers
+#                     across cities (2026-07-14 sandbox tournaments).  NaN when
+#                     day-0 is a total stop, the curve is constant, or the
+#                     joint fit fails the ALPHA_MIN_FIT_R2 quality gate below.
+# The city-level cum_loss reconstruction (STEP 6) stays cum_loss-only; the
+# curve prediction (STEP 7) forecasts recovery_alpha at L = 1, B = 0.
+# HISTORY: the analyses previously also carried drop_depth, early_collapse,
+# recovery_day and recovery_deficit (retired 2026-07-12; resilience_features
+# still COMPUTES all five — kept long-term, see the note in
+# component_features.resilience_features — so restoring one is just adding its
+# name back to this list) and recovery_lambda, an exponential-recovery rate
+# (added 2026-07-12, REMOVED 2026-07-13: the owner judged its definition
+# flawed; recovery_alpha is its successor).  recovery_alpha itself started as a
+# FIXED-baseline logistic (capped at 1), became free-plateau 2026-07-13 (the
+# cap misfit the above-baseline majority), and became the surge-model clean
+# rate 2026-07-14 (humps contaminated the free-plateau rate; the forecast
+# tournament showed the clean rate transfers best).
+RES_COLS = ['cum_loss', 'recovery_alpha']
+
+# recovery-curve fit knobs (shared by the STEP-3 and STEP-5 feature tables;
+# see component_features.recovery_curve_features for the full NaN rules).
+ALPHA_MAX_RATE = 5.0     # upper bound of the fitted rate α (1/days)
+ALPHA_MIN_FIT_R2 = 0.0   # QUALITY GATE: a joint fit explaining less variance
+                         # of the observed curve than a constant (R² < 0) is
+                         # dropped (supplies no training row)
+ALPHA_MIN_STD = 0.02     # a curve with std below this is constant -> the
+                         # parameters are jointly unidentifiable -> NaN
+LEVEL_BOUNDS = (0.05, 5.0)   # bounds of the fitted end level L (relative to
+                             # the normal baseline; > 1 = settles above normal)
+SURGE_BOUNDS = (-10.0, 10.0)     # bounds of the SIGNED surge strength B
+SURGE_RATE_BOUNDS = (0.1, 3.0)   # bounds of the surge rate b (pulse peaks at
+                                 # 1/b days: between 0.33 and 10 days)
+CURVE_PRED_SHRINK = 0.5  # STEP-7 plateau inversion: the solved-L target is
+                         # c_base + SHRINK·(ĉ − c_base) — 0 reproduces the
+                         # train-mean line (L = 1), 1 trusts the cum_loss
+                         # prediction fully.  0.5 is a fixed halfway-shrinkage
+                         # convention: per-fold tuning of this weight overfits
+                         # at n = 4 inner folds (2026-07-14 nested-menu test).
+
+# STEP-7 'pred' line variants (2026-07-21 sandbox comparison; all share the full
+# quantile-mapped cum_loss prediction and differ ONLY in how each component's
+# (α, L) is set from the shrunk target):
+#   CURVE_PRED_SOLVER  'solve_L'      α pinned at the backbone mean ᾱ, L solved
+#                                     exactly by brentq (PRODUCTION; 0.0706)
+#                      'joint_alphaL' α AND L jointly least-squares-fitted to the
+#                                     target, plus λ·(L − line(α))² pulling L
+#                                     toward the training α-L relationship
+#                                     (pooled OLS L = a0 + b·log10 α over the
+#                                     TRAINING units' ungated fits, bound-pinned
+#                                     included).  λ = 0 is the unregularized
+#                                     joint solve — its 15-day 0.0646 is ERROR
+#                                     CANCELLATION (true-cum_loss 0.0778), not
+#                                     a real gain; λ = 0.1 scores 0.0752.
+#   CURVE_JOINT_LAMBDA regularization strength, read only by 'joint_alphaL'.
+#   CURVE_ALPHA_BACKBONE 'surge'      ᾱ = pooled-train mean of the surge-model
+#                                     CLEAN rate (production)
+#                        'no_surge'   ᾱ from refitting the training curves with
+#                                     the pulse term REMOVED (plain free-plateau
+#                                     logistic) — the surge-contaminated rate;
+#                                     worse at 15 days (0.0740) but the best
+#                                     backbone at extended windows (T ≥ 20).
+CURVE_PRED_SOLVER = 'joint_alphaL'   # owner choice 2026-07-21: joint (α,L) solve
+                                     # with the α-L-line ridge (λ below).  NOTE: on
+                                     # the DEPLOYED predicted cum_loss this scores
+                                     # city-MAE ~0.0752 vs solve_L's 0.0706 — the
+                                     # line-reg advantage holds only under TRUE
+                                     # cum_loss (see the sandbox sweep).  Set back
+                                     # to 'solve_L' to restore the 0.0706 forecast.
+CURVE_JOINT_LAMBDA = 0.1             # λ-insensitive on predicted cum_loss (~0.0752
+                                     # across 1e-4..10)
+CURVE_ALPHA_BACKBONE = 'surge'
 
 # Resilience REGRESSION (prediction) method(s); intra-city -> intra_city_loss_reg_<method>/,
 # inter-city -> cross_city_resi_pred/<label>/ (CROSS_CITY_METHOD_STD).
@@ -525,8 +637,24 @@ POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
 # Cross-city predictor for the resilience regression: 'ridge' (global linear, can
 # extrapolate) or 'cosine_knn' (Nadaraya-Watson with a cosine kernel = similarity-
 # weighted mean of the training components' target; bounded to the training range).
-# Applies to ALL cross-city outputs (LOO scatters/matrix, pairwise, city-level pred).
+# Applies to the LOO scatters/matrix and the pairwise analyses; the city-level
+# reconstruction (STEP 6) and the curve prediction (STEP 7) pin 'cosine_knn'.
 CROSS_CITY_MODEL = 'cosine_knn'
+
+
+# ── STEP 7 parameters — cross-city curve prediction ─────────────────────────────
+
+# Everything the STEP-7 curve prediction writes goes here.
+OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_curve_pred')
+
+# Minimum usable rows per unit-and-metric inside the cross-city engine, for
+# BOTH the STEP-6 analyses and the STEP-7 curve prediction.  The engine
+# default (MIN_ROWS = 8) is lowered because recovery_alpha is NaN for every
+# component whose curve starts at the baseline or never left it — under the
+# default no unit keeps 8 usable α rows and the α row of every STEP-6 output
+# would be empty.  cum_loss is unaffected: every unit has >= 9 usable
+# cum_loss rows, so it clears both thresholds (verified byte-identical).
+CROSS_CITY_MIN_ROWS = 5
 
 
 # ── STEP 1 — global land-use classification ─────────────────────────────────────
@@ -906,7 +1034,8 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     event-out cross-city loop to build the HELD-OUT (test) unit's feats at a fixed k
     (k=10), independent of the unit's own n_behaviors used elsewhere.  l1_reg is
     the unit's CITY_EVENTS value (only k differs).  `cat_lookup` is the unit's block-group
-    -> category map from the STEP-1 global classification."""
+    -> category map from the STEP-1 global classification.
+    Returns (feats, (W, H)) — the decomposition is reused by STEP 7."""
     W, H, weights = decompose_city(X_all, k, l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
     M, _ = build_od_function_matrix(H, mapping, cat_lookup, AXIS_CATEGORIES)
     distances = build_distance_array(mapping, gdf)
@@ -926,10 +1055,30 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
         spatial_features(H, distances),
         socioeconomic_features(H, income_array, name='median_income_combined'),
         resilience_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE, n_dis=n_dis),
-        recovery_rate_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
-                               n_dis=n_dis),
+        recovery_curve_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
+                                n_dis=n_dis, max_rate=ALPHA_MAX_RATE,
+                                min_fit_r2=ALPHA_MIN_FIT_R2,
+                                min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
+                                surge_bounds=SURGE_BOUNDS,
+                                surge_rate_bounds=SURGE_RATE_BOUNDS),
     ], axis=1)
+    if CURVE_ALPHA_BACKBONE == 'no_surge':
+        # Ablation backbone (STEP-7 only): the same curves refit WITHOUT the
+        # pulse term.  Guarded so the default configuration computes nothing new.
+        feats['recovery_alpha_nosurge'] = recovery_curve_features(
+            W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE, n_dis=n_dis,
+            max_rate=ALPHA_MAX_RATE, min_fit_r2=ALPHA_MIN_FIT_R2,
+            min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
+            surge_bounds=SURGE_BOUNDS, surge_rate_bounds=SURGE_RATE_BOUNDS,
+            include_surge=False)['recovery_alpha'].to_numpy()
     feats.insert(0, 'city', cfg['label'])
+    # Observed landfall-day relative drop r0 = r(0) of each component's curve
+    # (baseline-normalized, so cross-city comparable).  It is BOTH the curve
+    # anchor AND — being the mechanically strongest, feature-independent
+    # predictor of cum_loss — a STEP-7 predictor of cum_loss (leak-free: r0 is
+    # the observed initial condition the paper's setting provides).
+    feats['r0'] = resilience_curves(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
+                                    n_dis=n_dis).iloc[0].to_numpy(dtype=float)
     # Per-component NMF importance (‖W‖·‖H‖, full window) — kept for reference.
     feats['weight'] = weights
     # Normal-period baseline magnitude per component = (Σ over the normal slots of W) ×
@@ -944,7 +1093,10 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     # HEvOD evacuation strength.
     feats['hurricane_intensity'] = cfg['ss_intensity']
     feats['evac_level'] = cfg['evac_level']
-    return feats
+    # The decomposition is returned alongside the table so the STEP-7 curve
+    # prediction can rebuild the SAME components' observed curves without a
+    # second (identical, deterministic) NMF fit.
+    return feats, (W, H)
 
 
 # ── STEP 6 — cross-city prediction analyses ─────────────────────────────────────
@@ -953,7 +1105,8 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
                         merge_func_directions=True,
                         methods=RESIL_REG_METHODS, split=None,
                         target_std=None, subdir=None, level_feature_cols=(),
-                        model='ridge', pooled_feature_cols=()):
+                        model='ridge', pooled_feature_cols=(),
+                        min_rows=CROSS_CITY_MIN_ROWS):
     """Cross-city resilience generalisation driven by an explicit train/test `split`
     of city-event codes.  Each method's target standardization is HARD-PAIRED via
     CROSS_CITY_METHOD_STD (spearman->within_unit, pearson->pooled_train): target_std=None
@@ -1017,7 +1170,7 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
         r2_table, pred, groups = cross_city_resilience(
             cities, RES_COLS, feature_cols, rank=rank, split=split,
             target_std=std_mode, level_feature_cols=level_feature_cols, model=model,
-            pooled_feature_cols=pooled_feature_cols)
+            pooled_feature_cols=pooled_feature_cols, min_rows=min_rows)
         if r2_table.shape[1] == 0:
             continue                                    # skipped/empty (warning already emitted)
         results[method] = r2_table
@@ -1290,7 +1443,8 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
 
 def analysis_cross_city_pairs(feats_train, feats_test, codes, method='pearson',
                               target_std=None, subdir=None, level_feature_cols=(),
-                              model='ridge', pooled_feature_cols=()):
+                              model='ridge', pooled_feature_cols=(),
+                              min_rows=CROSS_CITY_MIN_ROWS):
     """Pairwise single-train -> single-test cross-city transfer for cum_loss.
     For each ORDERED pair (train=a, test=b): train a uses its own-k feats
     (feats_train), test b uses the k=10 feats (feats_test); the diagonal (a==b) is
@@ -1335,7 +1489,7 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='pearson',
                 feats_pair, RES_COLS, feature_cols, rank=rank,
                 split={'train': [a], 'test': [b]}, target_std=target_std,
                 level_feature_cols=level_feature_cols, model=model,
-                pooled_feature_cols=pooled_feature_cols)
+                pooled_feature_cols=pooled_feature_cols, min_rows=min_rows)
             col = 'pooled_LOO' if a == b else b
             mat.loc[a, b] = (float(r2_t.loc['cum_loss', col])
                              if col in r2_t.columns and pd.notna(r2_t.loc['cum_loss', col])
@@ -1352,6 +1506,794 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='pearson',
     print(f"  [pairwise] cum_loss R² heatmap ({method}) -> "
           f"{os.path.join(out_dir, 'cross_city_pair_heatmap.png')}")
     return mat
+
+
+# ── STEP 7 — cross-city curve prediction ────────────────────────────────────────
+
+# Display labels of the method lines (dict order = plot / colour order).
+# 'pred'  — component-wise plateau inversion: each test component's plateau L
+#           solved from its QUANTILE-MAPPED cum_loss prediction (rank-path
+#           ordering + pooled-train spread + raw-path city total), aggregated
+#           by weight_normal.
+# 'city'  — city-wise: ONE α for the whole city predicted from the OTHER
+#           cities' city-level features (decomposition-free analog of 'pred').
+_CURVE_METHOD_LABELS = {
+    'pred':       'Component-wise pred (kNN)',
+    'city':       'City-wise pred (kNN)',
+    'oracle':     'Own-fit (oracle)',
+    'train_mean': 'Train-mean',
+}
+
+# Which method lines appear in the CITY-LEVEL figures (the magnitude overlay and
+# the whole-curve MAE bar).  The oracle is deliberately absent: it reads each
+# test component's own curve, so it is a descriptive ceiling rather than a
+# forecast, and putting it beside three genuine forecasts invites reading it as
+# a fourth.  It is NOT removed from the analysis — it still carries the
+# component grid (where it shows what the model family can express), the metrics
+# CSV, the raw per-day curves and the ungated columns of the parameter table.
+_CITY_FIGURE_METHODS = tuple(m for m in _CURVE_METHOD_LABELS if m != 'oracle')
+
+
+def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_test):
+    """Predict each held-out unit's ENTIRE disaster-window mobility curve, not just
+    its cum_loss.  Leave-one-unit-out; the pearson/pooled_train frame throughout
+    (absolute parameters are what the curve model needs).
+
+    The fitted recovery curve is the SURGE-PLUS-RELAXATION model
+    r(t) = L/(1 + (L/r0−1)e^(−α·t)) + B·t·e^(−b·t), anchored at the OBSERVED
+    landfall-day value r0 (the pulse vanishes at t = 0).  L absorbs the end
+    level, the signed pulse (B, b) absorbs the hump/dip transient, so the
+    jointly-fitted α is the CLEAN recovery rate.  Every FORECAST line holds
+    the rate at the POOLED-TRAIN MEAN and drops the pulse (B = 0), because
+    neither the rate nor any shape parameter transfers across cities via
+    features — only cum_loss does (its within-city Ridge R² reaches 0.70; the
+    rate's is negative in all five units).  The component-wise forecast
+    therefore predicts cum_loss and inverts it into the family's ONE remaining
+    free parameter, the plateau L (see _plateau_inversion_curves), so the full
+    fitted model serves the FIT (the recovery_alpha metric and the oracle
+    line) while the forecast stays inside the same family.
+      1. cum_loss of every TEST component is predicted cross-city by QUANTILE
+         MAPPING over two kNN channels (features = the STEP-6 pooled
+         predictors PLUS the observed r0 — the day-0 drop is the mechanically
+         strongest predictor of cum_loss and already an allowed input as the
+         anchor):
+           total     the D+comp city cum_loss of STEP 6 (standardized
+                     component predictions aggregated by weight_normal, then
+                     one city-scale variance match calibrated nested-LOO on
+                     the training units): city-total MAE 0.270 against the
+                     0.785 of the raw path's own aggregate, which stays as
+                     the fallback;
+           ordering  RANK path (within_unit frame: features and target
+                     rankdata'd per city) — rank transfer is immune to
+                     cross-city level/scale drift, so it carries the
+                     within-city ordering better than the raw values do;
+           shape     pooled-TRAIN cum_loss quantiles at (k−0.5)/n, assigned
+                     in the predicted order;
+           spread    those quantiles scaled by the held unit's backbone-loss
+                     spread over the training units' mean backbone-loss
+                     spread (observable proxy, ratio form, no fitted
+                     parameter), then shifted to match the total.
+         Either channel needs only the test unit's FEATURES, so the TEST
+         table's target column is replaced by a finite placeholder ramp the
+         prediction never reads.
+      2. Four method lines synthesize the curves:
+           pred        component-wise PLATEAU-INVERSION forecast: the family
+                       logistic at the pooled-train mean rate, anchored at each
+                       component's OWN r0, with the plateau L solved (brentq;
+                       the net loss is monotone decreasing in L) so the curve's
+                       signed loss equals c_base + CURVE_PRED_SHRINK·(ĉ −
+                       c_base) (L < 1 = settles below baseline, L > 1 = above —
+                       so the family reaches the NEGATIVE net losses cum_loss's
+                       unclipped definition contains);
+           city        a CITY-WISE baseline (decomposition-free): ONE α for the
+                       whole city, predicted by a cosine-kNN over the training
+                       cities' weight_normal-aggregated feature vectors and
+                       their city-level α (both from the TRAIN role, own-k
+                       tables — the same role convention as the component
+                       transfer); the city curve is a SINGLE L = 1 logistic
+                       anchored at the observed city day-0 value.  Tests whether
+                       the component decomposition buys anything over predicting
+                       the city's recovery from city-level features alone;
+           oracle      the component's OWN UNGATED surge-model joint fit
+                       (α, L, B, b) — the model family's ceiling, separating
+                       family misfit from parameter-transfer error; where even
+                       the ungated fit is undefined (day-0 stop, constant
+                       curve) the α = 0 curve ("stays at r0") is used;
+           train_mean  a COMPONENT-LEVEL baseline: the pooled-train mean α with
+                       L = 1 for every component (each still anchored at its
+                       own r0) — the zero-shrinkage (w = 0) special case of
+                       'pred', so the pair isolates exactly what the cum_loss
+                       transfer adds.
+         Components with an unusable anchor (all-NaN curve, or a day-0 total
+         stop r0 ≈ 0) emit r ≡ 1; their (near-)zero weight_normal makes the
+         aggregation unaffected.
+      3. City curves: the component curves are aggregated with the weight_normal
+         shares (the exact reconstruction weights of the total curve), and the
+         day-type-matched baseline of the TOTAL activity matrix scales the
+         relative curves to absolute daily flow volume for the magnitude figure.
+
+    Outputs under cross_city_curve_pred/:
+      bar_cross_city_curve_mae.png    per city-event, the city-level whole-curve
+                                      MAE of the 3 FORECAST lines side by side,
+                                      comparing them on the quantity the forecast
+                                      optimises (lower is better; the oracle's own
+                                      MAE stays in curve_pred_metrics.csv)
+      city_magnitude_curve_<code>.png observed vs the 3 FORECAST lines, absolute
+                                      volume (the oracle is a ceiling, not a
+                                      forecast, so it is not drawn here)
+      component_curves_<code>.png     per-component grid: observed / oracle / pred
+      curve_pred_metrics.csv          component- and city-level MAE/NRMSE/R² plus
+                                      the curve-derived cum_loss, per method line
+      raw_data/                       per-day city curves + the per-component
+                                      α/L/B table + the plotted MAE table
+                                      (everything above is recomputable)."""
+    feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
+                    + ['mean_distance', 'median_income_combined'])
+
+    def _merge(feats):
+        m = feats.copy()
+        for c in SF_CATEGORIES:
+            m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
+        return m
+
+    train_merged = {c: _merge(feats_by_city[c]) for c in codes}
+    test_merged = {c: _merge(feats_test[c]) for c in codes}
+
+    # Observed smoothed relative curves of every unit's TEST components (same
+    # decomposition as feats_test, via dec_test), the unit's ungated own-fit
+    # (α, L) for the oracle line, the observed TOTAL relative curve (the city
+    # ground truth) and the total day-type baseline (relative -> absolute).
+    curves_obs, city_gt_rel, city_base, oracle_par = {}, {}, {}, {}
+    for c in codes:
+        u = units[c]
+        W, H = dec_test[c]
+        curves_obs[c] = resilience_curves(W, u['n_nor'], u['first_day_nor'],
+                                          SLOTS_ACTIVE, n_dis=u['n_dis'])
+        # UNGATED own fit for the oracle line (min_fit_r2 = -inf disables the
+        # quality gate; the metric columns in feats_test stay gated).
+        oracle_par[c] = recovery_curve_features(
+            W, u['n_nor'], u['first_day_nor'], SLOTS_ACTIVE, n_dis=u['n_dis'],
+            max_rate=ALPHA_MAX_RATE, min_fit_r2=-np.inf,
+            min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
+            surge_bounds=SURGE_BOUNDS, surge_rate_bounds=SURGE_RATE_BOUNDS)
+        total = u['X_all'].sum(axis=0).reshape(-1, 1)
+        city_gt_rel[c] = resilience_curves(total, u['n_nor'], u['first_day_nor'],
+                                           SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
+        city_base[c] = daily_baselines(total, u['n_nor'], u['first_day_nor'],
+                                       SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
+    # City-level cum_loss of the TOTAL activity curve, identical to the STEP-6
+    # ground truth because both integrate the same smoothed total curve.  Only
+    # TRAINING units' values are ever read, by the location channel's nested
+    # calibration in _city_total_prediction.
+    gt_cum = {c: float(np.nansum(1.0 - city_gt_rel[c].to_numpy(dtype=float)))
+              for c in codes}
+
+    # City-wise baseline inputs (decomposition-free forecast of the whole city's
+    # recovery shape): per city, the weight_normal-aggregated predictor vector +
+    # the storm intensity (mirrors the STEP-6 city-wise reconstruction's
+    # _city_vec; evac_level deliberately excluded, as there), plus the observed
+    # city day-0 value that anchors the single city logistic.  TRAINING cities
+    # contribute their vector and their city-level α from the TRAIN role (own-k
+    # tables) — the same role convention as the component transfer — while the
+    # held city enters only through its k=K_LOO_TEST vector and its day-0 anchor.
+    def _city_vec(feats):
+        w = feats['weight_normal'].to_numpy(dtype=float); sw = w.sum()
+        w = w / sw if sw > 0 else np.full(len(w), 1.0 / len(w))
+        v = [float(w @ feats[col].to_numpy(dtype=float)) for col in feature_cols]
+        return np.array(v + [float(feats['hurricane_intensity'].iloc[0])])
+
+    city_vec_tr = {c: _city_vec(train_merged[c]) for c in codes}
+    city_vec_te = {c: _city_vec(test_merged[c]) for c in codes}
+    city_alpha_tr, r0_city = {}, {}
+    for c in codes:
+        ft = train_merged[c]
+        w = ft['weight_normal'].to_numpy(dtype=float)
+        a = ft['recovery_alpha'].to_numpy(dtype=float)
+        v = np.isfinite(a)
+        city_alpha_tr[c] = (float((w[v] / w[v].sum()) @ a[v])
+                            if v.any() and w[v].sum() > 0 else np.nan)
+        r0_city[c] = float(city_gt_rel[c].iloc[0])
+
+    def _city_wise_curve(held, rest, days_f):
+        """City-wise baseline: ONE α for the whole city, predicted by a cosine-kNN
+        over the training cities' aggregated feature vectors and their city-level
+        α; the city curve is a SINGLE L = 1 logistic anchored at the observed city
+        day-0 (like every forecast line, the plateau is pinned at the normal
+        baseline).  Returns (curve|None, α̂); standardization uses TRAIN cities
+        only (no leakage)."""
+        ok = [c for c in rest if np.isfinite(city_alpha_tr[c])]
+        r0c = r0_city[held]
+        if len(ok) < 2 or not np.isfinite(r0c) or r0c <= 1e-6:
+            return None, np.nan
+        Xtr = np.vstack([city_vec_tr[c] for c in ok])
+        mu_x, sd_x = Xtr.mean(axis=0), Xtr.std(axis=0); sd_x[sd_x == 0] = 1.0
+        Ztr = (Xtr - mu_x) / sd_x
+        zte = (city_vec_te[held] - mu_x) / sd_x
+
+        def _unit(M):
+            n = np.linalg.norm(M, axis=-1, keepdims=True)
+            return M / np.where(n > 0, n, 1.0)
+
+        sims = np.clip(_unit(Ztr) @ _unit(zte), 0.0, None)
+        ssum = float(sims.sum())
+        atr = np.array([city_alpha_tr[c] for c in ok])
+        a_hat = float(sims @ atr / ssum) if ssum > 0 else float(atr.mean())
+        curve = 1.0 / (1.0 + (1.0 / r0c - 1.0) * np.exp(-a_hat * days_f))
+        return curve, a_hat
+
+    def _param_prediction(held, rest, target, extra_pooled=()):
+        """(param_hat Series over the held unit's component index, pooled-train
+        mean) for one target column.  `extra_pooled` adds observed pooled
+        predictors (r0 for the cum_loss transfer).  param_hat is finite
+        everywhere (train-mean fallback for feature-incomplete components).
+        None when no unit supplies rows for `target`."""
+        feat_cols = feature_cols + list(extra_pooled)
+        pooled_cols = POOLED_FEATURE_COLS + list(extra_pooled)
+        tr_vals = []
+        for t in rest:
+            sub = train_merged[t][[target] + feat_cols
+                                  + LEVEL_FEATURE_COLS].dropna()
+            if len(sub) < CROSS_CITY_MIN_ROWS or sub[target].nunique() < 2:
+                continue          # the engine skips this unit too (same rule)
+            tr_vals.append(sub[target].to_numpy(dtype=float))
+        if not tr_vals:
+            return None, np.nan
+        pooled = np.concatenate(tr_vals)
+        mu, sd = float(pooled.mean()), float(pooled.std())
+        sd = sd if sd > 0 else 1.0
+
+        te = test_merged[held].copy()
+        # Placeholder ramp: keeps every feature-complete row through the engine's
+        # [target]+features dropna and its constant-target guard; the transfer
+        # prediction reads train rows and test FEATURES only.
+        te[target] = np.arange(len(te), dtype=float)
+        fold = {held: te}
+        fold.update({c: train_merged[c] for c in rest})
+        _, pred, _ = cross_city_resilience(
+            fold, [target], feat_cols, rank=False,
+            split={'train': rest, 'test': [held]}, target_std='pooled_train',
+            level_feature_cols=LEVEL_FEATURE_COLS, model='cosine_knn',
+            pooled_feature_cols=pooled_cols,
+            min_rows=CROSS_CITY_MIN_ROWS)
+        pm = pred.get(held, {}).get(target)
+        hat = pd.Series(mu, index=test_merged[held].index, dtype=float)
+        if pm is not None:
+            _, ypred_std, cidx = pm
+            # Inverting with the pooled-TRAIN (mu, sd) recomputed above — the
+            # engine standardized the target with exactly these statistics.
+            hat.loc[cidx] = np.asarray(ypred_std, dtype=float) * sd + mu
+        return hat, mu
+
+    def _rank_score_prediction(held, rest, target):
+        """Predicted within-city ORDERING of `target` over the held unit's
+        components — the engine's RANK path (every feature and the target
+        rankdata'd WITHIN each unit, then within-unit z-scored; cosine-kNN in
+        that frame).  Rank transfer is immune to the cross-city level/scale
+        drift the pooled frame must assume away, which is why this channel
+        transfers best.  Only the ORDER of the returned scores means anything
+        (each score is a weighted mean of other cities' within-city ranks).
+        None when the engine returns no prediction (caller falls back to the
+        raw-path values)."""
+        te = test_merged[held].copy()
+        te[target] = np.arange(len(te), dtype=float)   # placeholder ramp
+        fold = {held: te}
+        fold.update({c: train_merged[c] for c in rest})
+        _, pred, _ = cross_city_resilience(
+            fold, [target], feature_cols + ['r0'], rank=True,
+            split={'train': rest, 'test': [held]}, target_std='within_unit',
+            model='cosine_knn', min_rows=CROSS_CITY_MIN_ROWS)
+        pm = pred.get(held, {}).get(target)
+        if pm is None:
+            return None
+        _, ypred_std, cidx = pm
+        return pd.Series(np.asarray(ypred_std, dtype=float),
+                         index=cidx).reindex(test_merged[held].index)
+
+    def _city_score(held, rest):
+        """weight_normal mean of the STANDARDIZED component cum_loss predictions
+        for one unit, i.e. the unit's position on the pooled-train scale without
+        ever un-standardizing a component.  Keeping the components standardized
+        is what separates this from the raw channel, whose per-component
+        un-standardization multiplies by the LARGE component-to-component spread
+        and mis-calibrates the aggregate.  The test table's target is the usual
+        placeholder ramp, so nothing about the held unit's own losses enters."""
+        te = test_merged[held].copy()
+        te['cum_loss'] = np.arange(len(te), dtype=float)
+        fold = {held: te}
+        fold.update({c: train_merged[c] for c in rest})
+        _, pred, _ = cross_city_resilience(
+            fold, ['cum_loss'], feature_cols, rank=False,
+            split={'train': rest, 'test': [held]}, target_std='pooled_train',
+            level_feature_cols=LEVEL_FEATURE_COLS, model='cosine_knn',
+            pooled_feature_cols=POOLED_FEATURE_COLS, min_rows=CROSS_CITY_MIN_ROWS)
+        pm = pred.get(held, {}).get('cum_loss')
+        if pm is None:
+            return np.nan
+        _, ypred_std, cidx = pm
+        w = feats_test[held].loc[cidx, 'weight_normal'].to_numpy(dtype=float)
+        yp = np.asarray(ypred_std, dtype=float)
+        return float((w * yp).sum() / w.sum()) if w.sum() > 0 else float(yp.mean())
+
+    def _city_total_prediction(held, rest):
+        """Predicted CITY cum_loss in day-equivalents, by the STEP-6 D+comp
+        reconstruction (§6 of the technical note): map the held unit's
+        standardized city score onto the day-equivalent scale with a
+        one-parameter variance match, whose mean and scale come from a NESTED
+        leave-one-out over the training units only, so the held unit never
+        enters its own calibration.
+
+        This is the location the quantile mapping shifts onto.  It replaces the
+        raw channel's weight_normal aggregate because the variance match uses
+        the SMALL city-to-city dispersion of cum_loss instead of the large
+        per-component one: measured on the five units, city-total MAE 0.270
+        against 0.785 day-equivalents.  NaN when the calibration cannot be
+        formed, and the caller then falls back to the raw aggregate."""
+        outer = _city_score(held, rest)
+        s_in, g_in = [], []
+        for t in rest:
+            v = _city_score(t, [c for c in rest if c != t])
+            if np.isfinite(v):
+                s_in.append(v); g_in.append(gt_cum[t])
+        if not np.isfinite(outer) or len(s_in) < 2:
+            return np.nan
+        s_in, g_in = np.asarray(s_in), np.asarray(g_in)
+        sd_s = float(s_in.std())
+        return float(g_in.mean() + (outer - s_in.mean())
+                     * (float(g_in.std()) / (sd_s if sd_s > 0 else 1.0)))
+
+    def _cbase_spread(r0_vec, days, mu_a):
+        """Within-city standard deviation of the BACKBONE-implied losses, i.e.
+        of Σ_d (1 − logistic(d; r0_j, mu_a)) over the components with a usable
+        anchor.  Every input is observed (each component's r0) or already
+        pooled-train (the mean rate), so this quantity is available for the
+        held-out unit as well; it is the observable proxy the spread scaling
+        below relies on.  NaN when fewer than two components qualify."""
+        v = [float(np.sum(1.0 - 1.0 / (1.0 + (1.0 / r - 1.0)
+                                       * np.exp(-mu_a * days))))
+             for r in np.asarray(r0_vec, dtype=float)
+             if np.isfinite(r) and r > 1e-6]
+        return float(np.std(v)) if len(v) >= 2 else np.nan
+
+    def _quantile_mapped_chat(chat_raw, score, obs, wn, rest, mu_a, c_city):
+        """Component cum_loss predictions assembled by QUANTILE MAPPING, the
+        comonotone assignment, i.e. the optimal-transport map on the line.
+        Four ingredients, each contributing what it transfers best:
+
+          ordering  the rank-path score (who loses more, within the city);
+          shape     the pooled-TRAIN cum_loss distribution — components ranked
+                    k of n get its (k−0.5)/n quantiles.  This replaces the raw
+                    kNN values' spread, which a kernel smoother compresses
+                    toward the mean (it cannot extrapolate);
+          spread    those quantiles are SCALED by the ratio of the held unit's
+                    backbone-loss spread to the training units' mean backbone-
+                    loss spread (_cbase_spread).  The true within-city cum_loss
+                    spread differs almost twofold across units and correlates
+                    at rank 0.90 with this observable proxy, so a single pooled
+                    spread over- or under-disperses most cities.  The RATIO
+                    form cancels the unknown proxy-to-truth constant, leaving
+                    zero fitted parameters;
+          location  an additive shift so the weight_normal aggregate equals
+                    `c_city`, the D+comp predicted city cum_loss
+                    (_city_total_prediction).  Some city-total anchor is
+                    essential: skipping the shift is WORSE than the train-mean
+                    baseline, because the training world's loss LEVEL does not
+                    fit every city even though its shape does.  The raw
+                    channel's own aggregate is the fallback when the D+comp
+                    calibration cannot be formed.
+
+        Error decomposition (exact, 1-D OT): with a correct ordering the mean
+        absolute error equals W1(constructed margin, true margin); ordering
+        swaps add the local quantile gaps.  Because the shift re-centres the
+        whole vector afterwards, scaling needs no centring convention of its
+        own.  Components without a usable anchor or rank score keep their raw
+        values up to that common shift; a dead rank path returns the raw
+        predictions unchanged (the pre-QM production line).  Returns the
+        predictions and the applied spread scale (NaN when none was applied)."""
+        out = chat_raw.to_numpy(dtype=float).copy()
+        pool = np.concatenate(
+            [train_merged[c]['cum_loss'].dropna().to_numpy(dtype=float)
+             for c in rest] or [np.array([])])
+        r0 = np.array([obs.iloc[0, j] if np.isfinite(obs.iloc[:, j]).any()
+                       else np.nan for j in range(obs.shape[1])], dtype=float)
+        days = obs.index.to_numpy(dtype=float)
+        scale = np.nan
+        if score is not None and len(pool):
+            sc = score.to_numpy(dtype=float)
+            ok = np.isfinite(sc) & np.isfinite(r0) & (r0 > 1e-6)
+            if ok.sum() >= 2:
+                s_test = _cbase_spread(r0, days, mu_a)
+                s_train = [_cbase_spread(train_merged[c]['r0'].to_numpy(dtype=float),
+                                         days, mu_a) for c in rest]
+                s_train = [v for v in s_train if np.isfinite(v) and v > 0]
+                scale = (s_test / float(np.mean(s_train))
+                         if s_train and np.isfinite(s_test) else 1.0)
+                idx = np.where(ok)[0][np.argsort(sc[ok], kind='stable')]
+                pos = (np.arange(len(idx)) + 0.5) / len(idx)
+                out[idx] = scale * np.quantile(pool, pos)
+                if np.isfinite(out).all():
+                    loc = (float(c_city) if np.isfinite(c_city)
+                           else float(wn @ chat_raw.to_numpy(dtype=float)))
+                    out = out + (loc - float(wn @ out))
+        return pd.Series(out, index=chat_raw.index), scale
+
+    def _curves_from_params(obs, alpha_vec, level_vec, surge_vec=None,
+                            surge_rate_vec=None):
+        """[days × k] curve frame: the day-0-anchored surge-plus-relaxation
+        model per component.  α = NaN -> the α = 0 curve (stays at r0);
+        L = NaN -> 1; B or b missing/NaN -> pulse omitted; unusable anchor
+        (r0 ≈ 0 / all-NaN) -> r ≡ 1.  The forecast passes no surge vectors
+        (the L = 1, B = 0 monotone logistic slice); the oracle passes all four."""
+        days = obs.index.to_numpy(dtype=float)
+        out = np.ones((len(days), obs.shape[1]))
+        for j in range(obs.shape[1]):
+            col = obs.iloc[:, j].to_numpy(dtype=float)
+            r0 = col[0] if np.isfinite(col).any() else np.nan
+            if not np.isfinite(r0) or r0 <= 1e-6:
+                continue
+            a = float(alpha_vec[j]) if np.isfinite(alpha_vec[j]) else 0.0
+            L = float(level_vec[j]) if np.isfinite(level_vec[j]) else 1.0
+            out[:, j] = L / (1.0 + (L / r0 - 1.0) * np.exp(-a * days))
+            if surge_vec is not None and surge_rate_vec is not None:
+                B = surge_vec[j]
+                b = surge_rate_vec[j]
+                if np.isfinite(B) and np.isfinite(b):
+                    out[:, j] = out[:, j] + float(B) * days * np.exp(-float(b) * days)
+        return pd.DataFrame(out, index=obs.index, columns=obs.columns)
+
+    def _plateau_inversion_curves(obs, mu_a, c_hat):
+        """[days × k] PLATEAU-INVERSION forecast curves.
+
+        Each component's curve IS the fitted family's logistic (B = 0) with the
+        plateau L SOLVED so the curve's net signed loss lands at the shrunk
+        target between the L = 1 backbone's own loss and the component's
+        cross-city predicted cum_loss `c_hat`:
+
+            r(t) = L/(1 + (L/r0 − 1)e^(−ᾱ·t))
+            Σ_d (1 − r(d)) = c_base + CURVE_PRED_SHRINK·(ĉ − c_base)
+
+        The rate stays at the pooled-train mean ᾱ (it does not transfer); the
+        ONE quantity carrying cross-city information is cum_loss, the only
+        target with real feature signal.  The loss is monotone DECREASING in L
+        (brentq over LEVEL_BOUNDS; an out-of-range target lands on the bound),
+        and near-linear in L (dL/dĉ ≈ 0.1 over the 15-day window), so unlike
+        the rate inversion (dα/dĉ ∝ 1/ĉ²) prediction error is ATTENUATED, not
+        amplified.  L > 1 settles above baseline, reaching the NEGATIVE net
+        losses cum_loss's unclipped definition contains, while r(0) = r0 keeps
+        the observed anchor.  CURVE_PRED_SHRINK = 0 gives L = 1 everywhere —
+        the train-mean forecast — so that line is nested.  The solved L is a
+        LOSS-MATCHING device: it does NOT recover the component's own fitted
+        plateau (spearman ≈ 0.16 pooled) — the skill lives in the city
+        aggregate, not in per-component attribution."""
+        days = obs.index.to_numpy(dtype=float)
+        out = np.ones((len(days), obs.shape[1]))
+        level_solved = np.full(obs.shape[1], np.nan)
+        for j in range(obs.shape[1]):
+            col = obs.iloc[:, j].to_numpy(dtype=float)
+            r0 = col[0] if np.isfinite(col).any() else np.nan
+            if not np.isfinite(r0) or r0 <= 1e-6:
+                continue
+            base = 1.0 / (1.0 + (1.0 / r0 - 1.0) * np.exp(-mu_a * days))
+            if not np.isfinite(c_hat[j]):
+                out[:, j] = base
+                level_solved[j] = 1.0
+                continue
+            c_base = float(np.sum(1.0 - base))
+            target = c_base + CURVE_PRED_SHRINK * (float(c_hat[j]) - c_base)
+
+            def _loss_of(L, _r0=r0):
+                return float(np.sum(
+                    1.0 - L / (1.0 + (L / _r0 - 1.0) * np.exp(-mu_a * days))))
+
+            if target >= _loss_of(LEVEL_BOUNDS[0]):
+                L = LEVEL_BOUNDS[0]
+            elif target <= _loss_of(LEVEL_BOUNDS[1]):
+                L = LEVEL_BOUNDS[1]
+            else:
+                L = float(brentq(lambda v: _loss_of(v) - target,
+                                 LEVEL_BOUNDS[0], LEVEL_BOUNDS[1], xtol=1e-9))
+            level_solved[j] = L
+            out[:, j] = L / (1.0 + (L / r0 - 1.0) * np.exp(-mu_a * days))
+        return (pd.DataFrame(out, index=obs.index, columns=obs.columns),
+                level_solved)
+
+    def _nosurge_backbone_mean(rest):
+        """Pooled-train mean of the NO-SURGE rate (recovery_alpha_nosurge), the
+        same per-unit row filter as _param_prediction's mu (feature-complete
+        rows, >= CROSS_CITY_MIN_ROWS, non-constant).  NaN when no unit
+        qualifies (caller keeps the surge backbone)."""
+        vals = []
+        for t in rest:
+            sub = train_merged[t][['recovery_alpha_nosurge'] + feature_cols
+                                  + LEVEL_FEATURE_COLS].dropna()
+            if (len(sub) < CROSS_CITY_MIN_ROWS
+                    or sub['recovery_alpha_nosurge'].nunique() < 2):
+                continue
+            vals.append(sub['recovery_alpha_nosurge'].to_numpy(dtype=float))
+        return float(np.concatenate(vals).mean()) if vals else np.nan
+
+    def _alphaL_training_line(rest):
+        """Pooled OLS L = a0 + b·log10(α) over the TRAINING units' UNGATED
+        (α, L) fits (oracle_par), bound-pinned fits INCLUDED — dropping them
+        rests the line on a handful of points and can flip its sign at
+        boundary-heavy windows.  ONE pooled line per fold (per-city lines flip
+        direction across units and are unusable as a cross-city constraint).
+        (1, 0) — the flat L = 1 line — when fewer than 3 usable points."""
+        log_a, lv = [], []
+        for t in rest:
+            a = oracle_par[t]['recovery_alpha'].to_numpy(dtype=float)
+            L = oracle_par[t]['recovery_level'].to_numpy(dtype=float)
+            m = np.isfinite(a) & np.isfinite(L)
+            log_a += list(np.log10(np.clip(a[m], 1e-3, None)))
+            lv += list(L[m])
+        if len(log_a) < 3 or float(np.std(log_a)) < 1e-6:
+            return 1.0, 0.0
+        coef = np.polyfit(log_a, lv, 1)
+        return float(coef[1]), float(coef[0])
+
+    def _joint_alphaL_curves(obs, mu_a, c_hat, line_a0, line_b, lam):
+        """[days × k] JOINT (α, L) forecast curves: per component, least-squares
+        over the residual pair
+
+            [ Σ_d (1 − r(d; α, L)) − target ,  √λ·(L − line(α)) ]
+
+        with line(α) = clip(a0 + b·log10 α, LEVEL_BOUNDS), α ∈ [0,
+        ALPHA_MAX_RATE], L ∈ LEVEL_BOUNDS, started at the backbone (ᾱ, 1);
+        the same shrunk target as the solve_L path.  λ = 0 leaves the
+        under-determined cum_loss-only solve — its free direction cancels
+        prediction error on small samples (see the CURVE_PRED_SOLVER comment)
+        — and λ > 0 pins the remaining DOF to the training α-L relationship.
+        Missing ĉ falls back to the backbone curve like the solve_L path.
+        Returns (curves, level_solved, alpha_solved)."""
+        days = obs.index.to_numpy(dtype=float)
+        out = np.ones((len(days), obs.shape[1]))
+        level_solved = np.full(obs.shape[1], np.nan)
+        alpha_solved = np.full(obs.shape[1], np.nan)
+        for j in range(obs.shape[1]):
+            col = obs.iloc[:, j].to_numpy(dtype=float)
+            r0 = col[0] if np.isfinite(col).any() else np.nan
+            if not np.isfinite(r0) or r0 <= 1e-6:
+                continue
+            base = 1.0 / (1.0 + (1.0 / r0 - 1.0) * np.exp(-mu_a * days))
+            if not np.isfinite(c_hat[j]):
+                out[:, j] = base
+                level_solved[j] = 1.0
+                alpha_solved[j] = mu_a
+                continue
+            c_base = float(np.sum(1.0 - base))
+            target = c_base + CURVE_PRED_SHRINK * (float(c_hat[j]) - c_base)
+
+            def _resid(p, _r0=r0, _t=target):
+                a = min(max(p[0], 0.0), ALPHA_MAX_RATE)
+                L = min(max(p[1], LEVEL_BOUNDS[0]), LEVEL_BOUNDS[1])
+                loss = float(np.sum(
+                    1.0 - L / (1.0 + (L / _r0 - 1.0) * np.exp(-a * days))))
+                line = float(np.clip(line_a0 + line_b * np.log10(max(a, 1e-3)),
+                                     LEVEL_BOUNDS[0], LEVEL_BOUNDS[1]))
+                return [loss - _t, np.sqrt(lam) * (L - line)]
+
+            res = least_squares(_resid, [mu_a, 1.0],
+                                bounds=([0.0, LEVEL_BOUNDS[0]],
+                                        [ALPHA_MAX_RATE, LEVEL_BOUNDS[1]]),
+                                max_nfev=4000)
+            a_j, L_j = float(res.x[0]), float(res.x[1])
+            alpha_solved[j] = a_j
+            level_solved[j] = L_j
+            out[:, j] = L_j / (1.0 + (L_j / r0 - 1.0) * np.exp(-a_j * days))
+        return (pd.DataFrame(out, index=obs.index, columns=obs.columns),
+                level_solved, alpha_solved)
+
+    os.makedirs(os.path.join(OUTPUT_CURVE_PRED, 'raw_data'), exist_ok=True)
+    metric_rows, par_rows, curve_rows = [], [], []
+    for held in codes:
+        rest = [c for c in codes if c != held]
+        alpha_hat, mu_a = _param_prediction(held, rest, 'recovery_alpha')
+        if alpha_hat is None:
+            print(f"  [curve_pred] {held}: no usable α training rows; skipping.")
+            continue
+        if CURVE_ALPHA_BACKBONE == 'no_surge':
+            # Ablation backbone: the pulse-free rate replaces the clean rate
+            # EVERYWHERE mu_a is read (backbone curves, train_mean line, the
+            # QM spread proxy) so the ablation is a single consistent swap.
+            mu_ns = _nosurge_backbone_mean(rest)
+            if np.isfinite(mu_ns):
+                mu_a = mu_ns
+        # Component cum_loss prediction, TWO kNN channels combined by quantile
+        # mapping: the RAW pooled_train path supplies the city TOTAL, the RANK
+        # within_unit path supplies the within-city ORDERING, the pooled-train
+        # cum_loss quantiles supply the SPREAD (see _quantile_mapped_chat).
+        cum_hat_raw, _ = _param_prediction(held, rest, 'cum_loss', extra_pooled=('r0',))
+        rank_score = _rank_score_prediction(held, rest, 'cum_loss')
+        obs = curves_obs[held]
+        fit_a = feats_test[held]['recovery_alpha']           # gated (the metric)
+        fit_L = feats_test[held]['recovery_level']
+        orc = oracle_par[held]                               # ungated (ceiling)
+        k = obs.shape[1]
+        # The component-wise line ('pred') is the PLATEAU-INVERSION forecast —
+        # the family logistic at the mean rate with L solved from the predicted
+        # cum_loss, the ONE target with real cross-city feature signal (the
+        # recovery rate has none: its within-city Ridge R² is negative in all
+        # 5 units, against up to 0.70 for cum_loss; kNN-predicting L directly
+        # was the catastrophic 2026-07-13 free-L failure — the integral
+        # constraint is the transferable route to it).  'train_mean' is that
+        # forecast's zero-shrinkage special case (L = 1 everywhere).  The
+        # ORACLE keeps the full own fit: it describes what the model family
+        # can express, not what is forecastable.
+        ones = np.ones(k)
+        w = feats_test[held]['weight_normal'].to_numpy(dtype=float)
+        wsum = w.sum()
+        wn = w / wsum if wsum > 0 else np.full(len(w), 1.0 / len(w))
+        city_total_hat = _city_total_prediction(held, rest)
+        cum_hat, spread_scale = _quantile_mapped_chat(
+            cum_hat_raw, rank_score, obs, wn, rest, mu_a, city_total_hat)
+        if CURVE_PRED_SOLVER == 'joint_alphaL':
+            line_a0, line_b = _alphaL_training_line(rest)
+            pred_curves, L_solved, alpha_solved = _joint_alphaL_curves(
+                obs, mu_a, cum_hat.to_numpy(dtype=float),
+                line_a0, line_b, CURVE_JOINT_LAMBDA)
+        else:
+            pred_curves, L_solved = _plateau_inversion_curves(
+                obs, mu_a, cum_hat.to_numpy(dtype=float))
+            alpha_solved = None
+        lines = {
+            'pred':       pred_curves,
+            'oracle':     _curves_from_params(obs,
+                                              orc['recovery_alpha'].to_numpy(dtype=float),
+                                              orc['recovery_level'].to_numpy(dtype=float),
+                                              orc['surge_strength'].to_numpy(dtype=float),
+                                              orc['surge_rate'].to_numpy(dtype=float)),
+            'train_mean': _curves_from_params(obs, np.full(k, mu_a), ones),
+        }
+
+        gt_rel = city_gt_rel[held].to_numpy(dtype=float)
+        base = city_base[held].to_numpy(dtype=float)
+        days = obs.index.to_numpy()
+        city_rel = {lab: dfc.to_numpy(dtype=float) @ wn for lab, dfc in lines.items()}
+        # City-wise baseline: a single L = 1 city logistic from the city-level
+        # predicted α; adds the 'city' entry (a plain vector, no component curves).
+        city_curve, ca_hat = _city_wise_curve(held, rest, days.astype(float))
+        if city_curve is not None:
+            city_rel['city'] = city_curve
+
+        # Metrics: component level pooled over all component-days with a finite
+        # observed value (only the per-component methods); city level on the
+        # aggregated curve (paper-style NRMSE = RMSE / std of the truth; R² only
+        # at city level, where the curve has real variance).
+        obs_arr = obs.to_numpy(dtype=float)
+        sd_comp = float(np.nanstd(obs_arr))
+        sd_city = float(np.nanstd(gt_rel))
+        cum_loss_gt = float(np.nansum(1.0 - gt_rel))
+        for lab in city_rel:
+            cr = city_rel[lab]
+            cdiff = cr - gt_rel
+            ok = np.isfinite(gt_rel) & np.isfinite(cr)
+            ss_res = float(np.sum((cr[ok] - gt_rel[ok]) ** 2))
+            ss_tot = float(np.sum((gt_rel[ok] - gt_rel[ok].mean()) ** 2))
+            if lab in lines:                          # per-component methods only
+                diff = lines[lab].to_numpy(dtype=float) - obs_arr
+                mae_comp = float(np.nanmean(np.abs(diff)))
+                nrmse_comp = (float(np.sqrt(np.nanmean(diff ** 2))) / sd_comp
+                              if sd_comp > 0 else np.nan)
+            else:                                     # 'city' has no component curve
+                mae_comp = nrmse_comp = np.nan
+            metric_rows.append({
+                'code': held, 'method': lab,
+                'mae_component': mae_comp, 'nrmse_component': nrmse_comp,
+                'mae_city': float(np.nanmean(np.abs(cdiff))),
+                'nrmse_city': (float(np.sqrt(np.nanmean(cdiff ** 2))) / sd_city
+                               if sd_city > 0 else np.nan),
+                'r2_city': (1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan,
+                'cum_loss_from_curve': float(np.nansum(1.0 - cr)),
+                'cum_loss_gt': cum_loss_gt,
+            })
+
+        # Fitted per-component α and L: the gated metric values, kept for the raw
+        # parameter table below.  `val` also feeds the per-unit progress line.
+        a_arr = fit_a.to_numpy(dtype=float)
+        L_arr = fit_L.to_numpy(dtype=float)
+        val = np.isfinite(a_arr)
+
+        # Raw per-day city curves (relative + absolute volume), GT first.
+        for i, d in enumerate(days):
+            curve_rows.append({'code': held, 'day': int(d), 'method': 'ground_truth',
+                               'r_rel': gt_rel[i], 'magnitude': gt_rel[i] * base[i]})
+            for lab in city_rel:
+                curve_rows.append({'code': held, 'day': int(d), 'method': lab,
+                                   'r_rel': city_rel[lab][i],
+                                   'magnitude': city_rel[lab][i] * base[i]})
+        # Raw per-component parameter table.  fit = the gated metric; fit_ungated
+        # = the oracle's family best fit; cum_loss_pred = the quantile-mapped
+        # prediction the forecast consumes; cum_loss_pred_raw = the raw-path
+        # kNN value (supplies only the city total); rank_score = the ordering
+        # channel (only its order matters); level_solved = the plateau L the
+        # inversion derives — a loss-matching device, NOT an estimate of
+        # level_fit (alpha is NOT predicted: the forecast uses the pooled-train
+        # mean rate).
+        for j in range(k):
+            row = {'code': held, 'component': int(obs.columns[j]),
+                   'cum_loss_fit': float(feats_test[held]['cum_loss'].iloc[j]),
+                   'cum_loss_pred': float(cum_hat.iloc[j]),
+                   'cum_loss_pred_raw': float(cum_hat_raw.iloc[j]),
+                   'rank_score': (float(rank_score.iloc[j])
+                                  if rank_score is not None else np.nan),
+                   'spread_scale': spread_scale,
+                   'city_total_pred': city_total_hat,
+                   'level_solved': float(L_solved[j]),
+                   'alpha_train_mean': mu_a,
+                   'alpha_fit': a_arr[j],
+                   'alpha_fit_ungated': float(orc['recovery_alpha'].iloc[j]),
+                   'level_fit': L_arr[j],
+                   'level_fit_ungated': float(orc['recovery_level'].iloc[j]),
+                   'surge_fit': float(feats_test[held]['surge_strength'].iloc[j]),
+                   'surge_fit_ungated': float(orc['surge_strength'].iloc[j]),
+                   'surge_rate_fit_ungated': float(orc['surge_rate'].iloc[j]),
+                   'weight_normal': w[j]}
+            if alpha_solved is not None:      # joint solver only: the solved rate
+                row['alpha_solved'] = float(alpha_solved[j])
+            par_rows.append(row)
+
+        # Figures: absolute-volume city curve overlay (the FORECAST lines only,
+        # in label order, see _CITY_FIGURE_METHODS) + per-component grid (the
+        # grid keeps observed / oracle / component-pred, because at component
+        # level the oracle is the point of comparison; more lines per small
+        # panel would be unreadable).
+        vis_curves_city_pred(
+            days, gt_rel * base,
+            {_CURVE_METHOD_LABELS[lab]: city_rel[lab] * base
+             for lab in _CITY_FIGURE_METHODS if lab in city_rel},
+            ylabel='daily mobility (flow volume per day)',
+            title=f'{held}: city mobility over the disaster window',
+            save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                   f'city_magnitude_curve_{held}.png'))
+        vis_component_curves_grid(
+            obs, {_CURVE_METHOD_LABELS['oracle']: lines['oracle'],
+                  _CURVE_METHOD_LABELS['pred']: lines['pred'],
+                  _CURVE_METHOD_LABELS['train_mean']: lines['train_mean']},
+            title=f'{held}: component relative curves (observed vs modelled)',
+            save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                   f'component_curves_{held}.png'),
+            weights=wn)
+        variant = ('' if (CURVE_PRED_SOLVER == 'solve_L'
+                          and CURVE_ALPHA_BACKBONE == 'surge')
+                   else f" [{CURVE_PRED_SOLVER}"
+                        + (f" λ={CURVE_JOINT_LAMBDA}"
+                           if CURVE_PRED_SOLVER == 'joint_alphaL' else '')
+                        + (f", {CURVE_ALPHA_BACKBONE}"
+                           if CURVE_ALPHA_BACKBONE != 'surge' else '') + ']')
+        print(f"  [curve_pred] {held}: backbone ᾱ {mu_a:.2f}; "
+              f"city total {city_total_hat:.2f}; spread ×{spread_scale:.2f}; "
+              f"solved L [{np.nanmin(L_solved):.2f},{np.nanmax(L_solved):.2f}]; "
+              f"city-α̂ {ca_hat:.2f} (fitted {int(val.sum())}/{len(val)}){variant}")
+
+    if not metric_rows:
+        print("  [curve_pred] nothing to evaluate; skipping outputs.")
+        return
+    raw_dir = os.path.join(OUTPUT_CURVE_PRED, 'raw_data')
+    pd.DataFrame(metric_rows).to_csv(
+        os.path.join(OUTPUT_CURVE_PRED, 'curve_pred_metrics.csv'), index=False)
+    pd.DataFrame(curve_rows).to_csv(
+        os.path.join(raw_dir, 'city_curves_by_method.csv'), index=False)
+    pd.DataFrame(par_rows).to_csv(
+        os.path.join(raw_dir, 'component_params_gt_vs_pred.csv'), index=False)
+    # Accuracy bar: per city-event, the CITY-LEVEL curve error of every method line,
+    # so the four lines are compared on the quantity the analysis actually optimises
+    # (the whole-curve MAE) rather than on any single fitted parameter.  Methods are
+    # the forecast lines of _CITY_FIGURE_METHODS, in that order; a method missing for
+    # a unit leaves a gap.  The oracle's own MAE stays in curve_pred_metrics.csv.
+    mae_df = (pd.DataFrame(metric_rows)
+              .pivot(index='code', columns='method', values='mae_city')
+              .reindex(index=[c for c in codes if c in {r['code'] for r in metric_rows}],
+                       columns=[m for m in _CITY_FIGURE_METHODS if m in
+                                {r['method'] for r in metric_rows}])
+              .rename(columns=_CURVE_METHOD_LABELS))
+    mae_df.to_csv(os.path.join(raw_dir, 'city_curve_mae.csv'))
+    vis_bar_curve_mae(
+        mae_df,
+        ylabel='city-curve MAE (fraction of the normal baseline)',
+        title='Whole-curve prediction error per city-event, by method '
+              '(lower is better)',
+        save_path=os.path.join(OUTPUT_CURVE_PRED, 'bar_cross_city_curve_mae.png'))
+    print(f"  [curve_pred] -> {OUTPUT_CURVE_PRED} "
+          f"({len({r['code'] for r in metric_rows})} city-events)")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1451,10 +2393,17 @@ def main():
             # nor the curves.
             resilience_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, n_dis=n_dis),
 
-            # Exp-recovery rate lambda, the second resilience target (higher =
-            # faster recovery; NaN when the component never fell below baseline).
-            recovery_rate_features(W, n_nor, first_day_nor, SLOTS_ACTIVE,
-                                   n_dis=n_dis),
+            # Free-plateau logistic recovery params.  recovery_alpha (the rate)
+            # is the RES_COLS metric; recovery_level (the equilibrium L) rides
+            # along for STEP 7 but is not itself a RES_COLS metric.  NaN when
+            # day-0 is a total stop, the curve is constant, or the joint fit
+            # fails the quality gate (see the RES_COLS comment).
+            recovery_curve_features(W, n_nor, first_day_nor, SLOTS_ACTIVE,
+                                    n_dis=n_dis, max_rate=ALPHA_MAX_RATE,
+                                    min_fit_r2=ALPHA_MIN_FIT_R2,
+                                    min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
+                                    surge_bounds=SURGE_BOUNDS,
+                                    surge_rate_bounds=SURGE_RATE_BOUNDS),
         ], axis=1)
         feats.insert(0, 'city', label)
         feats.insert(1, 'weight', weights)
@@ -1516,13 +2465,14 @@ def main():
         # same matrix at different k (the within-city feats keep the unit's k only).
         print(f"\n── Cross-city: building feats (train @ per-unit k, test @ k={K_LOO_TEST}) ──")
         cc_train, cc_test = {}, {}
+        dec_test = {}   # code -> the (W, H) of the k=K_LOO_TEST test decomposition (STEP 7)
         for code in all_codes:
             u = units[code]
             print(f"  [cross-city feats] {u['label']} [{code}]")
-            cc_train[code] = _build_cross_city_feats(
+            cc_train[code], _ = _build_cross_city_feats(
                 u['cfg'], u['X_all'], u['n_nor'], u['n_dis'], u['mapping'],
                 u['gdf'], u['fit_time_cols'], u['cfg']['n_behaviors'], cat_lookup=cc_lookups[code])
-            cc_test[code] = _build_cross_city_feats(
+            cc_test[code], dec_test[code] = _build_cross_city_feats(
                 u['cfg'], u['X_all'], u['n_nor'], u['n_dis'], u['mapping'],
                 u['gdf'], u['fit_time_cols'], K_LOO_TEST, cat_lookup=cc_lookups[code])
 
@@ -1571,6 +2521,10 @@ def main():
         # truth (runs only for pearson + multi_city_std; guarded inside the function).
         print("\n── Cross-city city-level cum_loss: prediction vs ground truth ──")
         analysis_cross_city_resi_pred(cc_train, cc_test, units, all_codes, global_iwf)
+
+        # ── STEP 7 — Cross-city curve prediction (α+L transfer -> full curves) ──
+        print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
+        analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
 
 
 if __name__ == '__main__':

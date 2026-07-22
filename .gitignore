@@ -16,9 +16,13 @@ __pycache__/
 files/
 
 # ── Data / outputs / docs / notebooks / archive (not source) ──────────────────
+# docs/ is ignored per-entry (docs/*) rather than as a directory, because git
+# never descends into an excluded directory — a whole-dir docs/ ignore would
+# make the technical_notes exemption below dead.
 data/
 outputs/
-docs/
+docs/*
+!docs/technical_notes/
 notebook_drafts/
 # Retired exploration scripts (see archive/README.md) — kept on disk, not tracked.
 archive/

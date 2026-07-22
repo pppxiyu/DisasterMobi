@@ -161,8 +161,9 @@ def _fold_transfer(held, rest, feats, feats_test):
     STANDARDIZED score (`scity`, used by M1), or None."""
     fold = {held: feats_test[held]}
     fold.update({c: feats[c] for c in rest})
-    # The tuner's objective only reads cum_loss; rp.RES_COLS now also carries
-    # recovery_lambda, which the tuner's feature tables do not compute.
+    # The tuner's objective only reads cum_loss, so the metric list is pinned
+    # here instead of following rp.RES_COLS (whose extra metrics the tuner's
+    # feature tables do not compute).
     _, pred, _ = rp.cross_city_resilience(
         fold, ['cum_loss'], FEATURE_COLS, rank=False,
         split={'train': rest, 'test': [held]},
