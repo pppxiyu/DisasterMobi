@@ -164,6 +164,7 @@ import os
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, least_squares
+from scipy.stats import spearmanr
 
 from config import (
     BR_GRAPH_PATH, FM_GRAPH_PATH, BR_ANALYSIS_DAYS, FM_ANALYSIS_DAYS,
@@ -187,7 +188,8 @@ from utils.pattern_analysis.visualization import (
     vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
     vis_heatmap_pair_r2, vis_scatter_intensity_resilience,
     vis_bar_cross_city_resi_pred, vis_bar_curve_mae, vis_curves_city_pred,
-    vis_component_curves_grid,
+    vis_component_curves_grid, vis_od_flow_slider_html, vis_w2_decomposition,
+    vis_transferability_map,
 )
 from utils.pattern_analysis.space_function import (
     category_lookup_from_landuse, build_od_function_matrix,
@@ -646,6 +648,41 @@ CROSS_CITY_MODEL = 'cosine_knn'
 
 # Everything the STEP-7 curve prediction writes goes here.
 OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_curve_pred')
+
+# STEP-7 spatial view: per held city, an interactive slider map of the daily
+# PREDICTED OD flows (forecast curves x component baselines x H), the observed
+# flows, and their difference.  The spatial pattern per component is the test
+# decomposition's own H (descriptive, not predicted); only the time dimension
+# is forecast.  One self-contained HTML per city-event under
+# cross_city_od_pred/<code>/.  OD_MAP_TOP_ARCS caps the arcs drawn per
+# day-and-view (kept by |flow|) so the embedded data stays a few MB.
+OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_od_pred')
+CURVE_OD_MAPS = True
+OD_MAP_TOP_ARCS = 600
+
+# ── STEP 8 parameters — transferability (source selection) ─────────────────────
+
+# Everything analysis_transferability writes goes here.
+OUTPUT_TRANSFER = os.path.join(OUTPUT_PLOTS, 'transferability')
+
+# A unit joins the comparison only with this many usable components; below it
+# neither the OT distance nor the pairwise spearman is meaningful.
+TRANSFER_MIN_ROWS = 5
+
+# Mantel permutations.  The permutation is over UNIT LABELS (n! is tiny at
+# n = 5, so the achievable p-floor is 1/120 — read the statistic, not the
+# decimals, and treat P as descriptive at this sample size).
+TRANSFER_MANTEL_PERM = 5000
+
+# Per-unit colours for the transferability map, applied in CITY_EVENTS order.
+_TRANSFER_COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7', '#E28E2C', '#B0413E']
+
+# Colours for the FEATURE GROUPS of the W2 decomposition.  The six functional
+# shares are treated as ONE group: they are compositional (they sum to a fixed
+# total per component), so splitting them would attribute one signal across six
+# mutually-constrained columns.
+_TRANSFER_GROUP_COLORS = {'func': '#0F4D92', 'dist': '#4C9F70',
+                          'income': '#E28E2C', 'r0': '#B0413E'}
 
 # Minimum usable rows per unit-and-metric inside the cross-city engine, for
 # BOTH the STEP-6 analyses and the STEP-7 curve prediction.  The engine
@@ -1508,6 +1545,164 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='pearson',
     return mat
 
 
+# ── STEP 8 — transferability: does domain proximity predict rank transfer? ─────
+
+def analysis_transferability(feats_test, codes):
+    """Which city-events can lend their cum_loss ORDERING to which others, and
+    can that be read off the FEATURES alone (i.e. before any target label is
+    seen)?  This is the source-selection question for a new city-event.
+
+    Scope — RANK only.  The pipeline's cum_loss channel is a rank channel: the
+    ordering is what transfers across units (the numeric level is not learned
+    from features but borrowed from the pooled training distribution and
+    re-anchored per unit, see _quantile_mapped_chat).  Measured against the same
+    domain distances, the NUMERIC cum_loss transfer carries no relation at all
+    (sandbox 2026-07-28: spearman +0.02, Mantel P = 0.99, against -0.74 /
+    P = 0.017 for the ordering), so this analysis is deliberately confined to
+    the ordering and its figure is labelled accordingly.
+
+    Distance — entropic-OT (Sinkhorn) W2 between the two units' COMPONENT
+    CLOUDS in the standardized feature space, each component carrying its
+    weight_normal as mass.  The two per-event LEVEL covariates are excluded:
+    being constant within a unit they are domain identifiers in disguise and
+    would separate the units by construction, making the comparison circular.
+
+    Transfer — Ridge fitted on the source unit's components, applied to the
+    target's, scored by spearman(prediction, observed cum_loss).  Directed, so
+    the matrix is asymmetric; panel A can only draw the symmetrized value.
+
+    Writes transferability_map.png plus the three matrices under raw_data/."""
+    feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
+                    + ['mean_distance', 'median_income_combined', 'r0'])
+
+    def _unit(code):
+        t = feats_test[code].copy()
+        for c in SF_CATEGORIES:
+            t[f'func_{c}'] = t[f'share_from_{c}'] + t[f'share_to_{c}']
+        X = t[feature_cols].to_numpy(dtype=float)
+        y = t['cum_loss'].to_numpy(dtype=float)
+        w = t['weight_normal'].to_numpy(dtype=float)
+        ok = (np.isfinite(X).all(axis=1) & np.isfinite(y)
+              & np.isfinite(w) & (w > 0))
+        return X[ok], y[ok], w[ok] / w[ok].sum() if ok.sum() else (X, y, w)
+
+    U = {c: _unit(c) for c in codes}
+    usable = [c for c in codes if len(U[c][1]) >= TRANSFER_MIN_ROWS]
+    if len(usable) < 3:
+        print("  [transferability] fewer than 3 usable units; skipping.")
+        return None
+    codes = usable
+    n = len(codes)
+    pooled = np.vstack([U[c][0] for c in codes])
+    mu = pooled.mean(axis=0)
+    sd = np.where(pooled.std(axis=0) < 1e-12, 1.0, pooled.std(axis=0))
+    Zs = {c: (U[c][0] - mu) / sd for c in codes}
+
+    def _sinkhorn_coupling(Xa, wa, Xb, wb, eps_frac=0.1, iters=400):
+        """Entropic-OT coupling; eps scaled to the cost median so the
+        regularization is comparable across pairs of different spread."""
+        C = ((Xa[:, None, :] - Xb[None, :, :]) ** 2).sum(-1)
+        K = np.exp(-C / (eps_frac * np.median(C)))
+        u = np.ones_like(wa)
+        for _ in range(iters):
+            v = wb / (K.T @ u + 1e-300)
+            u = wa / (K @ v + 1e-300)
+        return u[:, None] * K * v[None, :], C
+
+    def _ridge_fit(X, y):
+        m, s = X.mean(axis=0), X.std(axis=0)
+        s = np.where(s < 1e-12, 1.0, s)
+        Xs = (X - m) / s
+        A = Xs.T @ Xs + np.eye(Xs.shape[1])            # ridge, alpha = 1
+        coef = np.linalg.solve(A, Xs.T @ (y - y.mean()))
+        return lambda Q: ((Q - m) / s) @ coef + y.mean()
+
+    # A squared-Euclidean cost is additive over dimensions, so ONE coupling
+    # yields both the pair's W2 and its exact split over feature groups.
+    groups = {'func': list(range(len(SF_CATEGORIES))),
+              'dist': [len(SF_CATEGORIES)],
+              'income': [len(SF_CATEGORIES) + 1],
+              'r0': [len(SF_CATEGORIES) + 2]}
+    W2 = np.zeros((n, n))
+    T = np.full((n, n), np.nan)
+    pair_rows = []
+    for i, a in enumerate(codes):
+        pred_a = _ridge_fit(U[a][0], U[a][1])
+        for j, b in enumerate(codes):
+            if i < j:
+                gam, _ = _sinkhorn_coupling(Zs[a], U[a][2], Zs[b], U[b][2])
+                per_dim = np.array([
+                    float((gam * (Zs[a][:, None, d] - Zs[b][None, :, d]) ** 2)
+                          .sum())
+                    for d in range(Zs[a].shape[1])])
+                W2[i, j] = W2[j, i] = float(per_dim.sum())
+                row = dict(
+                    pair=f'{a.split("_", 1)[-1][:3]}–{b.split("_", 1)[-1][:3]}',
+                    a=a, b=b, w2=W2[i, j])
+                row.update({g: float(per_dim[dims].sum())
+                            for g, dims in groups.items()})
+                pair_rows.append(row)
+            if i != j:
+                T[i, j] = float(spearmanr(pred_a(U[b][0]), U[b][1]).statistic)
+    Tsym = np.nan_to_num((T + T.T) / 2.0)
+    dec = pd.DataFrame(pair_rows)
+    dec['transfer'] = [Tsym[codes.index(r.a), codes.index(r.b)]
+                       for r in dec.itertuples()]
+    dec = dec.sort_values('w2').reset_index(drop=True)
+
+    # Mantel: the pair entries are not independent (each unit appears in n-1 of
+    # them), so significance comes from permuting UNIT LABELS, not pairs.
+    iu = np.triu_indices(n, 1)
+    rho = float(spearmanr(W2[iu], Tsym[iu]).statistic)
+    rng = np.random.default_rng(0)
+    hits = 0
+    for _ in range(TRANSFER_MANTEL_PERM):
+        p = rng.permutation(n)
+        r = float(spearmanr(W2[np.ix_(p, p)][iu], Tsym[iu]).statistic)
+        if abs(r) >= abs(rho):
+            hits += 1
+    pval = (hits + 1) / (TRANSFER_MANTEL_PERM + 1)
+
+    # 2-D view of the SAME standardized space the distances live in; the map is
+    # an approximation of it, which is why panel B repeats the claim in full
+    # dimension.
+    Zall = np.vstack([Zs[c] for c in codes])
+    Zc = Zall - Zall.mean(axis=0)
+    _, _, vt = np.linalg.svd(Zc, full_matrices=False)
+    var = (Zc @ vt.T).var(axis=0)
+    var_ratio = (var / var.sum())[:2]
+    emb = {c: (Zs[c] - Zall.mean(axis=0)) @ vt[:2].T for c in codes}
+    centroids = {c: emb[c].mean(axis=0) for c in codes}
+
+    os.makedirs(os.path.join(OUTPUT_TRANSFER, 'raw_data'), exist_ok=True)
+    for name, M in (('domain_distance_w2', W2), ('rank_transfer_directed', T),
+                    ('rank_transfer_symmetrized', Tsym)):
+        pd.DataFrame(M, index=codes, columns=codes).to_csv(
+            os.path.join(OUTPUT_TRANSFER, 'raw_data', f'{name}.csv'))
+    dec.to_csv(os.path.join(OUTPUT_TRANSFER, 'raw_data',
+                            'w2_group_decomposition.csv'), index=False)
+    # Label by EVENT, not city: two of the units are the same city under
+    # different hurricanes, and panel C exists precisely to show that they are
+    # not each other's nearest neighbour.
+    labels = {c: (c.split('_', 1)[1] if '_' in c else c) for c in codes}
+    colors = {c: _TRANSFER_COLORS[i % len(_TRANSFER_COLORS)]
+              for i, c in enumerate(codes)}
+    out_png = os.path.join(OUTPUT_TRANSFER, 'transferability_map.png')
+    vis_transferability_map(emb, centroids, W2, T, Tsym, labels, colors,
+                            var_ratio, rho, pval, save_path=out_png)
+    dec_png = os.path.join(OUTPUT_TRANSFER, 'w2_decomposition.png')
+    vis_w2_decomposition(dec['pair'].tolist(), dec, dec['transfer'].to_numpy(),
+                         list(groups), _TRANSFER_GROUP_COLORS,
+                         save_path=dec_png)
+    print(f"  [transferability] W2 vs rank transfer: spearman {rho:+.2f} "
+          f"(Mantel P = {pval:.3f}, {len(iu[0])} pairs) -> {out_png}")
+    print("  [transferability] W2 group contributions vs rank transfer: "
+          + ", ".join(f"{g} {float(spearmanr(dec[g], dec['transfer']).statistic):+.2f}"
+                      for g in groups)
+          + f" -> {dec_png}")
+    return pd.DataFrame(T, index=codes, columns=codes)
+
+
 # ── STEP 7 — cross-city curve prediction ────────────────────────────────────────
 
 # Display labels of the method lines (dict order = plot / colour order).
@@ -2252,6 +2447,53 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             save_path=os.path.join(OUTPUT_CURVE_PRED,
                                    f'component_curves_{held}.png'),
             weights=wn)
+        if CURVE_OD_MAPS:
+            u = units[held]
+            W_t, H_s = dec_test[held]
+            # r̂(d)·b(d) turns the RELATIVE forecast back into daily component
+            # magnitudes (b = day-type-matched normal baseline, observed
+            # pre-landfall); @H spreads them over OD pairs — X ≈ W·H at day
+            # grain.  A NaN baseline (component inactive pre-landfall) zeroes
+            # that component's contribution rather than poisoning the sum.
+            base_comp = daily_baselines(W_t, u['n_nor'], u['first_day_nor'],
+                                        SLOTS_ACTIVE, n_dis=u['n_dis'])
+            m_hat = (pred_curves.to_numpy(dtype=float)
+                     * base_comp.to_numpy(dtype=float))
+            pred_od = np.nan_to_num(m_hat) @ H_s
+            X_c = u['X_all']
+            spd = SLOTS_ACTIVE
+            nd_all = X_c.shape[1] // spd
+            gt_od = (X_c[:, :nd_all * spd]
+                     .reshape(X_c.shape[0], nd_all, spd).sum(axis=2)
+                     [:, u['n_dis'] // spd:].T)
+            n_d = min(pred_od.shape[0], gt_od.shape[0])
+            cent = {g.aggr_id: (g.centroid.x, g.centroid.y)
+                    for g in u['gdf'].itertuples()}
+            coords = np.array([cent.get(o, (np.nan, np.nan))
+                               + cent.get(t, (np.nan, np.nan))
+                               for o, t in u['mapping']], dtype=float)
+            ok_pair = np.isfinite(coords).all(axis=1)
+            frames = {}
+            for name, M in (('Prediction', pred_od[:n_d]),
+                            ('Ground truth', gt_od[:n_d]),
+                            ('Difference', pred_od[:n_d] - gt_od[:n_d])):
+                per_day = []
+                for d in range(n_d):
+                    v = np.where(ok_pair, M[d], 0.0)
+                    keep = np.argsort(-np.abs(v))[:OD_MAP_TOP_ARCS]
+                    per_day.append(
+                        [[round(coords[i, 0], 4), round(coords[i, 1], 4),
+                          round(coords[i, 2], 4), round(coords[i, 3], 4),
+                          round(float(v[i]), 1)]
+                         for i in keep if abs(v[i]) > 1e-9])
+                frames[name] = per_day
+            vis_od_flow_slider_html(
+                frames, [int(d) for d in obs.index[:n_d]],
+                os.path.join(OUTPUT_OD_PRED, held, 'od_flow_pred_vs_gt.html'),
+                f'{held}: daily OD flows — forecast vs observed',
+                note=('H spatial patterns are the test decomposition&#39;s own '
+                      '(descriptive); the time dimension is the STEP-7 '
+                      'forecast.'))
         variant = ('' if (CURVE_PRED_SOLVER == 'solve_L'
                           and CURVE_ALPHA_BACKBONE == 'surge')
                    else f" [{CURVE_PRED_SOLVER}"
@@ -2525,6 +2767,10 @@ def main():
         # ── STEP 7 — Cross-city curve prediction (α+L transfer -> full curves) ──
         print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
         analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
+
+        # ── STEP 8 — Transferability: which unit should lend to which? ──────
+        print("\n── Transferability: domain proximity vs rank transfer ──")
+        analysis_transferability(cc_test, all_codes)
 
 
 if __name__ == '__main__':

@@ -1549,3 +1549,359 @@ def vis_bar_resilience_by_peakslot(df, res_cols, ncols=2, save_path=None,
     return fig
 
 
+
+
+# ── Predicted-vs-observed OD flow slider map (STEP-7 spatial view) ────────────
+_OD_SLIDER_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>%TITLE%</title>
+<script src="https://unpkg.com/deck.gl@9.0.36/dist.min.js"></script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<style>
+  body { margin:0; font-family: Arial, Helvetica, sans-serif; }
+  #map { position:absolute; inset:0; }
+  #panel { position:absolute; top:10px; left:10px; z-index:10; background:rgba(255,255,255,.94);
+           padding:10px 14px; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.3);
+           font-size:13px; max-width:330px; }
+  #panel h3 { margin:0 0 6px; font-size:14px; }
+  #day-row { margin-top:8px; display:flex; align-items:center; gap:8px; }
+  #day-label { font-weight:bold; min-width:52px; }
+  input[type=range] { width:170px; }
+  .views label { margin-right:10px; }
+  #legend { margin-top:6px; color:#444; font-size:11.5px; line-height:1.45; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="panel">
+  <h3>%TITLE%</h3>
+  <div class="views">
+    <label><input type="radio" name="view" value="Prediction" checked> Prediction</label>
+    <label><input type="radio" name="view" value="Ground truth"> Ground truth</label>
+    <label><input type="radio" name="view" value="Difference"> Difference</label>
+  </div>
+  <div id="day-row">
+    <button id="prev">&#9664;</button>
+    <input type="range" id="day" min="0" max="%MAXDAY%" step="1" value="0"/>
+    <button id="next">&#9654;</button>
+    <span id="day-label"></span>
+  </div>
+  <div id="legend"></div>
+</div>
+<script>
+const DATA = %DATA%;
+const DAYS = %DAYS%;
+const VMAX = %VMAX%;
+const state = { view: 'Prediction', day: 0 };
+
+const deckgl = new deck.DeckGL({
+  container: 'map', map: maplibregl,
+  mapStyle: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+  initialViewState: { longitude: %LON%, latitude: %LAT%, zoom: %ZOOM%, pitch: 35, bearing: 0 },
+  controller: true, layers: [],
+});
+
+function colors(view, v) {
+  if (view === 'Difference')
+    return v >= 0 ? [[178, 24, 43, 175], [214, 96, 77, 60]]
+                  : [[33, 102, 172, 175], [67, 147, 195, 60]];
+  if (view === 'Ground truth') return [[58, 58, 58, 165], [120, 120, 120, 55]];
+  return [[15, 77, 146, 165], [90, 140, 200, 55]];
+}
+
+function render() {
+  const arcs = DATA[state.view][state.day] || [];
+  const vmax = Math.max(VMAX[state.view], 1e-9);
+  const layer = new deck.ArcLayer({
+    id: 'od', data: arcs, greatCircle: false,
+    getSourcePosition: d => [d[0], d[1]],
+    getTargetPosition: d => [d[2], d[3]],
+    getWidth: d => 0.6 + 7.0 * Math.sqrt(Math.abs(d[4]) / vmax),
+    widthUnits: 'pixels',
+    getSourceColor: d => colors(state.view, d[4])[0],
+    getTargetColor: d => colors(state.view, d[4])[1],
+    pickable: true,
+  });
+  deckgl.setProps({ layers: [layer],
+    getTooltip: ({object}) => object && ('flow: ' + object[4].toFixed(1)) });
+  document.getElementById('day-label').textContent = 'day ' + DAYS[state.day];
+  const n = arcs.length;
+  document.getElementById('legend').innerHTML =
+    '<b>' + state.view + '</b>, day ' + DAYS[state.day] + ' since landfall &middot; top '
+    + n + ' OD pairs by |flow|<br/>' +
+    (state.view === 'Difference'
+      ? 'red: predicted &gt; observed &middot; blue: predicted &lt; observed<br/>'
+      : 'arc width &prop; &radic;flow (daily trips)<br/>') +
+    '%NOTE%';
+}
+
+document.querySelectorAll('input[name=view]').forEach(el =>
+  el.addEventListener('change', e => { state.view = e.target.value; render(); }));
+const slider = document.getElementById('day');
+slider.addEventListener('input', e => { state.day = +e.target.value; render(); });
+document.getElementById('prev').addEventListener('click', () => {
+  state.day = Math.max(0, state.day - 1); slider.value = state.day; render(); });
+document.getElementById('next').addEventListener('click', () => {
+  state.day = Math.min(%MAXDAY%, state.day + 1); slider.value = state.day; render(); });
+render();
+</script>
+</body>
+</html>
+"""
+
+
+def vis_od_flow_slider_html(frames, day_labels, save_path, title, note=''):
+    """Self-contained slider map for the STEP-7 spatial OD forecast: one HTML
+    per city-event with a view toggle (Prediction / Ground truth / Difference)
+    and a day slider.  `frames` maps each of those three view names to a list
+    (one entry per disaster day) of arc rows [o_lon, o_lat, d_lon, d_lat,
+    value]; `value` is the daily OD flow (signed for the Difference view).
+    Arc width is normalized per view by its own max |value| across all days so
+    the slider animates on a fixed scale.  Basemap and deck.gl load from CDN
+    (same dependency model as the archived pydeck maps)."""
+    import json
+    lons, lats = [], []
+    vmax = {}
+    for name, days in frames.items():
+        m = 0.0
+        for arcs in days:
+            for a in arcs:
+                lons += [a[0], a[2]]
+                lats += [a[1], a[3]]
+                m = max(m, abs(a[4]))
+        vmax[name] = m
+    if not lons:
+        return
+    lon0, lat0 = float(np.mean(lons)), float(np.mean(lats))
+    span = max(max(lons) - min(lons), max(lats) - min(lats), 1e-3)
+    zoom = float(np.clip(np.log2(360.0 / (span * 2.2)), 8.0, 11.5))
+    n_days = max(len(d) for d in frames.values())
+    html = (_OD_SLIDER_TEMPLATE
+            .replace('%TITLE%', title)
+            .replace('%DATA%', json.dumps(frames, separators=(',', ':')))
+            .replace('%DAYS%', json.dumps(list(day_labels)))
+            .replace('%VMAX%', json.dumps(vmax))
+            .replace('%MAXDAY%', str(n_days - 1))
+            .replace('%LON%', f'{lon0:.4f}')
+            .replace('%LAT%', f'{lat0:.4f}')
+            .replace('%ZOOM%', f'{zoom:.2f}')
+            .replace('%NOTE%', note))
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+
+# ── Transferability: does domain proximity predict RANK transfer? ─────────────
+def vis_transferability_map(emb, centroids, W2, T, Tsym, labels, colors,
+                            var_ratio, rho, pval, save_path=None):
+    """Three panels answering ONE question: do city-events that sit close in
+    component-feature space also transfer their cum_loss ORDERING to each other?
+
+      A  map    — PCA of every unit's components, one convex hull per unit, the
+                  hulls' centroids joined by edges COLOURED BY the measured
+                  pairwise rank transfer.  Proximity is the claim; edge colour
+                  is the evidence, so the claim is checkable inside the panel.
+      B  proof  — the same two quantities as a scatter (one point per unordered
+                  pair) with the Mantel statistic, so the visual impression in A
+                  cannot be an artefact of the 2-D projection.
+      C  matrix — the raw directed transfer matrix; transfer is ASYMMETRIC and
+                  panel A can only draw the symmetrized value.
+
+    `emb` maps code -> [k × 2] PCA scores, `centroids` code -> [2], `W2` /`T` /
+    `Tsym` are [n × n] aligned with `labels` (codes in plotting order); `rho`
+    and `pval` are the Mantel statistic between W2 and Tsym."""
+    from scipy.spatial import ConvexHull
+    from matplotlib.colors import TwoSlopeNorm
+    codes = list(labels)
+    n = len(codes)
+    short = {c: labels[c] for c in codes}
+    nature_rc = {
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 0.7, 'legend.frameon': False,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+    }
+    iu = np.triu_indices(n, 1)
+    norm = TwoSlopeNorm(vmin=min(-0.7, float(np.nanmin(T))), vcenter=0.0,
+                        vmax=max(0.9, float(np.nanmax(T))))
+    cmap = plt.cm.RdBu
+    with plt.rc_context(nature_rc):
+        fig = plt.figure(figsize=(11.0, 3.6))
+        # Generous wspace: the panel-A colourbar is drawn inside the first
+        # cell and would otherwise sit on top of panel B's y-label.
+        gs = fig.add_gridspec(1, 3, width_ratios=[1.5, 1, 1], wspace=0.52)
+        # A — map
+        ax = fig.add_subplot(gs[0, 0])
+        for c in codes:
+            pts = np.asarray(emb[c], dtype=float)
+            ax.scatter(pts[:, 0], pts[:, 1], s=13, color=colors[c], alpha=.45,
+                       zorder=2, edgecolor='none')
+            if len(pts) >= 3:
+                h = ConvexHull(pts)
+                poly = np.vstack([pts[h.vertices], pts[h.vertices][:1]])
+                ax.fill(poly[:, 0], poly[:, 1], color=colors[c], alpha=.10,
+                        zorder=1)
+                ax.plot(poly[:, 0], poly[:, 1], color=colors[c], lw=.8,
+                        alpha=.55, zorder=1)
+        for i, a in enumerate(codes):
+            for j, b in enumerate(codes):
+                if i < j:
+                    v = float(Tsym[i, j])
+                    ax.plot([centroids[a][0], centroids[b][0]],
+                            [centroids[a][1], centroids[b][1]],
+                            color=cmap(norm(v)), lw=0.6 + 3.4 * abs(v),
+                            zorder=3, solid_capstyle='round', alpha=.92)
+        for c in codes:
+            ax.scatter(*centroids[c], s=110, color=colors[c], zorder=5,
+                       edgecolor='white', linewidth=1.3)
+            ax.annotate(short[c], centroids[c], fontsize=6.5, fontweight='bold',
+                        xytext=(0, -13), textcoords='offset points',
+                        ha='center', color=colors[c], zorder=6)
+        ax.set_xlabel(f'PC1 ({var_ratio[0]:.0%} var)')
+        ax.set_ylabel(f'PC2 ({var_ratio[1]:.0%} var)')
+        ax.set_title('A  hulls = each city-event\'s components;\n'
+                     'edge colour = measured pairwise RANK transfer', fontsize=8)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+        cb = fig.colorbar(sm, ax=ax, fraction=.042, pad=.02)
+        cb.set_label('rank transfer (spearman)', fontsize=6.5)
+        cb.ax.tick_params(labelsize=6)
+        # B — proof
+        ax = fig.add_subplot(gs[0, 1])
+        for i, a in enumerate(codes):
+            for j, b in enumerate(codes):
+                if i < j:
+                    ax.scatter(W2[i, j], Tsym[i, j], s=34,
+                               color=cmap(norm(float(Tsym[i, j]))), zorder=3,
+                               edgecolor='#555555', linewidth=.5)
+                    ax.annotate(f'{short[a][:3]}–{short[b][:3]}',
+                                (W2[i, j], Tsym[i, j]), fontsize=5,
+                                xytext=(0, 5), textcoords='offset points',
+                                ha='center', color='#555555')
+        z = np.polyfit(W2[iu], Tsym[iu], 1)
+        xs = np.linspace(W2[iu].min(), W2[iu].max(), 50)
+        ax.plot(xs, np.polyval(z, xs), color='#333333', lw=1.1, zorder=2)
+        ax.axhline(0, color='#CCCCCC', lw=.7, zorder=1)
+        ax.set_xlabel(r'domain distance  $W_2$ (Sinkhorn)')
+        ax.set_ylabel('rank transfer (symmetrized)')
+        ax.set_title('B  closer $\\Rightarrow$ better rank transfer\n'
+                     f'$\\rho_s$ = {rho:+.2f}  (Mantel $P$ = {pval:.3f}, '
+                     f'{len(iu[0])} pairs)', fontsize=8)
+        ax.margins(.18)
+        # C — asymmetry
+        ax = fig.add_subplot(gs[0, 2])
+        ax.imshow(np.where(np.eye(n, dtype=bool), np.nan, T), cmap=cmap,
+                  norm=norm)
+        for i in range(n):
+            for j in range(n):
+                if i != j and np.isfinite(T[i, j]):
+                    ax.text(j, i, f'{T[i, j]:.2f}', ha='center', va='center',
+                            fontsize=5.5,
+                            color='white' if abs(T[i, j]) > .55 else '#333333')
+        ax.set_xticks(range(n)); ax.set_yticks(range(n))
+        ax.set_xticklabels([short[c] for c in codes], fontsize=5.5, rotation=40,
+                           ha='right')
+        ax.set_yticklabels([short[c] for c in codes], fontsize=5.5)
+        ax.set_xlabel('test (target)', fontsize=6.5)
+        ax.set_ylabel('train (source)', fontsize=6.5)
+        ax.set_title('C  rank transfer is ASYMMETRIC\n'
+                     '(same city, different event ≠ close)', fontsize=8)
+        for s in ax.spines.values():
+            s.set_visible(False)
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=450, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_w2_decomposition(pairs, contrib, transfer, group_names, group_colors,
+                         save_path=None):
+    """What is the domain distance MADE OF, and which part of it explains the
+    measured transfer?  A squared-Euclidean cost is additive over dimensions,
+    so under one coupling the transported cost splits EXACTLY over feature
+    groups; both rows are that split, seen two ways.
+
+      row 1  one stacked bar per unordered pair, pairs ordered near -> far;
+             segment heights are the groups' exact contributions to that pair's
+             W2 and the number above the bar is the measured rank-prediction
+             performance between the two units.
+      row 2  one scatter per group: x is that group's contribution — the
+             ABSOLUTE segment height of row 1, not a share — and y the same
+             performance.  A group explains the distance/transfer relation only
+             if ITS panel slopes; a large but flat group is inert background,
+             which is why shares alone would be misleading here.
+
+    `pairs` are the pair labels in plotting order, `contrib` a DataFrame with
+    one column per group aligned to `pairs`, `transfer` the matching
+    symmetrized (A->B and B->A averaged) transfer values."""
+    from scipy.stats import spearmanr as _spearmanr
+    nature_rc = {
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 0.7, 'legend.frameon': False,
+        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+    }
+    gnames = list(group_names)
+    transfer = np.asarray(transfer, dtype=float)
+    total = contrib[gnames].sum(axis=1).to_numpy(dtype=float)
+    with plt.rc_context(nature_rc):
+        fig = plt.figure(figsize=(10.6, 5.6))
+        gs = fig.add_gridspec(2, len(gnames), height_ratios=[1.25, 1],
+                              hspace=0.5, wspace=0.30)
+        ax = fig.add_subplot(gs[0, :])
+        x = np.arange(len(pairs))
+        bottom = np.zeros(len(pairs))
+        for g in gnames:
+            v = contrib[g].to_numpy(dtype=float)
+            ax.bar(x, v, 0.62, bottom=bottom, color=group_colors[g], label=g)
+            bottom += v
+        for k in range(len(pairs)):
+            ax.text(x[k], total[k] + 0.5, f'{transfer[k]:+.2f}', ha='center',
+                    fontsize=6.2, fontweight='bold',
+                    color=plt.cm.RdBu(0.5 + 0.5 * np.clip(transfer[k] / 0.9,
+                                                          -1, 1)))
+        ax.text(0.01, 0.86, 'number above bar = rank-prediction performance',
+                transform=ax.transAxes, fontsize=6, color='#555555')
+        ax.set_xticks(x)
+        ax.set_xticklabels(pairs, fontsize=6.5)
+        ax.set_ylabel('$W_2$ contribution (additive, exact)')
+        ax.set_title('what pushes each pair apart — pairs ordered near '
+                     '$\\rightarrow$ far', fontsize=8)
+        ax.legend(ncol=len(gnames), fontsize=6.5, loc='upper left')
+        ax.margins(x=0.02)
+        axs2 = [fig.add_subplot(gs[1, k]) for k in range(len(gnames))]
+        for ax, g in zip(axs2, gnames):
+            xs = contrib[g].to_numpy(dtype=float)
+            ax.scatter(xs, transfer, s=30, color=group_colors[g], zorder=3,
+                       edgecolor='white', linewidth=0.5)
+            z = np.polyfit(xs, transfer, 1)
+            xr = np.linspace(xs.min(), xs.max(), 50)
+            ax.plot(xr, np.polyval(z, xr), color='#333333', lw=1.0, zorder=2)
+            ax.axhline(0, color='#CCCCCC', lw=0.7, zorder=1)
+            r = float(_spearmanr(xs, transfer).statistic)
+            ax.set_title(f'{g}   $\\rho_s$ = {r:+.2f}', fontsize=8,
+                         color=group_colors[g])
+            ax.set_xlabel(f'$W_2$ carried by {g}\n'
+                          '(= its segment height above, absolute)')
+            ax.margins(0.15)
+        axs2[0].set_ylabel('cum_loss rank-prediction performance\n'
+                           'between the pair (spearman,\n'
+                           'A$\\to$B and B$\\to$A averaged)')
+        for ax in axs2[1:]:
+            ax.set_yticklabels([])
+        lo = min(ax.get_ylim()[0] for ax in axs2)
+        hi = max(ax.get_ylim()[1] for ax in axs2)
+        for ax in axs2:
+            ax.set_ylim(lo, hi)
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=450, bbox_inches='tight')
+            plt.close(fig)
+    return fig
