@@ -34,7 +34,7 @@ Functions
 ---------
 temporal_features(W, n_nor, first_day, slots_per_day, interval_hours) -> DataFrame
 functional_features(M, categories, drop) -> DataFrame
-component_function_entropy(M, categories, drop, base) -> DataFrame  (outflow/inflow Shannon entropy)
+component_function_entropy(M, categories, drop, base) -> DataFrame  (merged-exposure Shannon entropy)
 spatial_features(H, distances) -> DataFrame  (loading-weighted mean/std flow distance, km)
 socioeconomic_features(H, values, name) -> DataFrame  (loading-weighted median income)
 resilience_curves(W, n_nor, first_day, slots_per_day, n_dis, smooth) -> DataFrame
@@ -101,6 +101,15 @@ def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours,
       weekday_ratio     float mean weekday daily total / mean weekend daily
                               total (continuous; NaN if the weekend mean is 0,
                               which counts as weekday-dominated)
+      <band name>       float CONTINUOUS band intensity, one column per
+                              PERIOD_BANDS entry (morning_peak / midday /
+                              evening_peak / night): width-corrected mean share
+                              per slot inside the band, from the weekday
+                              normal-day profile — the graded version of the
+                              peak_period argmax
+      '<h0>-<h1>h'      float slot share, one column per active slot: that
+                              slot's share of the weekday daily activity
+                              (columns sum to 1 across slots per component)
     """
     W_nor = np.asarray(W, dtype=float)[:n_nor, :]
     n_days = n_nor // slots_per_day
@@ -158,6 +167,17 @@ def temporal_features(W, n_nor, first_day, slots_per_day, interval_hours,
                                       'peak_period', 'peak_period_label'],
                        index=pd.RangeIndex(k, name='component'))
     out['weekday_ratio'] = weekday_ratio
+    # CONTINUOUS temporal intensities, the graded counterparts of the argmax
+    # categoricals above (which keep only the winner): per band, the
+    # width-corrected mean share per slot inside the band (same band score the
+    # argmax uses); per slot, that slot's share of the weekday daily activity.
+    # Both come from the same weekday-normal-day profile p, so a component's
+    # values are comparable across components regardless of its magnitude.
+    # No 'weekend' column: weekday_ratio already carries that axis.
+    for b, (name, _, _) in enumerate(PERIOD_BANDS):
+        out[name] = band_means[b]
+    for s2 in range(slots_per_day):
+        out[slot_label[s2]] = p[s2, :]
     return out
 
 
@@ -208,26 +228,34 @@ def functional_features(M, categories, drop=('Mix', 'Unknown')):
 
 def component_function_entropy(M, categories=None, drop=(), base=np.e):
     """
-    Per-component Shannon entropy of the OUTFLOW (origin) and INFLOW
-    (destination) functional distributions, computed from the SAME per-component
-    O×D matrix M that the functionality heatmap plots (each M[i] sums to 1).
+    Per-component Shannon entropy of the MERGED functional distribution,
+    computed from the SAME per-component O×D matrix M that the functionality
+    heatmap plots (each M[i] sums to 1).
 
-    For component i:
-        outflow distribution = row sums of M[i]    (share DEPARTING per origin function)
-        inflow  distribution = column sums of M[i]  (share ARRIVING per dest function)
-        entropy_from = H(outflow),  entropy_to = H(inflow)
+    For component i the two directions are merged BEFORE the entropy is taken:
+
+        exposure_c = (row sums of M[i])_c + (column sums of M[i])_c
+                   = the total share of the component's flow TOUCHING function c
+        entropy    = H(exposure / Σ exposure)
+
+    This is the same merge the functional shares use (func_c = share_from_c +
+    share_to_c), so 'functional concentration' means one thing repo-wide.
+    Entropy of the two marginals separately answered a different question — how
+    concentrated each SIDE is — and two components could match on both while
+    touching entirely different functions.
 
     H(p) = -Σ p_c ln p_c (nats; base=e). LOWER entropy = the component's flow is
     concentrated on fewer functions (more specialised); HIGHER = spread across
-    many.  Both marginals sum to 1, so each H lies in [0, ln K] (K = #categories).
+    many.  The merged distribution sums to 1, so H lies in [0, ln K]
+    (K = #categories).
 
     By DEFAULT all axis categories are kept, matching the heatmap (which includes
     'Mix').  Pass drop=('Mix', 'Unknown') with `categories` to restrict to
-    substantive functions — then the marginals match functional_features'
-    share_from / share_to and H lies in [0, ln 6].
+    substantive functions — then the exposure matches functional_features'
+    func_<cat> and H lies in [0, ln 6].
 
-    Returns DataFrame indexed by component with columns entropy_from, entropy_to;
-    a component whose kept mass is 0 gets NaN on both.
+    Returns DataFrame indexed by component with the single column `entropy`;
+    a component whose kept mass is 0 gets NaN.
     """
     M = np.asarray(M, dtype=float)
     if drop:
@@ -245,8 +273,8 @@ def component_function_entropy(M, categories=None, drop=(), base=np.e):
         p = p[p > 0] / s
         return float(-np.sum(p * np.log(p)) / log_base)
 
-    rows = [(_H(M[i].sum(axis=1)), _H(M[i].sum(axis=0))) for i in range(M.shape[0])]
-    return pd.DataFrame(rows, columns=['entropy_from', 'entropy_to'],
+    rows = [_H(M[i].sum(axis=1) + M[i].sum(axis=0)) for i in range(M.shape[0])]
+    return pd.DataFrame({'entropy': rows},
                         index=pd.RangeIndex(M.shape[0], name='component'))
 
 

@@ -125,30 +125,55 @@ STEP 7 — Cross-city curve prediction.
 
 Output tree (outputs/nmf/)
 --------------------------
-    component_characteristics/   per-component characteristics, by type:
-        temporal/           signature heatmap + timeline (W)
-        spatial/            per-component flow-distance bar (H) + raw CSV
-        socioeconomic/      per-component median-income bars + raw CSV
-        func/               O×D functional cross-tab heatmaps + entropy + raw CSVs
-        func_vs_temporal/   time × function correlation figures
-        resilience/         per-function ordered line stacks: W timelines and r(d)
+Folder names carry a numeric prefix so a file browser lists them in pipeline
+order; the prefixes are part of the paths below and of the OUTPUT_* constants.
+
+    0-decomposition_quality/     STEP 1 + STEP 3, everything about the
+        factorisation itself.  nmf_rank_cv.png (STEP 1) sweeps k under
+        held-out-entry cross-validation for EVERY registry unit and is what
+        sets each unit's n_behaviors and what EXCLUDED_CODES drops; the units
+        it drops keep their (greyed) panel, since this figure is the record of
+        why.  The STEP-3 quality check then covers only the RETAINED units,
+        FIT-window only (the data the basis is fit on; the disaster period is
+        out of scope): per-unit nmf_quality_<code>.png (per-slot distribution
+        error, value-CDF overlay, component weights vs the NMF_MIN_COMP_FRAC
+        health threshold) and the cross-city nmf_quality_summary.png
+        dashboard.  raw_data/ holds the rank-CV curves and selection table plus
+        the quality metrics.
+    1-intra_city_component_characteristics/  per-component characteristics, by type:
+        0-temporal/         signature heatmap + timeline (W)
+        1-func/             O×D functional cross-tab heatmaps + entropy + raw CSVs
+        2-func_vs_temporal/ time × function correlation figures
+        3-resilience/       per-function ordered line stacks: W timelines and r(d)
                             curves, where r(d) is the component's day-d activity
                             relative to its matched pre-disaster baseline
-    resilience_corr/
-        func_vs_resilience/      correlation heatmaps per method, top-pair scatters,
+        4-socioeconomic/    per-component median-income bars + raw CSV
+        5-spatial/          per-component flow-distance bar (H) + raw CSV
+    2-intra_city_resilience_corr/
+        func_vs_resilience/      correlation heatmaps per method +
                                  intra_city_loss_reg_<method>/ (Ridge leave-one-out
                                  diagnostics)
-        temporal_vs_resilience/  weekday_ratio heatmap + peak-slot / peak-period bars
+        temporal_vs_resilience/  time × resilience correlation heatmaps (the full
+                                 continuous temporal feature set as rows, per
+                                 unit + pooled ALL) + raw_data/
         disaster_vs_resilience/  pooled intensity-vs-resilience scatter
-    cross_city_resi_pred/        the STEP-6 outputs: bar_cross_city_resi_pred.png +
-        raw_data/ at the root; per-method leave-one-out scatters, R² matrix and
-        pairwise heatmap under cross_city_pred_rank/ (spearman) and
-        cross_city_pred_raw_value/ (pearson)
-    cross_city_curve_pred/       the STEP-7 outputs: bar_cross_city_curve_mae.png
+    3-cross_city_resi_pred/      the STEP-6 outputs, split by what is predicted:
+        city_total/     bar_cross_city_resi_pred.png + raw_data/ — the CITY-LEVEL
+                        cum_loss reconstruction, one number per city-event
+        component_rank/ the per-COMPONENT rank transfer: leave-one-out scatters,
+                        R² matrix, pairwise heatmap + raw_data/
+    4-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
+        plus the three mechanism figures (rank_pred_vs_true, rank_to_cumloss_qm,
+        alphaL_relationship_softreg),
         (the city-level whole-curve error of each forecast line, per city-event),
         per-unit city_magnitude_curve_<code>.png and component_curves_<code>.png,
         curve_pred_metrics.csv, and raw_data/ (per-day city curves by method +
         the per-component α/L table + the plotted MAE table)
+    5-cross_city_od_pred/        per city-event, one self-contained HTML slider map
+        of the daily predicted / observed / difference OD flows
+    6-transferability/           the STEP-8 outputs: transferability_map.png,
+        w2_decomposition.png and raw_data/ (domain distances, transfer matrices,
+        the per-feature-group W2 split)
 
 Adding a city-event means adding one CITY_EVENTS entry and providing its graph
 pkl, its geo CSV, and its land-use (EPA Smart Location Database) and income
@@ -160,6 +185,7 @@ Run
     python run_pattern_nmf.py
 """
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -177,24 +203,28 @@ from utils.pattern_analysis.graph_io import (
 from utils.pattern_analysis.decomposition import select_segment_columns
 from utils.pattern_analysis.nmf_pipeline import (
     build_city_matrices, decompose_city, decompose_city_context,
+    nmf_quality_metrics, rank_cv_entry,
 )
 from utils.pattern_analysis.visualization import (
-    vis_heatmap_temporal_signature,
+    vis_heatmap_temporal_signature, vis_nmf_quality, vis_nmf_quality_summary,
+    vis_nmf_rank_cv,
     vis_line_nmf_component_timeline, vis_heatmap_od_function,
-    vis_scatter_component_features,
-    vis_bar_function_by_peakslot, vis_line_resilience_curves,
-    vis_bar_resilience_by_peakslot, vis_heatmap_corr_split,
+    vis_line_resilience_curves,
+    vis_heatmap_corr,
     vis_hist_function_entropy,
     vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
     vis_heatmap_pair_r2, vis_scatter_intensity_resilience,
     vis_bar_cross_city_resi_pred, vis_bar_curve_mae, vis_curves_city_pred,
     vis_component_curves_grid, vis_od_flow_slider_html, vis_w2_decomposition,
+    vis_rank_pred_vs_true, vis_rank_to_cumloss_qm,
+    vis_alpha_level_relationship,
     vis_transferability_map,
 )
 from utils.pattern_analysis.space_function import (
     category_lookup_from_landuse, build_od_function_matrix,
 )
 from utils.pattern_analysis.component_features import (
+    PERIOD_BANDS,
     temporal_features, functional_features, time_function_correlation,
     resilience_features, resilience_curves, component_function_entropy,
     spatial_features, socioeconomic_features, recovery_curve_features,
@@ -253,7 +283,7 @@ CITY_EVENTS = [
          graph='data/Baton_Rouge_Ida_2021_graph_intersection.pkl',
          geo={'block_group': 'data/Baton_Rouge_block_group_geo.csv'},
          analysis_days=151, window=_WIN, buffer=_BUF, disaster=_DIS,
-         n_behaviors=11, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Ida @ BR ~Cat 2
+         n_behaviors=12, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Ida @ BR ~Cat 2
          evac_level=0.091041,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Wednesday', first_day_disaster='Sunday'),
@@ -261,7 +291,7 @@ CITY_EVENTS = [
          graph='data/Fort_Myers_Ian_2022_graph_intersection.pkl',
          geo={'block_group': 'data/Fort_Myers_block_group_geo.csv'},
          analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
-         n_behaviors=11, l1_reg=0.13, filter_factor=0, ss_intensity=7,  # Ian @ FM ~Cat 4
+         n_behaviors=6, l1_reg=0.13, filter_factor=0, ss_intensity=7,  # Ian @ FM ~Cat 4
          evac_level=1.603633,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
@@ -273,7 +303,7 @@ CITY_EVENTS = [
          graph='data/Wilmington_Dorian_2019_graph_intersection.pkl',
          geo={'block_group': 'data/Wilmington_block_group_geo.csv'},
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
-         n_behaviors=9, l1_reg=1.626, filter_factor=0, ss_intensity=5,  # Dorian @ Wilmington ~Cat 2 (true arrival)
+         n_behaviors=5, l1_reg=1.626, filter_factor=0, ss_intensity=5,  # Dorian @ Wilmington ~Cat 2 (true arrival)
          evac_level=0.814236,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
@@ -281,7 +311,7 @@ CITY_EVENTS = [
          graph='data/Wilmington_Isaias_2020_graph_intersection.pkl',
          geo={'block_group': 'data/Wilmington_block_group_geo.csv'},
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
-         n_behaviors=9, l1_reg=0.315, filter_factor=0, ss_intensity=4,  # Isaias @ Wilmington ~Cat 1
+         n_behaviors=5, l1_reg=0.315, filter_factor=0, ss_intensity=4,  # Isaias @ Wilmington ~Cat 1
          evac_level=0.018679,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Thursday', first_day_disaster='Monday'),
@@ -293,6 +323,115 @@ CITY_EVENTS = [
          evac_level=1.868990,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
+    # ── top-15 extension (2026-07-28): 12 city-events from the FEMA-ranked
+    # disaster-MSA download (notebook main_20260727_download_top15_trajectories).
+    # analysis_days / first_day_* derive from each storm's EVENT_BATCHES span
+    # (graph day 0) and landfall date, verified programmatically; landfall+14
+    # sits at the end as everywhere else.  n_behaviors=10 / l1_reg=0.5 are
+    # UNTUNED defaults (l1 = median of the five tuned units; the per-city
+    # LOO-CV tuner has not been run for these yet).  ss_intensity: at-arrival
+    # SS category, NHC TCR best-track interpolation at closest approach +
+    # local NWS obs (2026-07-28 research; same reading as the original five).
+    # evac_level: BG-pop-weighted HEvOD 3-level strength — pipeline in
+    # data/evacuation_orders, extended to the 12 events with the same
+    # HEvOD-primary + verified-supplement discipline (Terrebonne/Ida is the
+    # one supplement, tpcg.org release 1958).
+    dict(code='HU_Ida', label='Houma', key='Houma',
+         graph='data/Houma_Ida_2021_graph_intersection.pkl',
+         geo={'block_group': 'data/Houma_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=10, l1_reg=0.5, filter_factor=0, ss_intensity=6,  # Ida @ Houma Cat 3 (borderline 4; eyewall)
+         evac_level=2.000000,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Wednesday', first_day_disaster='Sunday'),
+    dict(code='HM_Ida', label='Hammond', key='Hammond',
+         graph='data/Hammond_Ida_2021_graph_intersection.pkl',
+         geo={'block_group': 'data/Hammond_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=4,  # Ida @ Hammond Cat 1 (borderline 2)
+         evac_level=0.000000,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Wednesday', first_day_disaster='Sunday'),
+    dict(code='SL_Ida', label='Slidell', key='Slidell',
+         graph='data/Slidell_Ida_2021_graph_intersection.pkl',
+         geo={'block_group': 'data/Slidell_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=6, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Ida @ Slidell Cat 2 (54 mi W of track)
+         evac_level=0.000000,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Wednesday', first_day_disaster='Sunday'),
+    dict(code='PG_Ian', label='Punta Gorda', key='Punta_Gorda',
+         graph='data/Punta_Gorda_Ian_2022_graph_intersection.pkl',
+         geo={'block_group': 'data/Punta_Gorda_block_group_geo.csv'},
+         analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=7,  # Ian @ Punta Gorda Cat 4 (landfall hit)
+         evac_level=1.365782,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    dict(code='NA_Ian', label='Naples', key='Naples',
+         graph='data/Naples_Ian_2022_graph_intersection.pkl',
+         geo={'block_group': 'data/Naples_block_group_geo.csv'},
+         analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=7,  # Ian @ Naples Cat 4 (40 mi WNW)
+         evac_level=0.442624,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    dict(code='NP_Ian', label='North Port', key='North_Port',
+         graph='data/North_Port_Ian_2022_graph_intersection.pkl',
+         geo={'block_group': 'data/North_Port_block_group_geo.csv'},
+         analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=7, l1_reg=0.5, filter_factor=0, ss_intensity=7,  # Ian @ North Port Cat 4 (weakening inland)
+         evac_level=0.370944,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    dict(code='DT_Ian', label='Deltona', key='Deltona',
+         graph='data/Deltona_Ian_2022_graph_intersection.pkl',
+         geo={'block_group': 'data/Deltona_block_group_geo.csv'},
+         analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=8, l1_reg=0.5, filter_factor=0, ss_intensity=3,  # Ian @ Deltona TS (inland crossing)
+         evac_level=0.000000,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    dict(code='CH_Dorian', label='Charleston', key='Charleston',
+         graph='data/Charleston_Dorian_2019_graph_intersection.pkl',
+         geo={'block_group': 'data/Charleston_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=6,  # Dorian @ Charleston Cat 3 (borderline 2, offshore)
+         evac_level=1.496924,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Sunday', first_day_disaster='Thursday'),
+    dict(code='MB_Dorian', label='Myrtle Beach', key='Myrtle_Beach',
+         graph='data/Myrtle_Beach_Dorian_2019_graph_intersection.pkl',
+         geo={'block_group': 'data/Myrtle_Beach_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=7, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Dorian @ Myrtle Beach Cat 2 (offshore)
+         evac_level=0.201570,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Sunday', first_day_disaster='Thursday'),
+    dict(code='HH_Dorian', label='Hilton Head', key='Hilton_Head',
+         graph='data/Hilton_Head_Dorian_2019_graph_intersection.pkl',
+         geo={'block_group': 'data/Hilton_Head_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=10, l1_reg=0.5, filter_factor=0, ss_intensity=6,  # Dorian @ Hilton Head Cat 3 (offshore)
+         evac_level=1.861403,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Sunday', first_day_disaster='Thursday'),
+    dict(code='DA_Sally', label='Daphne', key='Daphne',
+         graph='data/Daphne_Sally_2020_graph_intersection.pkl',
+         geo={'block_group': 'data/Daphne_block_group_geo.csv'},
+         analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Sally @ Daphne Cat 2 (landfall county)
+         evac_level=0.325377,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Saturday', first_day_disaster='Wednesday'),
+    dict(code='LC_Delta', label='Lake Charles', key='Lake_Charles',
+         graph='data/Lake_Charles_Delta_2020_graph_intersection.pkl',
+         geo={'block_group': 'data/Lake_Charles_block_group_geo.csv'},
+         analysis_days=55, window=_WIN, buffer=_BUF, disaster=_DIS,
+         n_behaviors=10, l1_reg=0.5, filter_factor=0, ss_intensity=4,  # Delta @ Lake Charles Cat 1 (weakening at closest approach)
+         evac_level=2.000000,
+         context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
+         first_day_normal='Monday', first_day_disaster='Friday'),
 ]
 
 OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf')
@@ -329,6 +468,24 @@ AXIS_CATEGORIES = list(SF_CATEGORIES) + ['Mix']
 #   share_to_<cat>   — inflow side, the fraction arriving at function <cat>
 FUNC_COLS = ([f'share_from_{c}' for c in SF_CATEGORIES]
              + [f'share_to_{c}' for c in SF_CATEGORIES])
+
+# The MERGED functional shares the correlation blocks analyse: func_<cat> =
+# share_from_<cat> + share_to_<cat>, the total share of a component's flow
+# touching function <cat>.  The merge happens BEFORE the correlation, so each
+# category yields ONE coefficient describing the whole functional exposure;
+# correlating the two directions separately reported two coefficients of two
+# halves of the same quantity and invited reading a direction effect into what
+# is a single exposure.  Same definition the cross-city and Ridge blocks use
+# under merge_func_directions=True, so `func_<cat>` means one thing repo-wide.
+FUNC_MERGED_COLS = [f'func_{c}' for c in SF_CATEGORIES]
+
+
+def _with_merged_func(feats):
+    """Copy of a component feature table with the merged func_<cat> columns added."""
+    out = feats.copy()
+    for c in SF_CATEGORIES:
+        out[f'func_{c}'] = out[f'share_from_{c}'] + out[f'share_to_{c}']
+    return out
 
 # The resilience target.  cum_loss is computed from the relative-activity curve
 # r, where r(d) = the component's daily total on disaster day d divided by its
@@ -428,8 +585,9 @@ CURVE_JOINT_LAMBDA = 0.1             # λ-insensitive on predicted cum_loss (~0.
                                      # across 1e-4..10)
 CURVE_ALPHA_BACKBONE = 'surge'
 
-# Resilience REGRESSION (prediction) method(s); intra-city -> intra_city_loss_reg_<method>/,
-# inter-city -> cross_city_resi_pred/<label>/ (CROSS_CITY_METHOD_STD).
+# Resilience REGRESSION (prediction) method(s).  Both run INTRA-city ->
+# intra_city_loss_reg_<method>/.  Cross-city, only the methods listed in
+# CROSS_CITY_METHOD_STD get a folder (rank only).
 # 'spearman' RANK-regresses (features AND the metric rank-transformed before the
 # Ridge fit -> a multivariate partial Spearman, matching the correlation heatmap);
 # 'pearson' regresses the RAW standardized values.  The rank flag fed to the Ridge
@@ -518,33 +676,93 @@ RESIL_CORR_METHODS = ['spearman', 'pearson']
 #   spatial/           per-component flow-distance figure (spatial factor H)
 #   func/              per-component O×D functional cross-tabs
 #   func_vs_temporal/  time × function correlation figures
-OUTPUT_CHAR         = os.path.join(OUTPUT_PLOTS, 'component_characteristics')
-OUTPUT_TEMPORAL     = os.path.join(OUTPUT_CHAR, 'temporal')
-OUTPUT_SPATIAL      = os.path.join(OUTPUT_CHAR, 'spatial')
+# ── NMF decomposition-quality check ──────────────────────────────────────────
+# Runs right after every retained unit's decomposition, on the FIT window only
+# (normal+buffer — the data the basis is fit on; the disaster period is out of
+# scope, no predictive consideration): absolute reconstruction error, per-slot
+# distribution (KS) error, and the component-count health rule.  One figure per
+# unit + a cross-city summary + raw CSV.  These are DIAGNOSTICS only — nothing
+# optimises them.  k comes from the rank CV plus a manual reading of it (see
+# EXCLUDED_CODES / RANK_CV_K_FLOOR); reconstruction error cannot choose k,
+# since it falls monotonically with k.
+OUTPUT_QUALITY      = os.path.join(OUTPUT_PLOTS, '0-decomposition_quality')
+OUTPUT_QUALITY_RAW  = os.path.join(OUTPUT_QUALITY, 'raw_data')
+
+# ── Rank cross-validation (STEP 1) and the k policy it sets ──────────────────
+# Held-out-entry CV masks a random share of the fit matrix's entries, refits
+# without them and scores the masked cells, so — unlike reconstruction error,
+# which only falls with k — the score has an interior optimum.  It runs over
+# EVERY registry unit (its own results stay complete) and reports, per unit, the
+# k at the curve's minimum plus the range of k within one/two standard errors.
+RANK_CV_ENTRY_FRAC    = 0.10   # entries masked per repeat
+RANK_CV_REPEATS       = 5      # independent masks; standard error = sd / sqrt(this)
+RANK_CV_K_MAX         = 40     # capped further by each unit's matrix dimensions
+RANK_CV_SEED          = 42
+# Tolerance bands as multiples of the spread at the minimum; (name, multiple,
+# use_standard_error).  All three are written to the CSV; the figure captions
+# carry RANK_CV_FIGURE_BAND.
+RANK_CV_BANDS         = [('k_1se', 1.0, True), ('k_2se', 2.0, True),
+                         ('k_2sd', 2.0, False)]
+RANK_CV_FIGURE_BAND   = 'k_2se'
+# The CV curves depend on the graphs, the window/fit segments and l1_reg — NOT
+# on n_behaviors, which the sweep supplies itself.  So the cached curves stay
+# valid across k changes and are reused whenever they already cover every
+# registry unit; delete raw_data/nmf_rank_cv_curves.csv to force a recompute
+# (it costs ~25 minutes over 17 units).
+RANK_CV_CURVES_CSV    = os.path.join(OUTPUT_QUALITY_RAW, 'nmf_rank_cv_curves.csv')
+
+# Units DROPPED from every step after the rank CV: their 2-standard-error band
+# tops out at k <= 2, i.e. the data supports at most two components, too few to
+# describe a city's behavioural structure or to correlate anything against.
+# All four are the smallest matrices in the registry (14-61 OD pairs).
+EXCLUDED_CODES = frozenset({'HH_Dorian', 'LC_Laura', 'LC_Delta', 'HU_Ida'})
+# Retained units take k = the TOP of the 2-standard-error band, floored at 5 so
+# the within-city correlations keep a usable number of observations, with two
+# manual overrides (SL_Ida, FM_Ian -> 6).  The resulting values live in each
+# CITY_EVENTS entry's n_behaviors; this comment records where they came from.
+RANK_CV_K_FLOOR       = 5
+# The X% of the component-size health check: a component whose weight
+# ‖W_i‖·‖H_i‖ falls below this fraction of the largest component's weight
+# counts as a too-large-k symptom.  Reported per unit as a pass/fail check; it
+# is not a constraint anything optimises against.
+NMF_MIN_COMP_FRAC   = 0.05
+
+OUTPUT_CHAR         = os.path.join(OUTPUT_PLOTS, '1-intra_city_component_characteristics')
+OUTPUT_TEMPORAL     = os.path.join(OUTPUT_CHAR, '0-temporal')
+# The two temporal views are split by figure type: the per-component W heatmap
+# (one image showing every component at once) and the per-component timeline
+# curves, which are read differently and are easier to browse apart.
+OUTPUT_TEMPORAL_HM  = os.path.join(OUTPUT_TEMPORAL, 'heatmap')
+OUTPUT_TEMPORAL_CV  = os.path.join(OUTPUT_TEMPORAL, 'curve')
+OUTPUT_SPATIAL      = os.path.join(OUTPUT_CHAR, '5-spatial')
 # CSV raw-data for the per-component flow-distance figure (kept out of the figure folder).
 OUTPUT_SPATIAL_DIST_RAW = os.path.join(OUTPUT_SPATIAL, 'component_distance_raw_data')
 # Socioeconomic: per-component ACS median household income bar figure + raw CSV.
-OUTPUT_SOCIO        = os.path.join(OUTPUT_CHAR, 'socioeconomic')
+OUTPUT_SOCIO        = os.path.join(OUTPUT_CHAR, '4-socioeconomic')
 OUTPUT_SOCIO_RAW    = os.path.join(OUTPUT_SOCIO, 'component_income_raw_data')
-OUTPUT_FUNC         = os.path.join(OUTPUT_CHAR, 'func')
+OUTPUT_FUNC         = os.path.join(OUTPUT_CHAR, '1-func')
 # CSV raw-data for the func figures, each in its own subfolder so the tables stay
 # out of the figure folder; the folder name says which figure the CSV backs.
 OUTPUT_FUNC_HM_RAW  = os.path.join(OUTPUT_FUNC, 'heatmap_od_functionality_raw_data')
 OUTPUT_FUNC_ENT_RAW = os.path.join(OUTPUT_FUNC, 'hist_function_entropy_raw_data')
-OUTPUT_FUNC_VS_TEMP = os.path.join(OUTPUT_CHAR, 'func_vs_temporal')
+OUTPUT_FUNC_VS_TEMP = os.path.join(OUTPUT_CHAR, '2-func_vs_temporal')
+# Numeric tables sit in their own raw_data/ so the folder itself holds only
+# figures (same convention as the other output folders).
+OUTPUT_FUNC_VS_TEMP_RAW = os.path.join(OUTPUT_FUNC_VS_TEMP, 'raw_data')
 # Per-function stacks of per-component line figures (one figure per functional
 # category, components ordered by combined functional share): the full-window W
 # timelines and the disaster r(d) resilience curves.  These describe individual
 # components, so they live under component_characteristics/resilience/.
-OUTPUT_CHAR_RESIL   = os.path.join(OUTPUT_CHAR, 'resilience')
+OUTPUT_CHAR_RESIL   = os.path.join(OUTPUT_CHAR, '3-resilience')
 
 # Resilience correlation has two subfolders.  func_vs_resilience holds the
-# functional-share correlation heatmap, the top-pair scatter, and the resilience
-# REGRESSION figures.  temporal_vs_resilience holds the temporal-feature figures
-# (weekday_ratio heatmap + peak-slot / peak-period bar charts).  The per-function
+# functional-share correlation heatmap and the resilience REGRESSION figures.
+# temporal_vs_resilience holds the time × resilience heatmaps (continuous
+# temporal rows, per unit + pooled ALL; the categorical peak-slot/peak-period
+# bars are retired).  The per-function
 # line stacks (W timelines + r(d) resilience curves) now live under
 # component_characteristics/resilience/ (OUTPUT_CHAR_RESIL).
-OUTPUT_RESIL         = os.path.join(OUTPUT_PLOTS, 'resilience_corr')
+OUTPUT_RESIL         = os.path.join(OUTPUT_PLOTS, '2-intra_city_resilience_corr')
 OUTPUT_FUNC_VS_RESIL = os.path.join(OUTPUT_RESIL, 'func_vs_resilience')
 # The resilience-correlation heatmap lives in a per-method subfolder
 # (heatmap_resilience_corr_<spearman|pearson>) so each method + the lambda sweep
@@ -552,13 +770,16 @@ OUTPUT_FUNC_VS_RESIL = os.path.join(OUTPUT_RESIL, 'func_vs_resilience')
 OUTPUT_RESIL_CORR_HM_BASE = os.path.join(OUTPUT_FUNC_VS_RESIL, 'heatmap_resilience_corr')
 # Resilience REGRESSION (prediction) outputs ('spearman' = RANK regression, 'pearson' =
 # RAW-value regression; see RESIL_REG_METHODS).  INTRA-city (within-unit) LOO scatters + CSVs
-# live in func_vs_resilience/intra_city_loss_reg_<method>/; INTER-city (cross-city) LOO
-# scatters, R² matrices and pairwise heatmaps live under cross_city_resi_pred/<label>/
-# (label = the method's paired folder, see CROSS_CITY_METHOD_STD).
+# live in func_vs_resilience/intra_city_loss_reg_<method>/ for BOTH methods; INTER-city
+# (cross-city) LOO scatters, R² matrices and pairwise heatmaps live under
+# cross_city_resi_pred/<label>/ for the methods in CROSS_CITY_METHOD_STD (rank only).
 # (Paths built inline at each write site.)
 OUTPUT_TL_BY_FUNC    = os.path.join(OUTPUT_CHAR_RESIL, 'line_component_timeline_by_func')
 OUTPUT_RC_BY_FUNC    = os.path.join(OUTPUT_CHAR_RESIL, 'line_component_resilience_curves_by_func')
 OUTPUT_TEMP_VS_RESIL = os.path.join(OUTPUT_RESIL, 'temporal_vs_resilience')
+# Numeric tables for the pooled temporal × resilience heatmap, out of the
+# figure folder (same convention as everywhere else).
+OUTPUT_TEMP_VS_RESIL_RAW = os.path.join(OUTPUT_TEMP_VS_RESIL, 'raw_data')
 
 # ── STEP 4 parameters — pooled severity-vs-resilience ───────────────────────────
 
@@ -568,16 +789,23 @@ OUTPUT_DISASTER_VS_RESIL = os.path.join(OUTPUT_RESIL, 'disaster_vs_resilience')
 
 # ── STEP 5 parameters — the cross-city feature tables ───────────────────────────
 
-# The held-out (test-role) city-event in every cross-city LOO fold is re-decomposed at
-# this fixed k; train units keep their own n_behaviors.  Module-level so the tuner
-# (tune_nmf_optuna) mirrors the same test-role convention.
-K_LOO_TEST = 10
+# (A K_LOO_TEST constant used to pin the held-out unit's k at a fixed 10, on the
+# grounds that a brand-new city would have no tuned k.  The rank CV removes that
+# argument — it derives a k from the city's own matrix without any labels — so
+# the held-out unit is now decomposed at its own n_behaviors like every other,
+# and the constant is gone.)
 
 # ── STEP 6 parameters — cross-city prediction ───────────────────────────────────
 
 # Cross-city resilience prediction reconstructed to the CITY level (predicted vs
 # ground-truth cum_loss per city-event).  Only for pearson + multi_city_std.
-OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_resi_pred')
+OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, '3-cross_city_resi_pred')
+# Two sibling views of the same STEP-6 transfer, each with its own raw_data/:
+#   city_total/    the CITY-LEVEL cum_loss reconstruction (one number per unit)
+#   component_rank/ the per-COMPONENT rank transfer (leave-one-out scatters, R²
+#                  matrix, pairwise heatmap; the folder name comes from
+#                  CROSS_CITY_METHOD_STD)
+OUTPUT_CITY_TOTAL = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'city_total')
 
 # Cross-city transfer split — the ONE knob you control.  Lists of city-event codes
 # (e.g. 'BR_Ida', 'FM_Ian'), which are the per-unit `code`/tag below.  The cross-city
@@ -585,25 +813,36 @@ OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_resi_pred')
 # it becomes a pooled leave-one-component-out instead.  A unit in neither list is
 # still decomposed/characterized but excluded from the cross-city step.  Both sides
 # are flexible.  None -> the cross-city step is skipped (with a warning).
-CROSS_CITY_SPLIT = {'train': ['FM_Ian', 'WM_Dorian', 'WM_Isaias', 'LC_Laura'],
-                    'test':  ['BR_Ida']}
+# NOTE: there is no fixed train/test list.  Every cross-city step is
+# leave-one-unit-out: main() builds split={'train': rest, 'test': [held]} per
+# fold, so each retained unit trains every fold it is not the held-out one of.
+# (A CROSS_CITY_SPLIT constant used to live here for the retired downstream
+# tuner; main() never read it, and it was removed to stop it misleading.)
 
 # Cross-city TARGET standardization is PAIRED one-to-one with the method — each method
 # produces exactly ONE version, written to cross_city_resi_pred/<label>/:
-#   'spearman' -> 'within_unit'  (single-city std) -> cross_city_pred_rank/: ranks are
+#   'spearman' -> 'within_unit'  (single-city std) -> component_rank/: ranks are
 #       computed within each unit, so only the level-robust within-unit standardization
 #       is semantically consistent (a pooled z-score of per-unit ranks would fake a
 #       cross-city level).
-#   'pearson'  -> 'pooled_train' (multi-city std) -> cross_city_pred_raw_value/: raw
-#       values standardized on the pooled TRAINING units keep the absolute level, which
-#       the raw-value transfer, the LEVEL / POOLED features and the city-level
-#       reconstruction (resi_pred) all rely on.
+# The 'pooled_train' (multi-city std) mode has no entry here any more, but it is
+# very much alive: raw values standardized on the pooled TRAINING units keep the
+# absolute level, which the LEVEL / POOLED features, the city-level
+# reconstruction (resi_pred) and the STEP-7 curve prediction all rely on — they
+# request it directly rather than through this dict.
 # Modes are cross_city_resilience's target_std values (see its docstring).  The pairing
 # is ENFORCED: analysis_cross_city / analysis_cross_city_pairs raise on a mismatching
 # explicit target_std and resolve target_std=None / subdir=None from this dict.
+# Only the RANK path still produces a cross-city LOO output folder.  The
+# raw-value counterpart (pearson + pooled_train -> cross_city_pred_raw_value)
+# was retired on 2026-08-04: its per-fold scatters and R² matrices duplicated
+# the rank path's story at a standardization the cross-city transfer does not
+# rely on.  The pooled_train standardization ITSELF is untouched — it is still
+# how analysis_cross_city_resi_pred (city-level cum_loss) and the STEP-7 curve
+# prediction call cross_city_resilience; it simply no longer gets a folder of
+# its own per-fold diagnostics.
 CROSS_CITY_METHOD_STD = {
-    'spearman': ('within_unit', 'cross_city_pred_rank'),
-    'pearson':  ('pooled_train', 'cross_city_pred_raw_value'),
+    'spearman': ('within_unit', 'component_rank'),
 }
 
 # LEVEL features: per-event CONSTANT covariates.  Two are carried: the Saffir-Simpson
@@ -647,7 +886,7 @@ CROSS_CITY_MODEL = 'cosine_knn'
 # ── STEP 7 parameters — cross-city curve prediction ─────────────────────────────
 
 # Everything the STEP-7 curve prediction writes goes here.
-OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_curve_pred')
+OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '4-cross_city_curve_pred')
 
 # STEP-7 spatial view: per held city, an interactive slider map of the daily
 # PREDICTED OD flows (forecast curves x component baselines x H), the observed
@@ -656,14 +895,14 @@ OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_curve_pred')
 # is forecast.  One self-contained HTML per city-event under
 # cross_city_od_pred/<code>/.  OD_MAP_TOP_ARCS caps the arcs drawn per
 # day-and-view (kept by |flow|) so the embedded data stays a few MB.
-OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, 'cross_city_od_pred')
+OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, '5-cross_city_od_pred')
 CURVE_OD_MAPS = True
 OD_MAP_TOP_ARCS = 600
 
 # ── STEP 8 parameters — transferability (source selection) ─────────────────────
 
 # Everything analysis_transferability writes goes here.
-OUTPUT_TRANSFER = os.path.join(OUTPUT_PLOTS, 'transferability')
+OUTPUT_TRANSFER = os.path.join(OUTPUT_PLOTS, '6-transferability')
 
 # A unit joins the comparison only with this many usable components; below it
 # neither the OT distance nor the pairwise spearman is meaningful.
@@ -686,11 +925,13 @@ _TRANSFER_GROUP_COLORS = {'func': '#0F4D92', 'dist': '#4C9F70',
 
 # Minimum usable rows per unit-and-metric inside the cross-city engine, for
 # BOTH the STEP-6 analyses and the STEP-7 curve prediction.  The engine
-# default (MIN_ROWS = 8) is lowered because recovery_alpha is NaN for every
-# component whose curve starts at the baseline or never left it — under the
-# default no unit keeps 8 usable α rows and the α row of every STEP-6 output
-# would be empty.  cum_loss is unaffected: every unit has >= 9 usable
-# cum_loss rows, so it clears both thresholds (verified byte-identical).
+# default (MIN_ROWS = 8) guards a WITHIN-city Ridge and is too high here for two
+# separate reasons: recovery_alpha is NaN for every component whose curve starts
+# at the baseline or never left it, so no unit keeps 8 usable α rows; and since
+# the rank CV set k per unit (floor 5), most units no longer HAVE 8 components at
+# all.  EVERY cross_city_resilience call must pass this explicitly — the one that
+# did not (the city-level cum_loss fold) silently inherited 8 and dropped 11 of
+# 13 units from that figure until 2026-08-03.
 CROSS_CITY_MIN_ROWS = 5
 
 
@@ -736,6 +977,137 @@ def _lambda_tag(lambda_ctx):
     return f"lambda{lambda_ctx:g}" if lambda_ctx is not None else "baseline"
 
 
+def _rank_cv_fit_matrix(cfg):
+    """A unit's FIT-window matrix [n_fit_slots × n_OD] — the only data the rank
+    CV touches (no disaster columns, no downstream quantity)."""
+    graphs = load_graphs_trimmed(cfg['graph'], cfg['analysis_days'],
+                                 SLOT_PER_DAY, label=cfg['label'])
+    X_all, n_nor, _m = build_city_matrices(
+        graphs, cfg['window'], cfg['buffer'] + cfg['disaster'],
+        cfg['filter_factor'])
+    n_dis = n_nor + cfg['buffer'] * SLOTS_ACTIVE
+    fit = (None if set(cfg['fit_segments']) == {'normal', 'buffer', 'disaster'}
+           else select_segment_columns(cfg['fit_segments'], n_nor, n_dis,
+                                       X_all.shape[1]))
+    Xt = X_all.T
+    return Xt[fit] if fit is not None else Xt
+
+
+def _rank_cv_k_grid(X):
+    """Candidate ranks: every k up to 12, then coarser.  Starts at k = 1 so a
+    minimum sitting at the left edge is visible as such rather than being an
+    artefact of where the grid begins."""
+    k_max = int(min(RANK_CV_K_MAX, *X.shape))
+    ks = list(range(1, min(13, k_max + 1)))
+    ks += [k for k in (15, 18, 21, 25, 30, 35, 40) if k <= k_max]
+    return sorted(set(ks))
+
+
+def analysis_rank_cv(cfgs):
+    """STEP 1 — how many components does each unit's data support?
+
+    Sweeps k for every registry unit under held-out-entry cross-validation and
+    writes the per-unit curves plus the selection table.  Runs over ALL units,
+    including those EXCLUDED_CODES drops from the later steps: the exclusion is
+    a CONSEQUENCE of this analysis, so its own record has to stay complete.
+
+    Reuses the cached curves when they already cover every unit (the curves do
+    not depend on n_behaviors — see the RANK_CV_CURVES_CSV comment); otherwise
+    computes the missing units and rewrites the cache.
+    """
+    codes = [c['code'] for c in cfgs]
+    cached = (pd.read_csv(RANK_CV_CURVES_CSV)
+              if os.path.exists(RANK_CV_CURVES_CSV) else
+              pd.DataFrame(columns=['code', 'n_od', 'k', 'mean', 'sd']))
+    todo = [c for c in cfgs if c['code'] not in set(cached.get('code', []))]
+    if todo:
+        print(f"  computing rank CV for {len(todo)} unit(s) "
+              f"({len(codes) - len(todo)} cached)")
+        rows = []
+        for cfg in todo:
+            X = _rank_cv_fit_matrix(cfg)
+            print(f"    {cfg['code']}  X_fit {X.shape}", flush=True)
+            for k in _rank_cv_k_grid(X):
+                # Identical seeds at every k, so the curve compares ranks on
+                # the same held-out cells rather than differently-lucky masks.
+                errs = np.array([rank_cv_entry(X, k, cfg['l1_reg'],
+                                               np.random.default_rng(RANK_CV_SEED + r),
+                                               frac=RANK_CV_ENTRY_FRAC)
+                                 for r in range(RANK_CV_REPEATS)], dtype=float)
+                rows.append(dict(code=cfg['code'], n_od=X.shape[1], k=k,
+                                 mean=np.nanmean(errs), sd=np.nanstd(errs)))
+        cached = pd.concat([cached, pd.DataFrame(rows)], ignore_index=True)
+        os.makedirs(OUTPUT_QUALITY_RAW, exist_ok=True)
+        cached.to_csv(RANK_CV_CURVES_CSV, index=False)
+    else:
+        print(f"  reusing cached rank-CV curves for all {len(codes)} units")
+
+    df = cached[cached.code.isin(codes)]
+    recs = {}
+    for cfg in cfgs:
+        s = df[df.code == cfg['code']].sort_values('k')
+        k = s['k'].to_numpy(); m = s['mean'].to_numpy(); sd = s['sd'].to_numpy()
+        i = int(np.nanargmin(m))
+        rec = dict(n_od=int(s['n_od'].iloc[0]), k_current=cfg['n_behaviors'],
+                   k_min=int(k[i]))
+        for name, mult, use_se in RANK_CV_BANDS:
+            tol = mult * (sd[i] / np.sqrt(RANK_CV_REPEATS) if use_se else sd[i])
+            ok = np.where(m <= m[i] + tol)[0]
+            rec[name + '_lo'] = int(k[ok].min())
+            rec[name + '_hi'] = int(k[ok].max())
+        rec['excluded'] = cfg['code'] in EXCLUDED_CODES
+        recs[cfg['code']] = rec
+
+    # Ordered by matrix size: the size effect is the pattern to read off.
+    table = pd.DataFrame(recs).T.sort_values('n_od', ascending=False)
+    curves = {c: (df[df.code == c].sort_values('k')['k'].to_numpy(),
+                  df[df.code == c].sort_values('k')['mean'].to_numpy(),
+                  df[df.code == c].sort_values('k')['sd'].to_numpy())
+              for c in table.index}
+    os.makedirs(OUTPUT_QUALITY, exist_ok=True)
+    vis_nmf_rank_cv(curves, table, band=RANK_CV_FIGURE_BAND,
+                    save_path=os.path.join(OUTPUT_QUALITY, 'nmf_rank_cv.png'))
+    table.to_csv(os.path.join(OUTPUT_QUALITY_RAW, 'nmf_rank_cv_selected.csv'))
+    print(f"  [rank CV] {len(table)} units -> {OUTPUT_QUALITY}; "
+          f"dropped downstream: {', '.join(sorted(EXCLUDED_CODES))}")
+
+
+def analysis_decomposition_quality(label, code, X_all, W, H, fit_time_cols):
+    """Per-unit decomposition-quality check (see the OUTPUT_QUALITY
+    comment for the three metric families; FIT-window only, the disaster
+    period is out of scope by design).  Saves the unit's figure and returns
+    the summary row for the cross-city dashboard."""
+    q = nmf_quality_metrics(X_all.T, W, H, fit_time_cols,
+                            min_comp_frac=NMF_MIN_COMP_FRAC)
+    os.makedirs(OUTPUT_QUALITY, exist_ok=True)
+    vis_nmf_quality(
+        q,
+        title=f'{label} [{code}]: NMF decomposition quality, fit window '
+              f'(k = {W.shape[1]})',
+        save_path=os.path.join(OUTPUT_QUALITY, f'nmf_quality_{code}.png'))
+    print(f"  Quality (fit window): dist_err={q['dist_err_mean']:.4f}  "
+          f"rel_err={q['rel_err']:.4f}  "
+          f"comps below {NMF_MIN_COMP_FRAC:.0%}: {q['n_below']}/{W.shape[1]}")
+    return dict(code=code, k=W.shape[1],
+                dist_err_mean=q['dist_err_mean'],
+                rel_err=q['rel_err'], n_below=q['n_below'])
+
+
+def analysis_decomposition_quality_summary(rows):
+    """Cross-city quality dashboard + raw CSV, after every unit is decomposed."""
+    df = pd.DataFrame(rows).set_index('code')
+    os.makedirs(OUTPUT_QUALITY_RAW, exist_ok=True)
+    df.to_csv(os.path.join(OUTPUT_QUALITY_RAW, 'nmf_quality_metrics.csv'))
+    vis_nmf_quality_summary(
+        df, NMF_MIN_COMP_FRAC,
+        save_path=os.path.join(OUTPUT_QUALITY, 'nmf_quality_summary.png'))
+    bad = df[df['n_below'] > 0]
+    flag = (f"{len(bad)} unit(s) VIOLATE the component-count rule: "
+            + ", ".join(f"{c} ({int(n)})" for c, n in bad['n_below'].items())
+            if len(bad) else "all units satisfy the component-count rule")
+    print(f"\n  [decomposition quality] {flag} -> {OUTPUT_QUALITY}")
+
+
 def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
                                  first_day_disaster, tag):
     """Component temporal and spatial characteristics.  Plots the full-window W
@@ -743,17 +1115,18 @@ def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
     red, black dashed line at landfall).  n_nor marks the end of the clean
     normal columns and n_dis the disaster start, so [n_nor, n_dis) is the
     buffer."""
-    os.makedirs(OUTPUT_TEMPORAL, exist_ok=True)
+    os.makedirs(OUTPUT_TEMPORAL_HM, exist_ok=True)
+    os.makedirs(OUTPUT_TEMPORAL_CV, exist_ok=True)
     vis_heatmap_temporal_signature(
         W, first_day=first_day_normal, show_days=True,
         slots_per_day=SLOTS_ACTIVE, interval_hours=_INTERVAL_HOURS,
-        output_dir=OUTPUT_TEMPORAL, tag=tag,
+        output_dir=OUTPUT_TEMPORAL_HM, tag=tag,
     )
     vis_line_nmf_component_timeline(
         W[:n_nor], W[n_dis:], W_buffer=W[n_nor:n_dis],
         first_day_normal=first_day_normal, first_day_disaster=first_day_disaster,
         slots_per_day=SLOTS_ACTIVE,
-        output_dir=OUTPUT_TEMPORAL, tag=tag,
+        output_dir=OUTPUT_TEMPORAL_CV, tag=tag,
     )
 
 
@@ -856,11 +1229,12 @@ def analysis_od_function(label, tag, H, mapping, weights, landuse,
     functional_features(M, AXIS_CATEGORIES).to_csv(
         os.path.join(OUTPUT_FUNC_HM_RAW, f'component_functionality{tag}.csv'))
 
-    # Functional-entropy distribution across components.  entropy_from / _to are
-    # the Shannon entropy of each component's outflow (row sums) and inflow
-    # (column sums) of the SAME heatmap M (categories include 'Mix'); lower =
-    # more functionally concentrated.  λ is in the filename for cross-strength
-    # comparison.
+    # Functional-entropy distribution across components.  `entropy` is the
+    # Shannon entropy of the MERGED exposure (outflow row sums + inflow column
+    # sums) of the SAME heatmap M (categories include 'Mix'); lower = more
+    # functionally concentrated.  The x axis is fixed to [0, ln K] so every
+    # city-event's histogram is on one scale.  λ is in the filename for
+    # cross-strength comparison.
     lambda_tag = _lambda_tag(lambda_ctx)
     ent = component_function_entropy(M)
     os.makedirs(OUTPUT_FUNC_ENT_RAW, exist_ok=True)
@@ -877,88 +1251,170 @@ def analysis_od_function(label, tag, H, mapping, weights, landuse,
 
 
 def analysis_time_function_corr(feats, tag):
-    """Time × function correlation block.  Computes Spearman between TIME_COLS
-    and FUNC_COLS across one city's components, then plots the heatmap, the
-    top-pair scatter, and the categorical peak-slot bar chart."""
+    """Time × function correlation block.  One heatmap: Spearman across the
+    city's components between every CONTINUOUS temporal feature and the MERGED
+    functional shares (FUNC_MERGED_COLS).  Rows are weekday_ratio, the four
+    day-period band intensities (graded, replacing the old argmax-grouped bar
+    charts), and the per-slot shares; no 'weekend' row — weekday_ratio already
+    carries that axis.  At the 2 h slot width the night band equals the
+    20-22h slot, so those two rows are identical by construction."""
     os.makedirs(OUTPUT_FUNC_VS_TEMP, exist_ok=True)
-    rho, pval = time_function_correlation(feats, TIME_COLS, FUNC_COLS)
-    # Split-cell heatmap, same style as the resilience block.  No single-cell
-    # time columns here (weekday_ratio is the row).
-    vis_heatmap_corr_split(
+    slot_rows = [c for c in feats.columns if re.fullmatch(r'\d+-\d+h', c)]
+    time_rows = TIME_COLS + [name for name, _, _ in PERIOD_BANDS] + slot_rows
+    rho, pval = time_function_correlation(_with_merged_func(feats), time_rows,
+                                          FUNC_MERGED_COLS)
+    # Blank bands separate the three row families: the weekday/weekend ratio,
+    # the day-period band intensities, and the per-slot shares.
+    vis_heatmap_corr(
         rho, pval, time_cols=[], categories=SF_CATEGORIES,
+        row_gaps=(len(TIME_COLS), len(TIME_COLS) + len(PERIOD_BANDS)),
         save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'heatmap_time_function_corr{tag}.png'),
     )
-    pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
-    vis_scatter_component_features(
-        feats, pairs,
-        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'scatter_time_function_top_pairs{tag}.png'),
+
+
+def analysis_time_function_corr_pooled(feats_by_city):
+    """The time × function heatmap over EVERY city-event's components at once.
+
+    Same rows, columns and layout as the per-city figure; only the sample
+    changes.  Pooling raw values would let the cities with the largest feature
+    or share magnitudes dominate every cell, so each column is first
+    rank-transformed WITHIN its own city-event and the rank is normalised to
+    (0, 1) by that unit's component count — the units carry k = 9, 10 or 11
+    components, and without the normalisation a rank of 9 would mean
+    'the largest' in one unit and 'second largest' in another.  After that
+    transform every unit contributes the same uniform marginal on every column,
+    so a cell reflects only the WITHIN-city co-ordering of the two features,
+    pooled across units; the cross-city level and scale differences of both the
+    features and the functional shares are gone by construction.  The reported
+    coefficient is Spearman over the pooled normalised ranks.
+
+    This is the same level-robust rank convention the cross-city transfer uses
+    ('within_unit' standardization, see cross_city_resilience)."""
+    codes = list(feats_by_city)
+    if len(codes) < 2:
+        print("  [pooled time×function] fewer than 2 units; skipping.")
+        return None
+    slot_rows = [c for c in feats_by_city[codes[0]].columns
+                 if re.fullmatch(r'\d+-\d+h', c)]
+    time_rows = TIME_COLS + [name for name, _, _ in PERIOD_BANDS] + slot_rows
+    cols = time_rows + FUNC_MERGED_COLS
+
+    ranked = []
+    for c in codes:
+        t = _with_merged_func(feats_by_city[c])[cols].astype(float)
+        n = len(t)
+        # Normalised within-unit rank in (0, 1); NaN stays NaN so a unit missing
+        # a feature drops only that cell's rows, exactly as the per-city figure.
+        ranked.append(t.rank(axis=0, na_option='keep')
+                       .sub(0.5).div(n))
+    pooled = pd.concat(ranked, ignore_index=True)
+
+    rho, pval = time_function_correlation(pooled, time_rows, FUNC_MERGED_COLS,
+                                          method='spearman')
+    os.makedirs(OUTPUT_FUNC_VS_TEMP, exist_ok=True)
+    vis_heatmap_corr(
+        rho, pval, time_cols=[], categories=SF_CATEGORIES,
+        row_gaps=(len(TIME_COLS), len(TIME_COLS) + len(PERIOD_BANDS)),
+        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP,
+                               'heatmap_time_function_corr_ALL.png'),
     )
-    vis_bar_function_by_peakslot(
-        feats, SF_CATEGORIES,
-        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'bar_function_by_peakslot{tag}.png'),
+    os.makedirs(OUTPUT_FUNC_VS_TEMP_RAW, exist_ok=True)
+    rho.to_csv(os.path.join(OUTPUT_FUNC_VS_TEMP_RAW,
+                            'heatmap_time_function_corr_ALL_rho.csv'))
+    pval.to_csv(os.path.join(OUTPUT_FUNC_VS_TEMP_RAW,
+                             'heatmap_time_function_corr_ALL_pval.csv'))
+    print(f"  [pooled time×function] {len(pooled)} components from "
+          f"{len(codes)} city-events -> {OUTPUT_FUNC_VS_TEMP}")
+    return rho
+
+
+def analysis_time_resilience_corr_pooled(feats_by_city):
+    """The time × RESILIENCE heatmap over every city-event's components at
+    once — the resilience twin of analysis_time_function_corr_pooled, under the
+    same within-unit rank normalisation (see that docstring for why raw pooling
+    would let the large-magnitude units dominate).  The resilience metrics are
+    normalised within-unit exactly like the temporal features, so a cell reads
+    'do the components that lean toward this time-of-day rhythm also rank high
+    on this loss metric, within their own city' pooled across units."""
+    codes = list(feats_by_city)
+    if len(codes) < 2:
+        print("  [pooled time×resilience] fewer than 2 units; skipping.")
+        return None
+    slot_rows = [c for c in feats_by_city[codes[0]].columns
+                 if re.fullmatch(r'\d+-\d+h', c)]
+    time_rows = TIME_COLS + [name for name, _, _ in PERIOD_BANDS] + slot_rows
+    cols = time_rows + list(RES_COLS)
+
+    ranked = []
+    for c in codes:
+        t = feats_by_city[c][cols].astype(float)
+        n = len(t)
+        # NaN stays NaN (recovery_alpha is NaN when the fit fails its quality
+        # gate), so those components drop out of that column's pairs only.
+        ranked.append(t.rank(axis=0, na_option='keep').sub(0.5).div(n))
+    pooled = pd.concat(ranked, ignore_index=True)
+
+    rho, pval = time_function_correlation(pooled, time_rows, list(RES_COLS),
+                                          method='spearman')
+    os.makedirs(OUTPUT_TEMP_VS_RESIL, exist_ok=True)
+    vis_heatmap_corr(
+        rho, pval, time_cols=[], categories=[], extra_cols=RES_COLS,
+        row_gaps=(len(TIME_COLS), len(TIME_COLS) + len(PERIOD_BANDS)),
+        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL,
+                               'heatmap_time_resilience_corr_ALL.png'),
     )
-    vis_bar_function_by_peakslot(
-        feats, SF_CATEGORIES,
-        group_col='peak_period', label_col='peak_period_label',
-        save_path=os.path.join(OUTPUT_FUNC_VS_TEMP, f'bar_function_by_peakperiod{tag}.png'),
-    )
+    os.makedirs(OUTPUT_TEMP_VS_RESIL_RAW, exist_ok=True)
+    rho.to_csv(os.path.join(OUTPUT_TEMP_VS_RESIL_RAW,
+                            'heatmap_time_resilience_corr_ALL_rho.csv'))
+    pval.to_csv(os.path.join(OUTPUT_TEMP_VS_RESIL_RAW,
+                             'heatmap_time_resilience_corr_ALL_pval.csv'))
+    print(f"  [pooled time×resilience] {len(pooled)} components from "
+          f"{len(codes)} city-events -> {OUTPUT_TEMP_VS_RESIL}")
+    return rho
 
 
 def analysis_resilience_corr(feats, tag, lambda_ctx=None, methods=RESIL_CORR_METHODS):
     """Resilience correlation block.  Draws the RES_COLS × feature heatmap once per
     correlation method in `methods`, each into its own
-    heatmap_resilience_corr_<method> subfolder of func_vs_resilience (cell =
-    share_from/share_to split per category, plus single-cell mean_distance /
-    median_income on the RIGHT; lambda_ctx tags the filename).  The top-pair scatter
-    and the temporal_vs_resilience figures (weekday_ratio heatmap, peak-slot /
-    peak-period bars) use the FIRST method (Spearman by default).  The per-function
-    curve stacks are drawn separately by analysis_func_ordered_lines."""
+    heatmap_resilience_corr_<method> subfolder of func_vs_resilience (one cell per
+    MERGED functional share func_<cat>, plus single-cell mean_distance /
+    median_income on the RIGHT; lambda_ctx tags the filename).  The
+    temporal_vs_resilience heatmap follows the time × function convention
+    instead: the FULL continuous temporal feature set as rows (weekday_ratio,
+    the day-period band intensities, the per-slot shares — the hard argmax
+    groupings that used to drive peak-slot/peak-period bars are retired) against
+    the resilience metrics, Spearman.  The per-function curve stacks are drawn
+    separately by analysis_func_ordered_lines."""
     os.makedirs(OUTPUT_FUNC_VS_RESIL, exist_ok=True)
     lambda_tag = _lambda_tag(lambda_ctx)
-    feat_cols = TIME_COLS + FUNC_COLS + EXTRA_CORR_COLS
+    merged = _with_merged_func(feats)
+    feat_cols = TIME_COLS + FUNC_MERGED_COLS + EXTRA_CORR_COLS
 
-    # Per correlation method, into its own heatmap_resilience_corr_<method> folder:
-    #   (1) the functional-share heatmap — each category cell stacks share_from
-    #       (upper) / share_to (lower); mean_distance and median_income are single
-    #       cells on the RIGHT; rows coloured by their own max |rho|;
-    #   (2) the top-|corr| pair scatter — RANK-transformed for spearman, RAW values
-    #       for pearson, so each scatter matches its heatmap's correlation.
-    rho_by_method = {}
+    # Per correlation method, into its own heatmap_resilience_corr_<method>
+    # folder: the functional heatmap — one cell per merged category share,
+    # mean_distance and median_income as single cells on the RIGHT, rows
+    # coloured by their own max |rho|.
     for method in methods:
-        rho, pval = time_function_correlation(feats, RES_COLS, feat_cols, method=method)
-        rho_by_method[method] = (rho, pval)
+        rho, pval = time_function_correlation(merged, RES_COLS, feat_cols, method=method)
         out_dir = f'{OUTPUT_RESIL_CORR_HM_BASE}_{method}'
-        vis_heatmap_corr_split(
+        vis_heatmap_corr(
             rho, pval, time_cols=[], categories=SF_CATEGORIES,
             extra_cols=EXTRA_CORR_COLS,
             save_path=os.path.join(out_dir,
                                    f'heatmap_resilience_corr_{lambda_tag}{tag}.png'),
         )
-        pairs = rho.abs().stack().sort_values(ascending=False).index[:4].tolist()
-        vis_scatter_component_features(
-            feats, pairs, rank=(method == 'spearman'),
-            save_path=os.path.join(
-                out_dir, f'scatter_resilience_top_pairs_{lambda_tag}{tag}.png'),
-        )
 
-    # The temporal_vs_resilience figures (weekday_ratio heatmap + peak bars) use
-    # the first method's correlation (Spearman by default).
-    rho, pval = rho_by_method[methods[0]]
+    # temporal × resilience: rows/gaps exactly as heatmap_time_function_corr,
+    # columns the resilience metrics.
     os.makedirs(OUTPUT_TEMP_VS_RESIL, exist_ok=True)
-    # The weekday_ratio column of the same correlation, on its own as a single
-    # temporal feature against the resilience metrics.
-    vis_heatmap_corr_split(
-        rho, pval, time_cols=TIME_COLS, categories=[],
-        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL, f'heatmap_weekday_ratio_resilience{tag}.png'),
-    )
-    vis_bar_resilience_by_peakslot(
-        feats, RES_COLS,
-        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL, f'bar_resilience_by_peakslot{tag}.png'),
-    )
-    vis_bar_resilience_by_peakslot(
-        feats, RES_COLS,
-        group_col='peak_period', label_col='peak_period_label',
-        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL, f'bar_resilience_by_peakperiod{tag}.png'),
+    slot_rows = [c for c in feats.columns if re.fullmatch(r'\d+-\d+h', c)]
+    time_rows = TIME_COLS + [name for name, _, _ in PERIOD_BANDS] + slot_rows
+    rho, pval = time_function_correlation(merged, time_rows, RES_COLS)
+    vis_heatmap_corr(
+        rho, pval, time_cols=[], categories=[], extra_cols=RES_COLS,
+        row_gaps=(len(TIME_COLS), len(TIME_COLS) + len(PERIOD_BANDS)),
+        save_path=os.path.join(OUTPUT_TEMP_VS_RESIL,
+                               f'heatmap_time_resilience_corr{tag}.png'),
     )
 
 
@@ -1140,7 +1596,7 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
 
 def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
                         merge_func_directions=True,
-                        methods=RESIL_REG_METHODS, split=None,
+                        methods=tuple(CROSS_CITY_METHOD_STD), split=None,
                         target_std=None, subdir=None, level_feature_cols=(),
                         model='ridge', pooled_feature_cols=(),
                         min_rows=CROSS_CITY_MIN_ROWS):
@@ -1389,7 +1845,8 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
             fold, RES_COLS, feature_cols, rank=False,
             split={'train': rest, 'test': [held]}, target_std=target_std,
             level_feature_cols=LEVEL_FEATURE_COLS, model='cosine_knn',
-            pooled_feature_cols=POOLED_FEATURE_COLS)
+            pooled_feature_cols=POOLED_FEATURE_COLS,
+            min_rows=CROSS_CITY_MIN_ROWS)
         pm = pred.get(held, {}).get('cum_loss')
         if pm is None:
             return None
@@ -1413,8 +1870,9 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     #          scale is learned nested-LOO on the other training cities (never the held city).
     #   city — method (3): a city-level cosine-kNN over the aggregated `_city_vec`, predicting
     #          GT directly (bounded to the training cities' GT; no per-component sigma).
-    # NOTE: the M1 calibration is estimated from only |rest| (=4) cities, so it is unstable
-    # (its std is outlier-driven) — the numbers beat the baseline but stay n=5-fragile.
+    # NOTE: the M1 calibration is estimated from the |rest| training cities of each
+    # fold, so its std is outlier-driven and the calibration stays fragile at this
+    # sample size.
     rows = []
     for held in codes:
         rest = [c for c in codes if c != held]
@@ -1461,24 +1919,24 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         return
     res = pd.DataFrame(rows).set_index('code')
     res = res.reindex([c for c in codes if c in res.index])
-    raw_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'raw_data')
+    raw_dir = os.path.join(OUTPUT_CITY_TOTAL, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
     res.to_csv(os.path.join(raw_dir, 'cross_city_resi_pred.csv'))
     # The bar omits the legacy kNN(σ) prediction (still in the CSV); it shows the two
     # decomposition-based predictions and the decomposition-free baseline.
     vis_bar_cross_city_resi_pred(
-        res, save_path=os.path.join(OUTPUT_CROSS_CITY_RESI_PRED,
+        res, save_path=os.path.join(OUTPUT_CITY_TOTAL,
                                     'bar_cross_city_resi_pred.png'),
         pred_cols=(('Decompose + component-wise', 'cum_loss_pred_m1', 'D+comp'),
                    ('Decompose + city-wise', 'cum_loss_pred_city', 'D+city')),
         baseline_label='City-wise',
         title='City-level cum_loss: ground truth vs decomposition-based predictions '
               'vs city-wise baseline (global-IWF features, pearson)')
-    print(f"  [cross_city_resi_pred] -> {OUTPUT_CROSS_CITY_RESI_PRED} "
+    print(f"  [cross_city_resi_pred] -> {OUTPUT_CITY_TOTAL} "
           f"({len(res)} city-events)")
 
 
-def analysis_cross_city_pairs(feats_train, feats_test, codes, method='pearson',
+def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
                               target_std=None, subdir=None, level_feature_cols=(),
                               model='ridge', pooled_feature_cols=(),
                               min_rows=CROSS_CITY_MIN_ROWS):
@@ -1493,6 +1951,11 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='pearson',
     paired label).  Returns the matrix."""
     # Defensive guard: same pairing rule as analysis_cross_city (std AND output label),
     # checked up front.
+    if method not in CROSS_CITY_METHOD_STD:
+        raise ValueError(
+            f"analysis_cross_city_pairs: method '{method}' has no cross-city "
+            f"output (CROSS_CITY_METHOD_STD lists "
+            f"{sorted(CROSS_CITY_METHOD_STD)}); the raw-value path was retired")
     expected_std, std_label = CROSS_CITY_METHOD_STD[method]
     if target_std is not None and target_std != expected_std:
         raise ValueError(
@@ -1870,7 +2333,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     # city day-0 value that anchors the single city logistic.  TRAINING cities
     # contribute their vector and their city-level α from the TRAIN role (own-k
     # tables) — the same role convention as the component transfer — while the
-    # held city enters only through its k=K_LOO_TEST vector and its day-0 anchor.
+    # held city enters only through its own-k vector and its day-0 anchor.
     def _city_vec(feats):
         w = feats['weight_normal'].to_numpy(dtype=float); sw = w.sum()
         w = w / sw if sw > 0 else np.full(len(w), 1.0 / len(w))
@@ -2514,8 +2977,22 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         os.path.join(OUTPUT_CURVE_PRED, 'curve_pred_metrics.csv'), index=False)
     pd.DataFrame(curve_rows).to_csv(
         os.path.join(raw_dir, 'city_curves_by_method.csv'), index=False)
-    pd.DataFrame(par_rows).to_csv(
-        os.path.join(raw_dir, 'component_params_gt_vs_pred.csv'), index=False)
+    par_df = pd.DataFrame(par_rows)
+    par_df.to_csv(os.path.join(raw_dir, 'component_params_gt_vs_pred.csv'),
+                  index=False)
+    # The three publication figures behind the forecast's mechanism, drawn from
+    # that same table: the rank channel on its own, what the quantile mapping
+    # makes of it, and the rate/level relation the plateau inversion exploits.
+    if not par_df.empty:
+        vis_rank_pred_vs_true(
+            par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                           'rank_pred_vs_true.png'))
+        vis_rank_to_cumloss_qm(
+            par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                           'rank_to_cumloss_qm.png'))
+        vis_alpha_level_relationship(
+            par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                           'alphaL_relationship_softreg.png'))
     # Accuracy bar: per city-event, the CITY-LEVEL curve error of every method line,
     # so the four lines are compared on the quantity the analysis actually optimises
     # (the whole-curve MAE) rather than on any single fitted parameter.  Methods are
@@ -2541,12 +3018,21 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    # ── STEP 1 — Load every unit and classify land use once ────────────────────
+    # ── STEP 1 — How many components does each unit support? ───────────────────
+    # Runs over EVERY registry unit; its verdict is what EXCLUDED_CODES encodes.
+    print("\n── Rank cross-validation (all registry units) ──")
+    analysis_rank_cv(CITY_EVENTS)
+
+    # ── STEP 2 — Load the retained units and classify land use once ────────────
+    # EXCLUDED_CODES drop out here, so nothing downstream — not the pooled
+    # land-use classification, not the cross-city steps — sees them.
+    active = [c for c in CITY_EVENTS if c['code'] not in EXCLUDED_CODES]
+    print(f"\n── {len(active)} of {len(CITY_EVENTS)} units retained ──")
 
     # Load every unit's geometry first, because the global land-use
     # classification below pools over ALL units' block groups.
     units = {}   # code -> everything the later steps need, filled incrementally
-    for cfg in CITY_EVENTS:
+    for cfg in active:
         label, code = cfg['label'], cfg['code']
         units[code] = dict(
             label=label, key=cfg['key'], tag='_' + code, cfg=cfg,
@@ -2593,13 +3079,20 @@ def main():
             # Kept for the cross-city LOO, which re-decomposes the held-out unit at k=10.
             X_all=X_all, fit_time_cols=fit_time_cols)
 
+    # ── STEP 3b — Decomposition-quality check, retained units + summary ───────
+    quality_rows = [
+        analysis_decomposition_quality(u['label'], code, u['X_all'], u['W'],
+                                       u['H'], u['fit_time_cols'])
+        for code, u in units.items()]
+    analysis_decomposition_quality_summary(quality_rows)
+
     # ── STEP 3 — Within-city analyses: characterise each unit's components ──
 
     feats_by_city = {}   # short code -> per-component feats, for the cross-city test
     loo_by_city   = {}   # short code -> within-city LOO R² (for the comparison)
 
     # Each unit's per-component feats + within-unit LOO are keyed by its city-event
-    # code ('BR_Ida', 'WM_Dorian', ...), which is what CROSS_CITY_SPLIT lists.
+    # code ('BR_Ida', 'WM_Dorian', ...), the key the cross-city folds address.
     for code, u in units.items():
         label, key, tag = u['label'], u['key'], u['tag']
         gdf, H, mapping, weights, W = u['gdf'], u['H'], u['mapping'], u['weights'], u['W']
@@ -2673,6 +3166,15 @@ def main():
         feats_by_city[code] = feats
         loo_by_city[code]   = {m: s['loo_r2'] for m, s in reg_summaries.items()}
 
+    # Cross-city pooled heatmaps: the same figures as the per-city ones,
+    # computed on every unit's components at once under the within-unit rank
+    # normalization (see analysis_time_function_corr_pooled).
+    if feats_by_city:
+        print("\n── Time × function correlation, ALL city-events pooled ──")
+        analysis_time_function_corr_pooled(feats_by_city)
+        print("\n── Time × resilience correlation, ALL city-events pooled ──")
+        analysis_time_resilience_corr_pooled(feats_by_city)
+
     # ── STEP 4 — Disaster (arrival intensity) vs resilience, ALL city-events pooled ──
     # One scatter panel per RES_COLS metric: x = the component's event-level
     # Saffir-Simpson arrival intensity (ss_intensity), y = the raw metric; points
@@ -2693,30 +3195,32 @@ def main():
                                    'intensity_vs_resilience_raw.csv'), index=False)
         print(f"  -> {OUTPUT_DISASTER_VS_RESIL}")
 
-    # ── STEP 5 — Build the cross-city feature tables (two roles per unit) ──
-    # Each unit takes a turn as the held-out test (pooled others -> predict it).  The
-    # HELD-OUT (test) unit is re-decomposed at k=K_LOO_TEST=10 (module constant, shared
-    # with the tuner; train units keep their own n_behaviors via feats_by_city).
+    # ── STEP 5 — Build the cross-city feature tables ──────────────────────────
+    # Each unit takes a turn as the held-out test and EVERY other retained unit
+    # trains that fold (split={'train': rest, 'test': [held]}) — there is no
+    # fixed train/test list.  Every unit, in either role, is decomposed at its
+    # own rank-CV k, so the two roles now share one decomposition.
     # Each method runs its PAIRED target standardization (CROSS_CITY_METHOD_STD:
     # spearman->single-city, pearson->multi-city), into cross_city_resi_pred/<label>/.
     if feats_by_city:
         all_codes = list(units)
-        # Build the cross-city feats with the SAME global classification as STEP 1
-        # (cc_lookups).  Both roles are rebuilt here — train role at each unit's
-        # own k, test role at k=K_LOO_TEST — because the two roles decompose the
-        # same matrix at different k (the within-city feats keep the unit's k only).
-        print(f"\n── Cross-city: building feats (train @ per-unit k, test @ k={K_LOO_TEST}) ──")
+        # Built here rather than reused from the within-city step so the SAME
+        # global classification as STEP 2 (cc_lookups) labels every unit.
+        print("\n── Cross-city: building feats (every unit at its own rank-CV k) ──")
         cc_train, cc_test = {}, {}
-        dec_test = {}   # code -> the (W, H) of the k=K_LOO_TEST test decomposition (STEP 7)
+        dec_test = {}   # code -> the (W, H) behind the feats, for STEP 7
         for code in all_codes:
             u = units[code]
-            print(f"  [cross-city feats] {u['label']} [{code}]")
-            cc_train[code], _ = _build_cross_city_feats(
+            print(f"  [cross-city feats] {u['label']} [{code}] k={u['cfg']['n_behaviors']}")
+            feats_cc, dec_test[code] = _build_cross_city_feats(
                 u['cfg'], u['X_all'], u['n_nor'], u['n_dis'], u['mapping'],
-                u['gdf'], u['fit_time_cols'], u['cfg']['n_behaviors'], cat_lookup=cc_lookups[code])
-            cc_test[code], dec_test[code] = _build_cross_city_feats(
-                u['cfg'], u['X_all'], u['n_nor'], u['n_dis'], u['mapping'],
-                u['gdf'], u['fit_time_cols'], K_LOO_TEST, cat_lookup=cc_lookups[code])
+                u['gdf'], u['fit_time_cols'], u['cfg']['n_behaviors'],
+                cat_lookup=cc_lookups[code])
+            # Both roles now read the SAME decomposition: the test-role k used to
+            # be pinned at a fixed K_LOO_TEST because a brand-new city had no
+            # tuned k, but the rank CV supplies one from the city's own matrix
+            # with no labels, so the held-out unit uses its own k like any other.
+            cc_train[code] = cc_test[code] = feats_cc
 
         # ── STEP 6 — Cross-city prediction (LOO transfer, pairwise, reconstruction) ──
         for method, (std_mode, std_label) in CROSS_CITY_METHOD_STD.items():

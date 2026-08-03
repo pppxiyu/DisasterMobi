@@ -8,6 +8,7 @@ contextily is imported for the archive-only vis_map_spatial_factors basemap.
 """
 import os
 import numpy as np
+from scipy.stats import rankdata, spearmanr, pearsonr
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -681,45 +682,52 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
 def vis_hist_function_entropy(entropy_df, lambda_ctx=None, max_entropy=None,
                               title=None, save_path=None, nbins=12):
     """
-    Distribution, ACROSS components, of per-component functional entropy — two
-    overlaid histograms: OUTFLOW (entropy_from) and INFLOW (entropy_to).  Each
-    component contributes one outflow value and one inflow value
-    (component_function_entropy, computed from the functionality-heatmap M); the
-    spread of those values over the components is the plotted distribution.
+    Distribution, ACROSS components, of per-component functional entropy — one
+    histogram of the MERGED exposure entropy (component_function_entropy,
+    computed from the functionality-heatmap M with the outflow and inflow
+    marginals summed before H is taken, matching func_<cat> = share_from_<cat>
+    + share_to_<cat>).  The spread of those values over the components is the
+    plotted distribution.
 
     LOWER entropy = the component's flow is concentrated on fewer functions (more
     functionally specialised); HIGHER = spread across many.  A dashed line marks
-    each side's mean, a rug shows the individual components, and (if max_entropy
-    = ln K is given) a grey dotted line marks the theoretical maximum.
+    the mean, a rug shows the individual components, and a grey dotted line
+    marks the theoretical maximum ln K.
+
+    The x axis is FIXED to the full theoretical range [0, max_entropy] rather
+    than each unit's own data range, so the figures of different city-events sit
+    on one scale and can be compared directly.  Without max_entropy it falls
+    back to the observed range (single-unit use only).
 
     lambda_ctx (context-aware strength) is shown in the title; the caller encodes
     it in save_path so runs at different strengths can be compared.
 
     Returns the Matplotlib Figure.
     """
-    out_ = np.asarray(entropy_df['entropy_from'].dropna(), dtype=float)
-    in_  = np.asarray(entropy_df['entropy_to'].dropna(),   dtype=float)
-    allv = (np.concatenate([out_, in_]) if (out_.size + in_.size)
-            else np.array([0.0, 1.0]))
-    bins = (np.linspace(allv.min(), allv.max(), nbins + 1)
-            if np.ptp(allv) > 0 else nbins)
+    vals = np.asarray(entropy_df['entropy'].dropna(), dtype=float)
+    if max_entropy is not None:
+        lo, hi = 0.0, float(max_entropy)
+    elif vals.size and np.ptp(vals) > 0:
+        lo, hi = float(vals.min()), float(vals.max())
+    else:
+        lo, hi = 0.0, 1.0
+    bins = np.linspace(lo, hi, nbins + 1)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    for vals, color, lbl in ((out_, '#D32F2F', 'outflow (from origin)'),
-                             (in_,  '#1976D2', 'inflow (to destination)')):
-        if vals.size == 0:
-            continue
-        ax.hist(vals, bins=bins, color=color, alpha=0.45, edgecolor='white',
+    color = '#1976D2'
+    if vals.size:
+        ax.hist(vals, bins=bins, color=color, alpha=0.55, edgecolor='white',
                 linewidth=0.6,
-                label=f'{lbl}   mean={vals.mean():.2f}, n={vals.size}')
+                label=f'merged exposure   mean={vals.mean():.2f}, n={vals.size}')
         sns.rugplot(x=vals, ax=ax, color=color, height=0.06, alpha=0.8, lw=1.4)
         ax.axvline(vals.mean(), color=color, linestyle='--', linewidth=1.6)
+    ax.set_xlim(lo, hi)
 
     if max_entropy is not None:
         ax.axvline(max_entropy, color='grey', linestyle=':', linewidth=1.4)
         ax.text(max_entropy, ax.get_ylim()[1] * 0.98,
                 f'  max = ln K = {max_entropy:.2f}', color='grey', fontsize=9,
-                va='top', ha='left', rotation=90)
+                va='top', ha='right', rotation=90)
 
     ttl = title or 'Functional entropy distribution'
     if lambda_ctx is not None:
@@ -815,76 +823,89 @@ def vis_bar_component_income(income_df, weights=None, title=None, save_path=None
     return fig
 
 
-def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
-                           categories=None, save_path=None,
-                           cmap='RdBu_r', annot_fs=17, extra_cols=None):
+def vis_heatmap_corr(rho, pval=None, time_cols=None,
+                     categories=None, save_path=None,
+                     cmap='RdBu_r', annot_fs=17, extra_cols=None,
+                     row_gaps=(), row_gap_size=0.45):
     """
-    Row-scaled correlation heatmap with split functional cells.  Rows are any
-    metric set (resilience metrics, weekday_ratio, …).
+    Row-scaled correlation heatmap.  Rows are any metric set (resilience
+    metrics, weekday_ratio, …); every column renders as ONE solid cell.
 
-    Single-value columns render as one solid cell and can sit on the LEFT
+    Functional categories are read from the MERGED column func_<cat>
+    (= share_from_<cat> + share_to_<cat>, the total share of the component's
+    flow touching that function).  The merge happens upstream, before the
+    correlation is computed, so one number per category describes the whole
+    relationship — the earlier from/to split reported two correlations of two
+    halves of the same quantity, which invited reading a direction difference
+    into what is one functional exposure.  Single-value columns sit on the LEFT
     (time_cols) or on the RIGHT after the categories (extra_cols, e.g. a spatial
-    or socioeconomic feature).  Each category column packs share_from_<cat> in the
-    UPPER half-cell and share_to_<cat> in the LOWER half-cell, with value labels
-    (and significance stars) for both.  Each row is coloured by its own max |rho|
-    over its displayed cells, so rows are independent and no colorbar is drawn —
+    or socioeconomic feature).  Each row is coloured by its own max |rho| over
+    its displayed cells, so rows are independent and no colorbar is drawn —
     colours compare within a row only, numbers compare everywhere.
 
     Parameters
     ----------
     rho, pval  : DataFrames [metric rows × feature columns]; columns must contain
-                 time_cols, extra_cols, and share_from_<cat> / share_to_<cat> for
-                 every category.
+                 time_cols, extra_cols, and func_<cat> for every category.
     time_cols  : list[str] single-cell columns shown on the LEFT (may be empty).
-    categories : list[str] functional category names (split cells, e.g. SF_CATEGORIES).
+    categories : list[str] functional category names (e.g. SF_CATEGORIES); each
+                 reads the merged func_<cat> column.
     extra_cols : list[str] single-cell columns shown on the RIGHT, after the
                  categories (e.g. mean_distance, median_income); may be empty.
+    row_gaps   : iterable[int] row indices BEFORE which a blank band is left, to
+                 separate groups of rows that are read as different families
+                 (e.g. a ratio, then day-period bands, then per-slot shares).
+                 Purely visual — the values and the per-row colour scaling are
+                 untouched.
+    row_gap_size : float height of that blank band, in row units.
     """
     time_cols  = time_cols or []
     extra_cols = extra_cols or []
     categories = categories or []
     rows = list(rho.index)
-    n_r, n_t, n_c, n_e = len(rows), len(time_cols), len(categories), len(extra_cols)
-    n_cols  = n_t + n_c + n_e
-    cat_end = n_t + n_c                       # split-cell category region = [n_t, cat_end)
+    n_r = len(rows)
+    n_cols = len(time_cols) + len(categories) + len(extra_cols)
 
-    # Upper/lower value matrices per display cell.  Single (time / extra) cells
-    # repeat the same value in both halves so they render as one solid cell.
-    Vup = np.full((n_r, n_cols), np.nan)
-    Vlo = np.full((n_r, n_cols), np.nan)
+    # One value per display cell; the column a category reads is the merged
+    # func_<cat>.
+    V = np.full((n_r, n_cols), np.nan)
+    names = list(time_cols) + [f'func_{c}' for c in categories] + list(extra_cols)
     for i, rname in enumerate(rows):
-        for j, t in enumerate(time_cols):
-            Vup[i, j] = Vlo[i, j] = rho.loc[rname, t]
-        for j, c in enumerate(categories):
-            Vup[i, n_t + j] = rho.loc[rname, f'share_from_{c}']
-            Vlo[i, n_t + j] = rho.loc[rname, f'share_to_{c}']
-        for j, e in enumerate(extra_cols):
-            Vup[i, cat_end + j] = Vlo[i, cat_end + j] = rho.loc[rname, e]
+        for j, col in enumerate(names):
+            V[i, j] = rho.loc[rname, col]
 
-    # Per-row colour scale over every displayed value (time + from + to + extra).
-    allv = np.concatenate([Vup, Vlo], axis=1)
-    scale = np.nanmax(np.abs(allv), axis=1, keepdims=True)
+    # Per-row colour scale over every displayed value.
+    scale = np.nanmax(np.abs(V), axis=1, keepdims=True)
     scale = np.where(np.isnan(scale) | (scale == 0), 1.0, scale)
-    Cup, Clo = Vup / scale, Vlo / scale
+    C = V / scale
 
-    fine = np.empty((2 * n_r, n_cols))
-    fine[0::2, :] = Cup
-    fine[1::2, :] = Clo
+    # Top edge of each row, shifted down by row_gap_size at every requested gap.
+    gaps = set(int(g) for g in (row_gaps or ()))
+    ytop, y = np.empty(n_r), 0.0
+    for i in range(n_r):
+        if i in gaps:
+            y += row_gap_size
+        ytop[i] = y
+        y += 1.0
+    total_h = y
 
-    fig, ax = plt.subplots(figsize=(2.0 * n_cols + 2.4, 1.75 * n_r + 2.2),
+    fig, ax = plt.subplots(figsize=(2.0 * n_cols + 2.4, 1.75 * total_h + 2.2),
                            constrained_layout=True)
-    ax.imshow(fine, cmap=cmap, vmin=-1, vmax=1, aspect='auto',
-              extent=[0, n_cols, n_r, 0], interpolation='nearest')
+    # One imshow per row so the blank bands stay empty (a single image cannot
+    # skip rows); each row still spans the full column range.
+    for i in range(n_r):
+        ax.imshow(C[i:i + 1], cmap=cmap, vmin=-1, vmax=1, aspect='auto',
+                  extent=[0, n_cols, ytop[i] + 1.0, ytop[i]],
+                  interpolation='nearest')
+        for x in range(n_cols + 1):                       # inner cell borders
+            ax.plot([x, x], [ytop[i], ytop[i] + 1.0], color='white', lw=2,
+                    zorder=3)
+        for yy in (ytop[i], ytop[i] + 1.0):
+            ax.plot([0, n_cols], [yy, yy], color='white', lw=2, zorder=3)
+    ax.set_xlim(0, n_cols)
+    ax.set_ylim(total_h, 0)
     for spine in ax.spines.values():
         spine.set_visible(False)
-
-    # White main grid, plus a thin half split inside the category region only.
-    for x in range(n_cols + 1):
-        ax.axvline(x, color='white', lw=2)
-    for y in range(n_r + 1):
-        ax.axhline(y, color='white', lw=2)
-    for i in range(n_r):
-        ax.plot([n_t, cat_end], [i + 0.5] * 2, color='white', lw=0.8)
 
     def _stars(rname, col):
         if pval is None or np.isnan(pval.loc[rname, col]):
@@ -892,40 +913,21 @@ def vis_heatmap_corr_split(rho, pval=None, time_cols=None,
         p = pval.loc[rname, col]
         return '**' if p < 0.01 else ('*' if p < 0.05 else '')
 
-    def _single_cell(i, col_idx, name):
-        v = Vup[i, col_idx]
-        if np.isnan(v):
-            return
-        ax.text(col_idx + 0.5, i + 0.5, f'{v:.2f}{_stars(rows[i], name)}',
-                ha='center', va='center', fontsize=annot_fs,
-                color='white' if abs(Cup[i, col_idx]) > 0.6 else 'black')
-
     for i, rname in enumerate(rows):
-        for j, t in enumerate(time_cols):
-            _single_cell(i, j, t)
-        for j, c in enumerate(categories):
-            x = n_t + j + 0.5
-            vu, vl = Vup[i, n_t + j], Vlo[i, n_t + j]
-            if not np.isnan(vu):
-                ax.text(x, i + 0.27, f'{vu:.2f}{_stars(rname, f"share_from_{c}")}',
-                        ha='center', va='center', fontsize=annot_fs,
-                        color='white' if abs(Cup[i, n_t + j]) > 0.6 else 'black')
-            if not np.isnan(vl):
-                ax.text(x, i + 0.73, f'{vl:.2f}{_stars(rname, f"share_to_{c}")}',
-                        ha='center', va='center', fontsize=annot_fs,
-                        color='white' if abs(Clo[i, n_t + j]) > 0.6 else 'black')
-        for j, e in enumerate(extra_cols):
-            _single_cell(i, cat_end + j, e)
+        for j, col in enumerate(names):
+            v = V[i, j]
+            if np.isnan(v):
+                continue
+            ax.text(j + 0.5, ytop[i] + 0.5, f'{v:.2f}{_stars(rname, col)}',
+                    ha='center', va='center', fontsize=annot_fs, zorder=4,
+                    color='white' if abs(C[i, j]) > 0.6 else 'black')
 
     ax.set_xticks(np.arange(n_cols) + 0.5)
     ax.set_xticklabels(list(time_cols) + list(categories) + list(extra_cols),
                        rotation=45, ha='right', fontsize=18)
-    ax.set_yticks(np.arange(n_r) + 0.5)
+    ax.set_yticks(ytop + 0.5)
     ax.set_yticklabels(rows, fontsize=18)
     ax.tick_params(length=0)
-    ax.text(1.0, 1.01, 'Upper = Outflow,  Lower = Inflow',
-            transform=ax.transAxes, ha='right', va='bottom', fontsize=16,
-            color='dimgrey')
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150)
@@ -1325,128 +1327,6 @@ def vis_heatmap_pair_r2(mat, title=None, save_path=None, vmax=0.6,
         plt.close(fig)
     return fig
 
-
-def vis_bar_function_by_peakslot(df, categories, ncols=3, save_path=None,
-                                 color_from='#1976D2', color_to='#E65100',
-                                 group_col='peak_slot',
-                                 label_col='peak_slot_label'):
-    """
-    Grouped bar charts of mean functional shares by a categorical temporal
-    feature — one subplot per OCCUPIED group value, bars = the functional
-    categories, paired by direction: share_from_<cat> (outflow, one colour)
-    vs share_to_<cat> (inflow, other).
-
-    The grouping feature is treated as CATEGORICAL (no ordering assumed) —
-    this replaces its use in the rank-correlation analysis.  Works for any
-    code/label column pair, e.g. peak_slot/peak_slot_label or
-    peak_period/peak_period_label; groups are laid out by ascending code.
-
-    Parameters
-    ----------
-    df         : per-component feature table with group_col, label_col,
-                 share_from_<cat> and share_to_<cat> columns.
-    categories : list[str] functional category names (e.g. SF_CATEGORIES).
-    """
-    import math
-    from_cols = [f'share_from_{c}' for c in categories]
-    to_cols   = [f'share_to_{c}'   for c in categories]
-
-    groups = sorted(df[group_col].unique())
-    n = len(groups)
-    ncols = max(1, min(ncols, n))
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols, 3.8 * nrows),
-                             squeeze=False, constrained_layout=True)
-
-    x = np.arange(len(categories))
-    bw = 0.38                                   # bar width
-    ymax = max(df[from_cols].to_numpy().max(), df[to_cols].to_numpy().max())
-
-    for p, g in enumerate(groups):
-        ax = axes[p // ncols][p % ncols]
-        grp = df[df[group_col] == g]
-        mean_from = grp[from_cols].mean().to_numpy()
-        mean_to   = grp[to_cols].mean().to_numpy()
-        ax.bar(x - bw / 2, mean_from, bw, color=color_from, label='from (outflow)')
-        ax.bar(x + bw / 2, mean_to,   bw, color=color_to,   label='to (inflow)')
-        ax.set_xticks(x)
-        ax.set_xticklabels(categories, rotation=30, ha='right', fontsize=10)
-        ax.set_ylim(0, ymax * 1.08)
-        ax.set_ylabel('mean share', fontsize=10)
-        ax.grid(axis='y', linestyle=':', alpha=0.4)
-        label = grp[label_col].iloc[0] if label_col in grp else str(g)
-        ax.set_title(f'{label}  (n={len(grp)})', fontsize=12)
-        if p == 0:
-            ax.legend(fontsize=9, frameon=True)
-
-    for p in range(n, nrows * ncols):
-        axes[p // ncols][p % ncols].axis('off')
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
-def vis_scatter_component_features(df, pairs, ncols=2, save_path=None,
-                                   color='#1976D2', point_size=90, rank=False):
-    """
-    Scatter panels of feature pairs — one point per NMF component, uniform
-    colour and size.
-
-    Parameters
-    ----------
-    df     : per-component feature table containing the pair columns.
-    pairs  : list of (x_col, y_col) tuples to plot (e.g. the strongest
-             correlations).
-    rank   : False (default) plots the RAW feature values (the Pearson view;
-             weekday_ratio x/y axes are drawn in log scale).  True plots the
-             per-feature RANKS (average ranks for ties) — the Spearman view
-             (Spearman = Pearson on ranks); axes are linear and labelled '(rank)'.
-    """
-    import math
-    if rank:
-        cols = {c for pair in pairs for c in pair}
-        data = df[list(cols)].rank()          # rank each used column over components
-    else:
-        data = df
-    suffix = ' (rank)' if rank else ''
-    n = len(pairs)
-    ncols = max(1, min(ncols, n))
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7.0 * ncols, 5.6 * nrows),
-                             squeeze=False, constrained_layout=True)
-    try:
-        fig.get_layout_engine().set(w_pad=0.25, h_pad=0.25)
-    except Exception:
-        pass
-
-    # Each (a, b) pair is drawn with b on the x axis and a on the y axis.
-    for p, (yc, xc) in enumerate(pairs):
-        ax = axes[p // ncols][p % ncols]
-        ax.scatter(data[xc], data[yc], s=point_size, color=color, alpha=0.8,
-                   edgecolor='white', linewidth=0.6, zorder=2)
-        if not rank and xc == 'weekday_ratio':
-            ax.set_xscale('log')
-            ax.axvline(1.0, color='grey', linestyle=':', linewidth=1)
-        if not rank and yc == 'weekday_ratio':
-            ax.set_yscale('log')
-            ax.axhline(1.0, color='grey', linestyle=':', linewidth=1)
-        ax.set_xlabel(xc + suffix, fontsize=21)
-        ax.set_ylabel(yc + suffix, fontsize=21)
-        ax.tick_params(labelsize=18)
-
-    for p in range(n, nrows * ncols):
-        axes[p // ncols][p % ncols].axis('off')
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
-# ── Resilience (disaster drop-and-recovery) plots ─────────────────────────────
-
 def vis_line_resilience_curves(curves, save_path=None, order=None):
     """
     Per-component relative-activity curves over the disaster period — one
@@ -1497,61 +1377,6 @@ def vis_line_resilience_curves(curves, save_path=None, order=None):
     return fig
 
 
-def vis_bar_resilience_by_peakslot(df, res_cols, ncols=2, save_path=None,
-                                   color='#455A64', color_weekend='#8D6E63',
-                                   group_col='peak_slot',
-                                   label_col='peak_slot_label'):
-    """
-    Mean resilience metrics by a categorical temporal feature — one subplot
-    PER METRIC (metrics have different scales, so they cannot share a y-axis),
-    bar height = group mean, group sizes in the x labels.
-
-    The weekend category comes from the FEATURE layer (temporal_features
-    assigns weekend-dominated components the 'weekend' label, no time-of-day
-    split); its bar is drawn in color_weekend.  Works for any code/label
-    column pair, e.g. peak_slot/peak_slot_label or
-    peak_period/peak_period_label; groups are laid out by ascending code.
-    """
-    import math
-    codes = sorted(df[group_col].unique())
-    groups, labels, colors = [], [], []
-    for g in codes:
-        grp = df[df[group_col] == g]
-        lbl = grp[label_col].iloc[0] if label_col in grp else str(g)
-        groups.append(grp)
-        labels.append(f"{lbl}\n(n={len(grp)})")
-        colors.append(color_weekend if lbl == 'weekend' else color)
-
-    n = len(res_cols)
-    ncols = max(1, min(ncols, n))
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols,
-                             figsize=(0.95 * len(groups) * ncols + 2,
-                                      3.2 * nrows),
-                             squeeze=False, constrained_layout=True)
-    x = np.arange(len(groups))
-    for p, col in enumerate(res_cols):
-        ax = axes[p // ncols][p % ncols]
-        means = [grp[col].mean() for grp in groups]
-        ax.bar(x, means, 0.6, color=colors)
-        ax.axhline(0, color='black', linewidth=0.8)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, fontsize=9)
-        ax.set_title(col, fontsize=12)
-        ax.grid(axis='y', linestyle=':', alpha=0.4)
-
-    for p in range(n, nrows * ncols):
-        axes[p // ncols][p % ncols].axis('off')
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
-
-
-# ── Predicted-vs-observed OD flow slider map (STEP-7 spatial view) ────────────
 _OD_SLIDER_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
@@ -1904,4 +1729,365 @@ def vis_w2_decomposition(pairs, contrib, transfer, group_names, group_colors,
                         exist_ok=True)
             fig.savefig(save_path, dpi=450, bbox_inches='tight')
             plt.close(fig)
+    return fig
+
+
+# == NMF decomposition-quality figures =========================================
+
+
+def vis_nmf_quality(q, title=None, save_path=None):
+    """
+    One city-event's decomposition-quality report, three panels from the
+    nmf_quality_metrics dict `q`.  Everything is FIT-window only (the rows the
+    basis was fit on); the disaster period is out of scope by design — the
+    figure describes the decomposition itself, not any predictive use of it.
+
+      A  per-slot distribution (KS) error across the fit window — localises
+         WHERE the reconstruction distorts the OD-flow shape (each slot's X
+         and WH are mean-normalised first, so a uniform over/under-estimate
+         does not register);
+      B  pooled CDF overlay of those per-slot-normalised values, ground truth
+         vs reconstruction (log x; positive entries) — the shape the KS
+         compares, seen directly;
+      C  component weights w_i = $\|W_i\|\,\|H_i\|$ as a fraction of the largest,
+         descending, with the min_comp_frac threshold line; components below
+         it are red (too-large-k symptom, the health rule requires none).
+
+    The fit-window relative Frobenius error is annotated in panel A.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.6))
+    axA, axB, axC = axes
+
+    # A - per-slot KS timeline over the fit window
+    ks = np.asarray(q['dist_err_per_slot'], dtype=float)
+    axA.plot(np.arange(ks.size), ks, color='#1976D2', lw=1.0)
+    axA.axhline(q['dist_err_mean'], color='#D32F2F', linestyle='--', lw=1.2,
+                label=f"mean = {q['dist_err_mean']:.3f}")
+    axA.set_xlabel('fit-window time slot')
+    axA.set_ylabel('per-slot KS distance')
+    axA.set_title('A  distribution error over time', loc='left', fontsize=12)
+    axA.text(0.02, 0.02,
+             f"rel. reconstruction error = {q['rel_err']:.3f}",
+             transform=axA.transAxes, fontsize=9, va='bottom')
+    axA.legend(frameon=False, fontsize=9)
+
+    # B - pooled CDF overlay
+    for vals, color, lbl in ((q['gt_vals'], 'black', 'ground truth'),
+                             (q['rec_vals'], '#1976D2', 'reconstruction')):
+        v = np.sort(np.asarray(vals, dtype=float))
+        if v.size == 0:
+            continue
+        axB.plot(v, np.arange(1, v.size + 1) / v.size, color=color, lw=1.4,
+                 label=lbl, alpha=0.9)
+    axB.set_xscale('log')
+    axB.set_xlabel('OD flow / slot mean (positive entries, log scale)')
+    axB.set_ylabel('cumulative fraction')
+    axB.set_title('B  value-distribution shapes (pooled over slots)',
+                  loc='left', fontsize=12)
+    axB.legend(frameon=False, fontsize=9)
+
+    # C - component weight fractions
+    frac = np.asarray(q['comp_frac'], dtype=float)
+    thr = q['min_comp_frac']
+    colors = ['#D32F2F' if f < thr else '#1976D2' for f in frac]
+    axC.bar(np.arange(frac.size), frac, color=colors, edgecolor='white')
+    axC.axhline(thr, color='#D32F2F', linestyle='--', lw=1.2,
+                label=f'threshold = {thr:.0%} of max')
+    axC.set_yscale('log')
+    axC.set_xlabel('component (sorted by weight)')
+    axC.set_ylabel('$\|W_i\|\,\|H_i\|$ / max (log)')
+    axC.set_title(f"C  component weights - {q['n_below']} below threshold",
+                  loc='left', fontsize=12)
+    axC.legend(frameon=False, fontsize=9)
+
+    if title:
+        fig.suptitle(title, fontsize=14)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_nmf_quality_summary(df, min_comp_frac, save_path=None):
+    """
+    Cross-city error dashboard: one row per error family, city-events on x.
+    All metrics are FIT-window only (see vis_nmf_quality).
+
+      1  mean per-slot distribution (KS) error
+      2  relative reconstruction error
+
+    Component-count health is deliberately NOT shown here: it is a per-unit
+    pass/fail check, already drawn as panel C of each unit's own figure, and a
+    cross-city bar of it carries no comparison worth making.  `min_comp_frac`
+    is kept in the signature so callers need not know that.
+
+    `df` is indexed by city-event code with columns dist_err_mean, rel_err
+    and k (k annotates the bars).
+    """
+    codes = list(df.index)
+    x = np.arange(len(codes))
+    fig, axes = plt.subplots(2, 1, figsize=(max(10, 0.85 * len(codes)), 7),
+                             sharex=True)
+
+    axes[0].bar(x, df['dist_err_mean'], color='#1976D2', edgecolor='white')
+    axes[0].set_ylabel('mean per-slot\nKS distance')
+    axes[0].set_title('Distribution error', loc='left', fontsize=12)
+
+    axes[1].bar(x, df['rel_err'], color='#455A64', edgecolor='white')
+    for xi, (v, k) in enumerate(zip(df['rel_err'], df['k'])):
+        axes[1].text(xi, v, f'k={int(k)}', ha='center', va='bottom', fontsize=8)
+    axes[1].set_ylabel('relative\nreconstruction error')
+    axes[1].set_title('Absolute error', loc='left', fontsize=12)
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(codes, rotation=45, ha='right')
+
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
+
+
+def vis_nmf_rank_cv(curves, table, band='k_2se', save_path=None, ncols=5):
+    """
+    Held-out-entry rank curves, one panel per city-event, each panel captioned
+    with its own numbers instead of the figure carrying a separate table.
+
+    `curves` maps city-event code -> (ks, mean_err, sd_err); `table` is a
+    DataFrame indexed by the SAME codes in the SAME order supplying n_od,
+    k_min, <band>_lo and <band>_hi, and optionally `excluded`.
+
+    Each caption gives the matrix size (OD pairs), the k at the curve's
+    minimum, and the `band` range — the k whose error stays within that
+    tolerance of the minimum.  Other tolerances are computed too and live in
+    the CSV; across all of them the selected rank moves by only a component or
+    two, so the caption carries one band rather than crowding in three.
+
+    A unit flagged `excluded` (its band tops out too low to support a usable
+    decomposition) keeps its panel — this figure is the record of WHY it was
+    dropped — but is greyed and labelled, so the figure shows the full evidence
+    and the verdict at once.
+
+    The registry's own k is deliberately NOT drawn: this figure reports what
+    each matrix supports, and the comparison against the configured value is a
+    separate argument that the numbers here feed rather than settle.
+
+    Panels are expected in OD-pair order (the caller sorts them): the size
+    effect — sharp interior minima for the large matrices, none at all for the
+    smallest — is what the arrangement has to make visible.
+    """
+    lo_col, hi_col = band + '_lo', band + '_hi'
+    band_label = {'k_1se': 'within 1 SE', 'k_2se': 'within 2 SE',
+                  'k_2sd': 'within 2 SD'}.get(band, band)
+    codes = list(curves)
+    nrow = int(np.ceil(len(codes) / ncols))
+    fig, axes = plt.subplots(nrow, ncols, figsize=(3.2 * ncols, 2.95 * nrow),
+                             squeeze=False)
+    for i, c in enumerate(codes):
+        ax = axes[i // ncols][i % ncols]
+        ks, mu, sd = (np.asarray(v, dtype=float) for v in curves[c])
+        ok = np.isfinite(mu)
+        if not ok.any():
+            ax.axis('off')
+            continue
+        dropped = bool(table.loc[c, 'excluded']) if 'excluded' in table else False
+        line = '#9E9E9E' if dropped else '#1976D2'
+        ax.fill_between(ks[ok], (mu - sd)[ok], (mu + sd)[ok], color=line,
+                        alpha=0.18, lw=0)
+        ax.plot(ks[ok], mu[ok], color=line, lw=1.3, marker='o', ms=3)
+        kmin = int(table.loc[c, 'k_min'])
+        lo, hi = int(table.loc[c, lo_col]), int(table.loc[c, hi_col])
+        ax.axvline(kmin, color='#D32F2F' if not dropped else '#EF9A9A', lw=1.2)
+        rng = f'{lo}' if lo == hi else f'{lo}\u2013{hi}'
+        ax.set_title(f"{c}   ({int(table.loc[c, 'n_od'])} OD pairs)"
+                     f"{'   [dropped]' if dropped else ''}\n"
+                     f"k min = {kmin}    {band_label}: {rng}",
+                     fontsize=8.6, linespacing=1.6,
+                     color='#9E9E9E' if dropped else 'black')
+        ax.tick_params(labelsize=7, colors='0.6' if dropped else 'black')
+    for j in range(len(codes), nrow * ncols):
+        axes[j // ncols][j % ncols].axis('off')
+
+    fig.supxlabel('number of components k', fontsize=11)
+    fig.supylabel('held-out prediction error (masked entries)', fontsize=11)
+    fig.suptitle('Rank selection by held-out-entry cross-validation '
+                 '(panels ordered by OD-pair count; red line = k min)',
+                 fontsize=13)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    return fig
+
+
+# == STEP-7 rank-channel / parameter figures (publication style) ==============
+# Ported into the pipeline on 2026-08-04.  They were previously produced by
+# throwaway scripts, so they silently went stale whenever the registry changed
+# (they still showed 17 city-events at k~10 long after the rank CV cut the set
+# to 13).  Everything they need is in the STEP-7 component parameter table.
+
+_PUB_RC = {
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+    'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
+    'axes.linewidth': 0.7, 'legend.frameon': False,
+    'svg.fonttype': 'none', 'pdf.fonttype': 42,
+}
+_PUB_BLUE, _PUB_DARK, _PUB_GREY = '#0F4D92', '#3a3a3a', '#BBBBBB'
+
+
+def _pub_grid(n, ncols):
+    nrow = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrow, ncols, figsize=(2.05 * ncols, 2.15 * nrow),
+                             squeeze=False)
+    return fig, axes, nrow
+
+
+def _pub_save(fig, save_path):
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=600, bbox_inches='tight')
+        plt.close(fig)
+
+
+def vis_rank_pred_vs_true(params, save_path=None, ncols=5):
+    """Predicted vs observed cum_loss RANK, one panel per city-event.
+
+    The rank channel is the only part of the curve forecast that transfers, so
+    this is the figure that shows whether it does: both axes are ranks WITHIN
+    the unit, the diagonal is a perfect ordering, and each panel carries its own
+    Spearman.  `params` is the STEP-7 component table (needs code, rank_score,
+    cum_loss_fit).
+    """
+    codes = list(params['code'].drop_duplicates())
+    with plt.rc_context(_PUB_RC):
+        fig, axes, nrow = _pub_grid(len(codes), ncols)
+        for i, c in enumerate(codes):
+            ax = axes[i // ncols][i % ncols]
+            s = params[params.code == c].dropna(subset=['rank_score',
+                                                        'cum_loss_fit'])
+            if len(s) < 2:
+                ax.axis('off')
+                continue
+            rt, rp = rankdata(s['cum_loss_fit']), rankdata(s['rank_score'])
+            n = len(s)
+            ax.plot([0.5, n + 0.5], [0.5, n + 0.5], color=_PUB_GREY, lw=0.7,
+                    zorder=1)
+            ax.scatter(rt, rp, s=13, color=_PUB_BLUE, alpha=0.85, zorder=3,
+                       edgecolor='white', linewidth=0.35)
+            ax.set_title(c, fontsize=6.5)
+            rho = spearmanr(rt, rp).statistic
+            ax.text(0.05, 0.93, '$\\rho_s$ = {:+.2f}'.format(rho),
+                    transform=ax.transAxes, fontsize=5.8, va='top')
+            ticks = [t for t in (1, 5, 10, 15) if t <= n]
+            ax.set_xticks(ticks)
+            ax.set_yticks(ticks)
+            ax.set_xlim(0.4, n + 0.6)
+            ax.set_ylim(0.4, n + 0.6)
+            ax.set_aspect('equal')
+            ax.tick_params(labelsize=5.5)
+        for k in range(len(codes), nrow * ncols):
+            axes[k // ncols][k % ncols].axis('off')
+        fig.supxlabel('observed cumulative-loss rank', fontsize=7)
+        fig.supylabel('predicted rank', fontsize=7)
+        fig.tight_layout()
+        _pub_save(fig, save_path)
+    return fig
+
+
+def vis_rank_to_cumloss_qm(params, save_path=None, ncols=5):
+    """From rank to magnitude: the quantile-mapped prediction along the
+    predicted rank order, against the observed losses at the same positions.
+
+    Shows what the quantile mapping adds on top of the ordering — the borrowed
+    pooled shape, rescaled to the held city's spread and shifted to its
+    predicted total — and where it under- or over-shoots.  `params` needs code,
+    rank_score, cum_loss_fit and cum_loss_pred.
+    """
+    codes = list(params['code'].drop_duplicates())
+    with plt.rc_context(_PUB_RC):
+        fig, axes, nrow = _pub_grid(len(codes), ncols)
+        for i, c in enumerate(codes):
+            ax = axes[i // ncols][i % ncols]
+            s = params[params.code == c].dropna(
+                subset=['rank_score', 'cum_loss_fit', 'cum_loss_pred'])
+            if len(s) < 2:
+                ax.axis('off')
+                continue
+            pos = rankdata(s['rank_score'])
+            o = np.argsort(pos)
+            ax.axhline(0.0, color=_PUB_GREY, lw=0.7, zorder=1)
+            ax.plot(pos[o], s['cum_loss_pred'].to_numpy()[o], color=_PUB_BLUE,
+                    lw=0.8, marker='o', ms=2.6, mfc='white', mew=0.7, zorder=3,
+                    label='quantile-mapped prediction')
+            ax.scatter(pos, s['cum_loss_fit'], s=12, color=_PUB_DARK, zorder=4,
+                       label='observed')
+            ax.set_title(c, fontsize=6.5)
+            r = pearsonr(s['cum_loss_pred'], s['cum_loss_fit']).statistic
+            ax.text(0.05, 0.94, 'r = {:+.2f}'.format(r),
+                    transform=ax.transAxes, fontsize=5.8, va='top')
+            ax.set_xticks([t for t in (1, 5, 10, 15) if t <= len(s)])
+            ax.tick_params(labelsize=5.5)
+        for k in range(len(codes), nrow * ncols):
+            axes[k // ncols][k % ncols].axis('off')
+        fig.supxlabel('predicted rank position (1 = smallest predicted loss)',
+                      fontsize=7)
+        fig.supylabel('component cumulative loss', fontsize=7)
+        h, l = axes[0][0].get_legend_handles_labels()
+        fig.legend(h, l, loc='lower center', ncol=2, fontsize=6.5,
+                   bbox_to_anchor=(0.5, -0.02))
+        fig.tight_layout()
+        _pub_save(fig, save_path)
+    return fig
+
+
+def vis_alpha_level_relationship(params, save_path=None):
+    """The recovery rate / plateau trade-off over every component of every
+    city-event: log10 of the fitted rate against the fitted level L.
+
+    This relation is what makes the plateau inversion possible — rate and level
+    are not free of each other, so pinning one constrains the other.  Grey lines
+    are leave-one-city-out refits, showing the relation is not carried by any
+    single unit.  `params` needs the UNGATED full fits (alpha_fit_ungated,
+    level_fit_ungated) so the quality gate does not thin the cloud.
+    """
+    s = params.dropna(subset=['alpha_fit_ungated', 'level_fit_ungated'])
+    codes = list(s['code'].drop_duplicates())
+    la = np.log10(np.clip(s['alpha_fit_ungated'].to_numpy(float), 1e-3, None))
+    lv = s['level_fit_ungated'].to_numpy(float)
+    coef = np.polyfit(la, lv, 1)
+    r2 = 1.0 - (np.sum((lv - np.polyval(coef, la)) ** 2)
+                / np.sum((lv - lv.mean()) ** 2))
+    cmap = plt.get_cmap('tab20')
+    colors = {c: cmap(i % 20) for i, c in enumerate(codes)}
+    with plt.rc_context(_PUB_RC):
+        fig, ax = plt.subplots(figsize=(3.4, 2.8))
+        xs = np.linspace(la.min(), la.max(), 200)
+        for held in codes:
+            m = (s['code'] != held).to_numpy()
+            ax.plot(xs, np.polyval(np.polyfit(la[m], lv[m], 1), xs),
+                    color=_PUB_GREY, lw=0.6, alpha=0.8, zorder=2)
+        ax.plot(xs, np.polyval(coef, xs), color=_PUB_DARK, lw=1.4, zorder=3)
+        for c in codes:
+            m = (s['code'] == c).to_numpy()
+            ax.scatter(la[m], lv[m], s=16, color=colors[c], alpha=0.85,
+                       zorder=4, edgecolor='white', linewidth=0.3, label=c)
+        ax.set_xlabel(r"$\log_{10}\,\alpha$")
+        ax.set_ylabel(r"recovery level $L$")
+        ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01),
+                  ncol=min(5, max(3, (len(codes) + 3) // 4)),
+                  fontsize=5.2, handletextpad=0.2, columnspacing=0.8,
+                  labelspacing=0.3, borderaxespad=0.0)
+        stats = ('$L$ = {:.2f} $-$ {:.2f} $\\log_{{10}}\\alpha$\n'
+                 '$R^2$ = {:.2f}\n'
+                 'grey: leave-one-city-out fits').format(
+                     coef[1], abs(coef[0]), r2)
+        ax.text(0.98, 0.70, stats,
+                transform=ax.transAxes, fontsize=6, va='top', ha='right')
+        fig.tight_layout()
+        _pub_save(fig, save_path)
     return fig

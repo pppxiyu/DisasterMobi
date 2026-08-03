@@ -5,7 +5,7 @@ live in decomposition.py; this module wires them to the graph data.
 
 Two distinct pipelines share this module:
 
-SINGLE-NMF pipeline (production: run_pattern_nmf.py + tune_nmf_optuna.py)
+SINGLE-NMF pipeline (production: run_pattern_nmf.py)
     One NMF over the combined normal + disaster matrix, which keeps OD-pair row
     ordering and component identities consistent across periods, so no
     alignment / matching step is needed between W blocks; W is later split at
@@ -22,6 +22,17 @@ SINGLE-NMF pipeline (production: run_pattern_nmf.py + tune_nmf_optuna.py)
         via nmf_context_multiplicative (Chen et al. 2018).
     print_projection_diagnostics(...)
         Internal fit/held-out relative-error report for the subset-fit path.
+    rank_cv_entry(X, k, l1, rng, frac, em_iters, max_iter)
+        Held-out-ENTRY cross-validation, the criterion for CHOOSING k: mask
+        random matrix entries, fit without them by EM imputation, score the
+        prediction.  Unlike reconstruction error it has an interior optimum in
+        k.  Driver: analyze_nmf_rank_cv.py.
+    nmf_quality_metrics(X_full, W, H, fit_time_cols, min_comp_frac)
+        Decomposition-quality metrics on the FIT window only (no disaster /
+        predictive scope): absolute reconstruction error, per-slot
+        distribution (KS) error, component-count health.  Reported by the
+        pipeline's quality-check step; k itself is NOT tuned from these, it is
+        set per unit from the rank CV (see rank_cv_entry).
 
 PAIRED pipeline (only used by archive/run_pattern_distance_decay_paired.py)
     The OPPOSITE design: two INDEPENDENT NMFs, one per segment, whose
@@ -32,6 +43,7 @@ PAIRED pipeline (only used by archive/run_pattern_distance_decay_paired.py)
 import textwrap
 
 import numpy as np
+from sklearn.decomposition import NMF
 
 from config import (
     SLOT_PER_DAY, SLOT_TRIM_START, SLOT_TRIM_END, SLOTS_ACTIVE,
@@ -118,6 +130,138 @@ def print_projection_diagnostics(X_full, W_raw, H_raw, fit_time_cols):
     print(f"    Rel. error fit   : {rel(fit_time_cols):.4f}")
     print(f"    Rel. error held  : {held_rel}  ({held.size} rows)")
     print(f"    Near-zero comps  : {n_tiny} / {W_raw.shape[1]}")
+
+
+def _ks_distance(a, b):
+    """Two-sample Kolmogorov-Smirnov statistic (max ECDF gap), plain numpy —
+    no p-value machinery, called once per time slot so it has to be cheap."""
+    a, b = np.sort(a), np.sort(b)
+    grid = np.concatenate([a, b])
+    ca = np.searchsorted(a, grid, side='right') / a.size
+    cb = np.searchsorted(b, grid, side='right') / b.size
+    return float(np.abs(ca - cb).max())
+
+
+def nmf_quality_metrics(X_full, W, H, fit_time_cols=None, min_comp_frac=0.05):
+    """
+    Decomposition-quality metrics for one city's NMF, three families — ALL
+    evaluated on the FIT window only (the rows the basis was fit on, i.e.
+    normal+buffer under the production fit_segments).  The disaster period is
+    deliberately OUT of scope: this measures the quality of the decomposition
+    itself on the data it used, with no predictive consideration.
+
+    ABSOLUTE reconstruction error — relative Frobenius error ‖X−WH‖/‖X‖ over
+    the fit rows.
+
+    DISTRIBUTION error — per fit TIME SLOT, the two OD-flow vectors X[t] and
+    (WH)[t] are each divided by their own mean (removing the slot's overall
+    level, so a uniform over/under-estimate does not count) and compared with
+    the two-sample KS distance (0 = identical shape, 1 = disjoint).  The scalar
+    `dist_err_mean` is the mean over the fit slots; `dist_err_per_slot` keeps
+    the per-slot curve so distortion can be localised in time.  Slots whose
+    ground-truth or reconstructed mean is 0 are NaN and excluded from the mean.
+
+    COMPONENT-COUNT health — component weights w_i = ‖W_i‖·‖H_i‖ with W
+    restricted to the fit rows (importance within the fit window; invariant to
+    the W/H normalisation split); `n_below` counts components with
+    w_i < min_comp_frac · max(w), a too-large-k symptom.  The health
+    REQUIREMENT is n_below == 0.
+
+    Parameters
+    ----------
+    X_full        : ndarray [n_time × n_OD]  ground truth (= X_all.T)
+    W, H          : the factorisation (raw or normalised — W@H and the weight
+                    products are identical either way)
+    fit_time_cols : rows that fit the basis; None = all rows
+    min_comp_frac : the X% threshold of the component-size check
+
+    Returns dict with rel_err, dist_err_mean, dist_err_per_slot [n_fit],
+    comp_frac [k] (w_i / max w, descending), n_below, and the pooled
+    per-slot-normalised value samples gt_vals / rec_vals (positive entries
+    only, for CDF overlays).
+    """
+    X_full = np.asarray(X_full, dtype=float)
+    fit = (np.asarray(fit_time_cols, dtype=int) if fit_time_cols is not None
+           else np.arange(X_full.shape[0]))
+    W_fit = np.asarray(W)[fit]
+    X_fit = X_full[fit]
+    R = W_fit @ np.asarray(H)
+
+    denom = np.linalg.norm(X_fit)
+    rel_err = (float(np.linalg.norm(X_fit - R) / denom) if denom > 0
+               else float('nan'))
+
+    ks = np.full(fit.size, np.nan)
+    gt_pool, rec_pool = [], []
+    for t in range(fit.size):
+        mx, mr = X_fit[t].mean(), R[t].mean()
+        if mx <= 0 or mr <= 0:
+            continue
+        xn, rn = X_fit[t] / mx, R[t] / mr
+        ks[t] = _ks_distance(xn, rn)
+        gt_pool.append(xn)
+        rec_pool.append(rn)
+    gt_vals  = np.concatenate(gt_pool)  if gt_pool  else np.empty(0)
+    rec_vals = np.concatenate(rec_pool) if rec_pool else np.empty(0)
+
+    comp_w = np.linalg.norm(W_fit, axis=0) * np.linalg.norm(np.asarray(H), axis=1)
+    frac = (np.sort(comp_w / comp_w.max())[::-1] if comp_w.max() > 0
+            else np.zeros_like(comp_w))
+    return dict(
+        rel_err=rel_err,
+        dist_err_mean=float(np.nanmean(ks)),
+        dist_err_per_slot=ks,
+        comp_frac=frac,
+        n_below=int((frac < min_comp_frac).sum()),
+        min_comp_frac=float(min_comp_frac),
+        gt_vals=gt_vals[gt_vals > 0],
+        rec_vals=rec_vals[rec_vals > 0],
+    )
+
+
+def rank_cv_entry(X, k, l1, rng, frac=0.10, em_iters=12, max_iter=120):
+    """
+    HELD-OUT ENTRY cross-validation (Wold-style) for one candidate rank k.
+
+    A random `frac` of the matrix ENTRIES is masked, the factorisation is fit
+    to the remaining entries only, and the masked entries are then predicted.
+    Fitting with missing data is done by EM imputation: the masked cells start
+    at the observed mean, an NMF is fit to the filled matrix, the masked cells
+    are overwritten by the current reconstruction, and the loop repeats — the
+    standard way to fit a low-rank model with a mask when the solver has no
+    weight support.
+
+    Why this criterion has an interior optimum, unlike plain reconstruction
+    error: the held-out cells never influence the fit, so raising k eventually
+    buys nothing but noise-fitting on the observed cells and the held-out error
+    turns back up.  Reconstruction error on ALL entries can only fall with k.
+
+    The NMF calls use the production solver/init/seed but a shorter iteration
+    budget — a CV score only has to RANK candidate k's.  A budget check showed
+    the shorter budget is, if anything, generous to large k (longer fits make
+    large k score WORSE), so the rise at high k is not an artefact.
+
+    Returns the relative error on the masked entries (NaN if nothing is
+    masked or the masked block is all zero).
+    """
+    X = np.asarray(X, dtype=float)
+    mask = rng.random(X.shape) < frac                  # True = held out
+    if not mask.any() or not (~mask).any():
+        return float('nan')
+    n_s, n_f = X.shape
+    Xw = X.copy()
+    Xw[mask] = X[~mask].mean()
+    R = None
+    for _ in range(em_iters):
+        model = NMF(n_components=k, init='nndsvd', solver='cd',
+                    random_state=42, max_iter=max_iter, tol=1e-4,
+                    alpha_W=(l1 / n_f if l1 > 0 else 0.0),
+                    alpha_H=(l1 / n_s if l1 > 0 else 0.0), l1_ratio=1.0)
+        R = model.fit_transform(Xw) @ model.components_
+        Xw[mask] = R[mask]
+    denom = np.linalg.norm(X[mask])
+    return (float(np.linalg.norm(X[mask] - R[mask]) / denom) if denom > 0
+            else float('nan'))
 
 
 def decompose_city(X_all, n_behaviors, l1_reg=0.0, fit_time_cols=None):

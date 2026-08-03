@@ -38,6 +38,11 @@ from sklearn.metrics import r2_score
 
 
 MIN_ROWS     = 8                          # below this (after dropna) -> insufficient
+# NOTE: 8 guards a WITHIN-city Ridge, where the rows ARE the regression's whole
+# sample.  The cross-city path fits on the pooled training units and uses the
+# held unit's rows only to score, so it runs at a lower floor — its callers pass
+# run_pattern_nmf.CROSS_CITY_MIN_ROWS explicitly.  A cross-city caller that
+# forgets to pass it silently inherits 8 and drops every small unit.
 RIDGE_ALPHAS = np.logspace(-3, 3, 13)     # ridge penalty grid (RidgeCV LOO-selects)
 
 
