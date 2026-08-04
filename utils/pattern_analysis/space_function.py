@@ -164,3 +164,67 @@ def build_flow_poi_feature(mapping, landuse_df, flow_scale, mode='outer',
     labels = ([f'{a}*{b}' for a in categories for b in categories]
               if mode == 'outer' else list(categories))
     return Y, labels, mask
+
+
+def share_lookup_from_landuse(landuse_df, categories, id_col='aggr_id'):
+    """Map each block group's id to its CONTINUOUS TF-IWF share vector (the
+    share_<cat> columns of classify_dominant_function's output), for the soft
+    functional aggregation.  Block groups with no land-use mass (all-zero
+    shares) are omitted, so their flows drop out by zero weight instead of
+    contributing a fake uniform profile."""
+    cols = [f'share_{c}' for c in categories]
+    out = {}
+    for _, row in landuse_df.iterrows():
+        v = row[cols].to_numpy(dtype=float)
+        s = v.sum()
+        if s > 0:
+            out[str(row[id_col])] = v / s
+    return out
+
+
+def build_od_function_matrix_soft(H, mapping, share_lookup, categories):
+    """SOFT counterpart of build_od_function_matrix: every endpoint contributes
+    its full TF-IWF share VECTOR instead of one hard dominant label.
+
+    Component i's cross-tab is the flow-weighted expected origin×destination
+    profile
+
+        M[i] = Σ_j H[i,j] · outer(P_origin(j), P_dest(j)) / Σ_j H[i,j]
+
+    over the OD pairs whose BOTH endpoints are in `share_lookup` (an endpoint
+    with no land-use data drops the pair, tracked by `retained` exactly as the
+    hard version tracks its Unknowns).  Because every share vector already sums
+    to 1 over `categories`, there is no Mix bucket and nothing to cut later:
+    the marginals of M[i] ARE the component's expected functional exposure.
+
+    The outer product treats a trip's origin and destination profiles as
+    independent within the pair — the per-pair joint composition is not
+    observed, and the marginals (all the downstream features read) are exact
+    regardless.
+
+    Returns (M [k × C × C], retained [k]) like the hard version.
+    """
+    H = np.asarray(H, dtype=float)
+    k, C = H.shape[0], len(categories)
+    P_o = np.full((len(mapping), C), np.nan)
+    P_d = np.full((len(mapping), C), np.nan)
+    for j, (o, d) in enumerate(mapping):
+        po = share_lookup.get(str(o))
+        pd_ = share_lookup.get(str(d))
+        if po is not None and pd_ is not None:
+            P_o[j], P_d[j] = po, pd_
+    keep = np.isfinite(P_o).all(axis=1)
+    Po_k, Pd_k = np.nan_to_num(P_o[keep]), np.nan_to_num(P_d[keep])
+
+    M = np.zeros((k, C, C))
+    retained = np.zeros(k)
+    for comp in range(k):
+        row = H[comp]
+        total = row.sum()
+        w = row[keep]
+        M[comp] = np.einsum('j,jc,jd->cd', w, Po_k, Pd_k)
+        kept = M[comp].sum()
+        retained[comp] = (kept / total) if total > 0 else 0.0
+        if kept > 0:
+            M[comp] /= kept
+    return M, retained

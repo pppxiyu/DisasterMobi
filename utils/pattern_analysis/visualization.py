@@ -10,6 +10,11 @@ import os
 import numpy as np
 from scipy.stats import rankdata, spearmanr, pearsonr
 import pandas as pd
+import matplotlib
+# Headless-safe: every figure here is written to disk, never shown.  Without
+# this, a detached run lazily imports the Qt GUI backend at the first
+# plt.subplots and can die on a Windows access violation inside Qt.
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
@@ -1162,55 +1167,130 @@ def vis_component_curves_grid(curves_obs, method_curves, save_path=None,
 
 
 def vis_scatter_intensity_resilience(df, intensity_col, metric_cols, group_col=None,
-                                     ncols=3, save_path=None, title=None):
-    """Per-metric panels of each component's resilience metric (y) vs its event-level
-    Saffir-Simpson arrival intensity (x), pooled over ALL city-events.  Each intensity
-    level shows BOTH: the individual components as a jittered scatter (left of the
-    integer position, coloured by `group_col` e.g. the city-event) AND, beside them
-    (right of the integer), a BOX PLOT summarising the metric's distribution at that
-    intensity.  Each panel title carries the Spearman rho between intensity and the
-    metric across all pooled components."""
+                                     weight_col=None, ncols=3, save_path=None,
+                                     title=None):
+    """Each component's resilience metric (y) against its event-level
+    Saffir-Simpson arrival intensity (x), pooled over ALL city-events.
+
+    WEIGHTED (weight_col, normally weight_normal — the component's share of its
+    city's normal-period activity, the weight the city-level reconstruction
+    actually aggregates with).  Components are not interchangeable: one can
+    carry a third of a city's activity and another a twentieth, and an
+    equal-weight summary would let the small ones outvote the large.  So:
+
+      * POINT AREA is proportional to the component's WITHIN-CITY weight share
+        (w / that city's total).  The share, not the raw weight — otherwise
+        every component of a large city would simply be bigger than every
+        component of a small one, which says nothing about its role.
+      * the per-intensity summary is the WEIGHTED median with a weighted
+        inter-quartile range (an unweighted box plot beside weighted points
+        would contradict the figure's own logic).
+      * the reported rho is a WEIGHTED Spearman — ranks of x and y, then a
+        weighted Pearson on those ranks.
+
+    weight_col=None falls back to equal weights, in which case all three reduce
+    to their ordinary forms.
+    """
     import math
-    from scipy.stats import spearmanr
     metrics = list(metric_cols)
     n = len(metrics)
+    ncols = min(ncols, n)
     nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.6 * nrows),
+    single = (n == 1)
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=((7.6, 5.4) if single else
+                                      (4.0 * ncols, 3.6 * nrows)),
                              squeeze=False)
+
     x_raw = df[intensity_col].to_numpy(dtype=float)
-    jitter = np.random.default_rng(0).uniform(-0.12, 0.12, size=len(df))
     groups = df[group_col].to_numpy() if group_col else None
     uniq = list(dict.fromkeys(groups.tolist())) if groups is not None else [None]
-    cmap = plt.get_cmap('tab10')
+
+    # Within-city weight share -> point area.  A missing/degenerate weight for a
+    # city falls back to equal shares inside that city rather than dropping it.
+    if weight_col is not None:
+        w = df[weight_col].to_numpy(dtype=float)
+        share = np.full(len(df), np.nan)
+        for u in uniq:
+            m = (groups == u) if groups is not None else np.ones(len(df), bool)
+            wu = w[m]
+            tot = np.nansum(wu)
+            share[m] = (wu / tot if tot > 0 and np.isfinite(tot)
+                        else 1.0 / max(m.sum(), 1))
+        share = np.nan_to_num(share, nan=1.0 / max(len(df), 1))
+    else:
+        share = np.full(len(df), 1.0 / max(len(df), 1))
+    sizes = 14.0 + 300.0 * (share / max(share.max(), 1e-12))
+
+    def _wspearman(xv, yv, wv):
+        rx, ry = rankdata(xv), rankdata(yv)
+        mx = np.average(rx, weights=wv)
+        my = np.average(ry, weights=wv)
+        sx = math.sqrt(np.average((rx - mx) ** 2, weights=wv))
+        sy = math.sqrt(np.average((ry - my) ** 2, weights=wv))
+        if sx <= 0 or sy <= 0:
+            return float('nan')
+        return float(np.average((rx - mx) * (ry - my), weights=wv) / (sx * sy))
+
+    def _wquantile(v, wv, qs):
+        o = np.argsort(v)
+        v, wv = v[o], wv[o]
+        cw = np.cumsum(wv) - 0.5 * wv
+        tot = wv.sum()
+        if tot <= 0:
+            return [float('nan')] * len(qs)
+        return list(np.interp(qs, cw / tot, v))
+
+    jitter = np.random.default_rng(0).uniform(-0.13, 0.13, size=len(df))
+    cmap = plt.get_cmap('tab20')
     levels = sorted(np.unique(x_raw[~np.isnan(x_raw)]).tolist())
-    PT_OFF, BOX_OFF = -0.18, 0.18                # scatter on the left, box on the right
+    PT_OFF, SUM_OFF = -0.17, 0.20        # points left of the integer, summary right
     for idx, m in enumerate(metrics):
         ax = axes[idx // ncols][idx % ncols]
         y = df[m].to_numpy(dtype=float)
-        # Scatter the individual components (kept), shifted just left of each integer.
         for k, u in enumerate(uniq):
             msk = (groups == u) if groups is not None else np.ones(len(df), bool)
-            ax.scatter(x_raw[msk] + PT_OFF + jitter[msk], y[msk], s=26,
-                       color=cmap(k % 10), alpha=0.8, edgecolor='white',
-                       linewidth=0.4, label=str(u), zorder=3)
-        # Box plot of the distribution at each intensity level, beside the points.
-        box_data = [y[(x_raw == L) & ~np.isnan(y)] for L in levels]
-        ax.boxplot(box_data, positions=[L + BOX_OFF for L in levels], widths=0.22,
-                   showfliers=False, patch_artist=True, manage_ticks=False,
-                   boxprops=dict(facecolor='#e0e0e0', alpha=0.75, linewidth=0.8),
-                   medianprops=dict(color='black', linewidth=1.2),
-                   whiskerprops=dict(color='grey', linewidth=0.8),
-                   capprops=dict(color='grey', linewidth=0.8))
+            ax.scatter(x_raw[msk] + PT_OFF + jitter[msk], y[msk], s=sizes[msk],
+                       color=cmap(k % 20), alpha=0.75, edgecolor='white',
+                       linewidth=0.5, label=str(u), zorder=3)
+        # Weighted median + weighted IQR at each intensity level.
+        for L in levels:
+            sel = (x_raw == L) & ~np.isnan(y)
+            if sel.sum() == 0:
+                continue
+            q1, q2, q3 = _wquantile(y[sel], share[sel], [0.25, 0.5, 0.75])
+            ax.plot([L + SUM_OFF] * 2, [q1, q3], color='0.25', lw=6,
+                    solid_capstyle='butt', alpha=0.35, zorder=2)
+            ax.plot([L + SUM_OFF - 0.09, L + SUM_OFF + 0.09], [q2] * 2,
+                    color='black', lw=1.8, zorder=4)
         ok = ~np.isnan(y) & ~np.isnan(x_raw)
-        rho = (spearmanr(x_raw[ok], y[ok]).correlation if ok.sum() > 2 else float('nan'))
-        ax.set_title(f"{m}\nSpearman rho={rho:+.2f} (n={int(ok.sum())})", fontsize=10)
-        ax.set_xlabel('Saffir-Simpson arrival intensity (1=ExtraTrop .. 8=Cat5)', fontsize=8)
+        rho = (_wspearman(x_raw[ok], y[ok], share[ok]) if ok.sum() > 2
+               else float('nan'))
+        wtag = 'weighted ' if weight_col is not None else ''
+        ax.set_title(f"{m}\n{wtag}Spearman rho={rho:+.2f} (n={int(ok.sum())})",
+                     fontsize=10)
+        ax.set_xlabel('Saffir-Simpson arrival intensity (1=ExtraTrop .. 8=Cat5)',
+                      fontsize=8)
         ax.set_ylabel(m, fontsize=8)
         ax.set_xticks(levels)
         ax.set_xticklabels([str(int(L)) for L in levels])
         ax.tick_params(labelsize=7)
         if idx == 0 and groups is not None:
-            ax.legend(fontsize=6, loc='best', framealpha=0.6, title='city-event')
+            leg = (dict(fontsize=8, loc='center left', bbox_to_anchor=(1.02, 0.5),
+                        frameon=False, title='city-event', title_fontsize=9)
+                   if single else
+                   dict(fontsize=6, loc='best', framealpha=0.6,
+                        title='city-event'))
+            ax.add_artist(ax.legend(**leg))
+            if weight_col is not None:
+                # Size key: the point areas actually used, at three shares.
+                refs = [0.05, 0.15, 0.30]
+                hs = [plt.scatter([], [], s=14.0 + 300.0 * (r / max(share.max(), 1e-12)),
+                                  color='0.6', edgecolor='white', linewidth=0.5,
+                                  label=f'{r:.0%}') for r in refs]
+                ax.legend(handles=hs, loc='upper right', fontsize=7,
+                          frameon=False, labelspacing=1.1,
+                          title='weight share\nof its city', title_fontsize=7.5)
     for idx in range(n, nrows * ncols):
         axes[idx // ncols][idx % ncols].axis('off')
     if title:
@@ -1218,7 +1298,7 @@ def vis_scatter_intensity_resilience(df, intensity_col, metric_cols, group_col=N
     fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
     return fig
 
@@ -1242,6 +1322,7 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
     """
     import math
     metrics = list(res_cols)
+    ncols = min(ncols, max(1, len(metrics)))
     n = len(metrics)
     nrows = math.ceil(n / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.6 * nrows),
@@ -2090,4 +2171,205 @@ def vis_alpha_level_relationship(params, save_path=None):
                 transform=ax.transAxes, fontsize=6, va='top', ha='right')
         fig.tight_layout()
         _pub_save(fig, save_path)
+    return fig
+
+
+def vis_func_vs_time_distribution(ranked, time_col, categories, rho_rank=None,
+                                  save_path=None):
+    """How one temporal feature and the functional shares CO-DISTRIBUTE across
+    every city-event — the scatter behind one row of the pooled correlation
+    heatmap.
+
+    That heatmap compresses each (temporal feature, function) pair into a single
+    pooled rank correlation.  This figure shows what was compressed: one point
+    per component, coloured by city-event, so the shape of the relationship and
+    whether it holds in every unit or is carried by one of them are both
+    visible.
+
+    BOTH axes are the WITHIN-UNIT NORMALISED RANK — each column ranked inside
+    its own city-event, then divided by that unit's component count, so every
+    unit contributes the same uniform marginal and the cities with the largest
+    raw magnitudes cannot dominate.  `ranked` must already be in that form (the
+    caller ranks once and reuses it for the correlation), which is what makes
+    the annotated Spearman EXACTLY the coefficient the heatmap reports: the
+    number and the point cloud are the same object, not two views that have to
+    be trusted to agree.
+
+    Ranks also remove the reason the earlier version needed a log axis: the raw
+    ratio features are long-tailed, their ranks are uniform on (0, 1).
+
+      x = `time_col`, y = the component's exposure to each function.
+      A faint line per city-event (drawn only where a unit has at least MIN_FIT
+      points) says whether the units agree; the dark line is the pooled fit.
+
+    `ranked` needs columns func_<cat> for every category, `time_col`, and code.
+    """
+    MIN_FIT = 4
+    codes = list(pd.unique(ranked['code']))
+    cmap = plt.get_cmap('tab20')
+    colors = {c: cmap(i % 20) for i, c in enumerate(codes)}
+    x_all = ranked[time_col].to_numpy(dtype=float)
+
+    fig = plt.figure(figsize=(16.5, 8.2))
+    gs = fig.add_gridspec(2, 4, width_ratios=[1, 1, 1, 0.42], wspace=0.28,
+                          hspace=0.36)
+    for j, cat in enumerate(categories):
+        ax = fig.add_subplot(gs[j // 3, j % 3])
+        y_all = ranked[f'func_{cat}'].to_numpy(dtype=float)
+        ok_all = np.isfinite(x_all) & np.isfinite(y_all)
+        for c in codes:
+            m = (ranked['code'] == c).to_numpy()
+            ax.scatter(x_all[m], y_all[m], s=24, color=colors[c], alpha=0.85,
+                       edgecolor='white', linewidth=0.4, zorder=3)
+            ok = m & ok_all
+            if ok.sum() >= MIN_FIT and np.ptp(x_all[ok]) > 0:
+                cf = np.polyfit(x_all[ok], y_all[ok], 1)
+                xs = np.linspace(x_all[ok].min(), x_all[ok].max(), 20)
+                ax.plot(xs, np.polyval(cf, xs), color=colors[c], lw=1.0,
+                        alpha=0.5, zorder=2)
+        if ok_all.sum() >= 3 and np.ptp(x_all[ok_all]) > 0:
+            cf = np.polyfit(x_all[ok_all], y_all[ok_all], 1)
+            xs = np.linspace(x_all[ok_all].min(), x_all[ok_all].max(), 50)
+            ax.plot(xs, np.polyval(cf, xs), color='0.15', lw=2.0, zorder=4)
+        ttl = cat
+        if rho_rank is not None and f'func_{cat}' in rho_rank:
+            ttl += f'    spearman $\\rho$ = {rho_rank[f"func_{cat}"]:+.2f}'
+        ax.set_title(ttl, fontsize=11)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect('equal')
+        ax.set_xlabel(f'{time_col}  (within-unit rank)', fontsize=9)
+        ax.set_ylabel(f'flow touching {cat}  (within-unit rank)', fontsize=9)
+        ax.tick_params(labelsize=8)
+
+    axl = fig.add_subplot(gs[:, 3])
+    axl.axis('off')
+    handles = [plt.Line2D([], [], marker='o', ls='', color=colors[c], label=c,
+                          markersize=6) for c in codes]
+    axl.legend(handles=handles, loc='center', frameon=False, fontsize=9,
+               title='city-event', title_fontsize=10)
+
+    fig.suptitle(
+        f'{time_col} vs functional composition, all city-events pooled\n'
+        'both axes = within-unit normalised rank   ·   one point = one component'
+        '   ·   faint line = that city-event’s own fit   ·   dark line = pooled fit',
+        fontsize=13)
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    return fig
+
+
+def vis_exposure_vs_cumloss(df, panels, metric='cum_loss', group_col='code',
+                            weight_col=None, save_path=None, title=None):
+    """One panel per definition of "how hard was this city hit", against the
+    same y — so the question the figure answers is which DEFINITION relates to
+    the loss, not whether some single chosen one happens to.
+
+    `panels` is a list of (column, axis label, kind) with kind in
+    {'discrete', 'continuous'}: discrete columns are jittered and get a weighted
+    median per level, continuous ones get a weighted least-squares line.  Every
+    panel is WEIGHTED by `weight_col` (normally weight_normal): point area is
+    the component's within-city weight share and the reported rho is a weighted
+    Spearman, because components carry very unequal shares of a city and an
+    equal-weight reading would not describe the city the panel is about.
+    """
+    import math
+    n = len(panels)
+    ncols = 2 if n > 1 else 1
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.2 * ncols, 4.5 * nrows),
+                             squeeze=False)
+
+    groups = df[group_col].to_numpy()
+    uniq = list(dict.fromkeys(groups.tolist()))
+    y = df[metric].to_numpy(dtype=float)
+
+    if weight_col is not None:
+        w = df[weight_col].to_numpy(dtype=float)
+        share = np.full(len(df), np.nan)
+        for u in uniq:
+            m = groups == u
+            tot = np.nansum(w[m])
+            share[m] = (w[m] / tot if tot > 0 else 1.0 / max(m.sum(), 1))
+        share = np.nan_to_num(share, nan=1.0 / max(len(df), 1))
+    else:
+        share = np.full(len(df), 1.0 / max(len(df), 1))
+    sizes = 14.0 + 300.0 * (share / max(share.max(), 1e-12))
+
+    def _wspearman(xv, yv, wv):
+        rx, ry = rankdata(xv), rankdata(yv)
+        mx, my = np.average(rx, weights=wv), np.average(ry, weights=wv)
+        sx = math.sqrt(np.average((rx - mx) ** 2, weights=wv))
+        sy = math.sqrt(np.average((ry - my) ** 2, weights=wv))
+        if sx <= 0 or sy <= 0:
+            return float('nan')
+        return float(np.average((rx - mx) * (ry - my), weights=wv) / (sx * sy))
+
+    def _wquantile(v, wv, q):
+        o = np.argsort(v)
+        v, wv = v[o], wv[o]
+        tot = wv.sum()
+        if tot <= 0:
+            return float('nan')
+        return float(np.interp(q, (np.cumsum(wv) - 0.5 * wv) / tot, v))
+
+    cmap = plt.get_cmap('tab20')
+    rng = np.random.default_rng(0)
+    for idx, (col, xlabel, kind) in enumerate(panels):
+        ax = axes[idx // ncols][idx % ncols]
+        x = df[col].to_numpy(dtype=float)
+        ok = np.isfinite(x) & np.isfinite(y)
+        if kind == 'discrete':
+            levels = sorted(np.unique(x[np.isfinite(x)]).tolist())
+            span = (max(levels) - min(levels)) or 1.0
+            jit = rng.uniform(-0.022, 0.022, len(df)) * span
+            xp = x + jit
+        else:
+            xp = x
+        for k, u in enumerate(uniq):
+            m = groups == u
+            ax.scatter(xp[m], y[m], s=sizes[m], color=cmap(k % 20), alpha=0.75,
+                       edgecolor='white', linewidth=0.5, label=str(u), zorder=3)
+        if kind == 'discrete':
+            for L in levels:
+                sel = (x == L) & ok
+                if sel.sum():
+                    med = _wquantile(y[sel], share[sel], 0.5)
+                    ax.plot([L - 0.035 * span, L + 0.035 * span], [med] * 2,
+                            color='black', lw=2.2, zorder=5)
+            ax.set_xticks(levels)
+        elif ok.sum() >= 3 and np.ptp(x[ok]) > 0:
+            # Weighted least squares, the continuous counterpart of the
+            # per-level weighted median.
+            cf = np.polyfit(x[ok], y[ok], 1, w=np.sqrt(share[ok]))
+            xs = np.linspace(x[ok].min(), x[ok].max(), 50)
+            ax.plot(xs, np.polyval(cf, xs), color='black', lw=1.8, zorder=5)
+        rho = _wspearman(x[ok], y[ok], share[ok]) if ok.sum() > 2 else float('nan')
+        ax.axhline(0.0, color='0.8', lw=0.8, zorder=1)
+        ax.set_title(f'{xlabel}\nweighted Spearman rho = {rho:+.2f} '
+                     f'(n={int(ok.sum())})', fontsize=10)
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel(metric, fontsize=9)
+        ax.tick_params(labelsize=8)
+    for idx in range(n, nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis('off')
+
+    handles = [plt.Line2D([], [], marker='o', ls='', color=cmap(k % 20),
+                          label=u, markersize=6) for k, u in enumerate(uniq)]
+    refs = [0.05, 0.15, 0.30]
+    handles += [plt.Line2D([], [], marker='o', ls='', color='0.6',
+                           markersize=math.sqrt(14.0 + 300.0 * (r / max(share.max(), 1e-12))),
+                           label=f'weight {r:.0%}') for r in refs]
+    fig.legend(handles=handles, loc='center left', bbox_to_anchor=(1.0, 0.5),
+               frameon=False, fontsize=8.5, title='city-event / point size',
+               title_fontsize=9)
+    if title:
+        fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
     return fig
