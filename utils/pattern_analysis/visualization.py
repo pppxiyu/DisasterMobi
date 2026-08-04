@@ -1304,16 +1304,18 @@ def vis_scatter_intensity_resilience(df, intensity_col, metric_cols, group_col=N
 
 
 def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
-                         save_path=None, ncols=3, r2_label='LOO R²',
-                         unit='std rank', groups=None):
+                         save_path=None, ncols=3, stat_label='LOO R²',
+                         unit='rank within unit', groups=None):
     """
     Regression diagnostic scatter for ONE city: one panel per resilience metric,
     each plotting the ACTUAL value (y, ground truth) against the leave-one-out
-    PREDICTED value (x) — both on the model's standardized scale — one point per
-    component (labelled with its index).  `unit` names that scale on the axes
-    ('std rank' for the rank/Spearman regression, 'std value' for the raw/Pearson
-    regression).  The dashed y=x line is perfect prediction; the panel title
-    carries the LOO R² and PASS/FAIL.  An 'insufficient data' metric gets a blank
+    PREDICTED value (x) — one point per component (labelled with its index).
+    `unit` names the axis scale: the rank channel passes de-standardized values,
+    so both axes read as the within-unit rank (1..n, the prediction continuous
+    between them); 'std value' is the raw/Pearson channel's standardized scale.
+    The dashed y=x line is perfect prediction; the panel title carries
+    summary['stat'] under `stat_label` (Spearman ρ for the rank channel, R² for
+    the raw one) and PASS/FAIL.  An 'insufficient data' metric gets a blank
     panel.
 
     `groups` (optional) dict metric -> per-point label array (e.g. the city-event
@@ -1360,43 +1362,79 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
         hi = float(max(np.max(y_true), np.max(y_pred)))
         ax.plot([lo, hi], [lo, hi], '--', color='grey', lw=1)      # y = x
         tag = ('PASS' if s['passed'] else 'FAIL') if s['status'] == 'ok' else 'n/a'
-        ax.set_title(f"{m}\n{r2_label}={s['loo_r2']:+.2f} [{tag}]", fontsize=10)
+        ax.set_title(f"{m}\n{stat_label}={s['stat']:+.2f} [{tag}]", fontsize=10)
         ax.set_xlabel(f'predicted ({unit})', fontsize=8)
         ax.set_ylabel(f'actual ({unit})', fontsize=8)
         ax.tick_params(labelsize=7)
     for idx in range(n, nrows * ncols):
         axes[idx // ncols][idx % ncols].axis('off')
     if title:
-        fig.suptitle(title, fontsize=13)
+        # The cross-city title names every training unit, which at 13 units is
+        # far wider than a one-panel figure; wrap it to the figure's own width
+        # (and save with a tight box) so it is never clipped.
+        import textwrap
+        per_line = max(40, int(11 * 4.0 * ncols))
+        fig.suptitle('\n'.join(textwrap.wrap(title, per_line)), fontsize=11)
     fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
     return fig
 
 
 def vis_heatmap_pair_r2(mat, title=None, save_path=None, vmax=0.6,
-                        xlabel='test', ylabel='train'):
+                        xlabel='test', ylabel='train', blocks=None):
     """Square pairwise cross-city R² heatmap: rows = train unit, cols = test unit,
-    each cell = the transfer R² of that (train, test) pair (the diagonal is the
-    within-unit leave-one-component-out).  Diverging colour centred at 0 (green =
-    beats the mean, red = worse), clipped to ±vmax; each cell annotated (n/a if
-    undefined)."""
-    V = mat.to_numpy(dtype=float)
+    each cell = the transfer R² of that (train, test) pair.  Diverging colour
+    centred at 0 (green = beats the mean, red = worse), clipped to ±vmax; each
+    cell annotated (n/a if undefined).
+
+    The DIAGONAL is excluded — a cell where train and test are the same unit is
+    that unit's own leave-one-component-out, not a transfer between units, and
+    it is both structurally larger than its row and irrelevant to the
+    source-selection question the matrix is read for.  Diagonal cells are drawn
+    blank (grey) and left unannotated; detection is by label, so it survives any
+    row/column reordering.
+
+    `blocks` (optional) [(start, size, cluster_id)] draws a square outline
+    around each contiguous community — pass the caller's Louvain partition with
+    the matrix already reordered to match, otherwise the boxes are meaningless.
+    """
+    from matplotlib.patches import Rectangle
+    V = mat.to_numpy(dtype=float).copy()
     n_r, n_c = V.shape
+    rows, cols = list(mat.index), list(mat.columns)
+    diag = np.zeros_like(V, dtype=bool)
+    for i, r in enumerate(rows):
+        for j, c in enumerate(cols):
+            if r == c:
+                diag[i, j] = True
+    V[diag] = np.nan
+
     fig, ax = plt.subplots(figsize=(1.15 * n_c + 2.6, 1.0 * n_r + 2.0))
-    im = ax.imshow(np.clip(V, -vmax, vmax), cmap='RdYlGn', vmin=-vmax, vmax=vmax,
-                   aspect='auto')
+    cmap = plt.get_cmap('RdYlGn').copy()
+    cmap.set_bad('#d9d9d9')                      # excluded diagonal / undefined
+    im = ax.imshow(np.ma.masked_invalid(np.clip(V, -vmax, vmax)), cmap=cmap,
+                   vmin=-vmax, vmax=vmax, aspect='auto')
     for i in range(n_r):
         for j in range(n_c):
+            if diag[i, j]:
+                continue                          # excluded: no number at all
             v = V[i, j]
             ax.text(j, i, 'n/a' if np.isnan(v) else f'{v:+.2f}',
                     ha='center', va='center', fontsize=10, color='black')
+    for start, size, cid in (blocks or ()):
+        ax.add_patch(Rectangle((start - 0.5, start - 0.5), size, size,
+                               fill=False, edgecolor='#111111', linewidth=2.5,
+                               zorder=5))
+        ax.text(start - 0.42, start - 0.42, f'C{cid}', fontsize=9,
+                fontweight='bold', color='#111111', ha='left', va='top',
+                zorder=6)
     ax.set_xticks(range(n_c))
-    ax.set_xticklabels(list(mat.columns), rotation=30, ha='right', fontsize=9)
+    ax.set_xticklabels(cols, rotation=30, ha='right', fontsize=9)
     ax.set_yticks(range(n_r))
-    ax.set_yticklabels(list(mat.index), fontsize=9)
+    ax.set_yticklabels(rows, fontsize=9)
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
     ax.set_title(title or 'Pairwise cross-city R²', fontsize=12)

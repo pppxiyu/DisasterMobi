@@ -162,9 +162,10 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
     2-cross_city_resi_pred/      the cross-city outputs, split by what is predicted:
         city_total/     bar_cross_city_resi_pred.png + raw_data/ — the CITY-LEVEL
                         cum_loss reconstruction, one number per city-event
-        component_rank/ the per-COMPONENT rank transfer (cum_loss only):
-                        leave-one-out scatters, R² matrix, pairwise heatmap +
-                        raw_data/
+        component_rank/ the per-COMPONENT rank transfer (cum_loss only, and
+                        no income predictor), one subfolder per predictor —
+                        cos_KNN/ and ridge/ — each with its leave-one-out
+                        scatters, R² matrix, pairwise heatmap and raw_data/
     3-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
         plus the three mechanism figures (rank_pred_vs_true, rank_to_cumloss_qm,
         alphaL_relationship_softreg),
@@ -193,7 +194,7 @@ import re
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, least_squares
-from scipy.stats import spearmanr
+from scipy.stats import rankdata, spearmanr
 
 from config import (
     BR_GRAPH_PATH, FM_GRAPH_PATH, BR_ANALYSIS_DAYS, FM_ANALYSIS_DAYS,
@@ -919,6 +920,16 @@ POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
 # Applies to the LOO scatters/matrix and the pairwise analyses; the city-level
 # reconstruction (STEP 6) and the curve prediction (STEP 7) pin 'cosine_knn'.
 CROSS_CITY_MODEL = 'cosine_knn'
+# The RANK channel runs BOTH predictors side by side, each into its own folder
+# under component_rank/, because neither dominates: a 2026-08-04 leave-one-out
+# ablation put ridge ahead on average (mean test R2 +0.36 vs +0.28, better on 8
+# of 13 units) but it is the riskier of the two exactly where it matters most —
+# BR_Ida, the largest unit at k=12, goes +0.10 -> -0.15, while cosine-kNN's
+# bounded, shrunken predictions never blow up.  Showing both is the honest
+# reading; CROSS_CITY_MODEL above stays the pipeline-wide default that the
+# city-level reconstruction and the STEP-7 curve prediction use (ridge was
+# tested there in 2026-07-13 and every absolute-level path exploded).
+CROSS_CITY_RANK_MODELS = {'cos_KNN': 'cosine_knn', 'ridge': 'ridge'}
 
 
 # ── STEP 7 parameters — cross-city curve prediction ─────────────────────────────
@@ -1584,9 +1595,12 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
             raise ValueError(
                 f"analysis_cross_city: method '{m}' is paired with target_std "
                 f"'{expected_std}' (CROSS_CITY_METHOD_STD); got '{target_std}'")
-        if subdir is not None and subdir != expected_label:
+        # The model folder nests INSIDE the paired label, so the check is a
+        # prefix one: component_rank/cos_KNN is legal, another method's label
+        # still is not.
+        if subdir is not None and not str(subdir).startswith(expected_label):
             raise ValueError(
-                f"analysis_cross_city: method '{m}' writes to subdir "
+                f"analysis_cross_city: method '{m}' writes under subdir "
                 f"'{expected_label}' (CROSS_CITY_METHOD_STD); got '{subdir}'")
     if split is None:
         print("  [cross-city] split is None -> skipping the cross-city step.")
@@ -1607,12 +1621,17 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
     else:
         func_cols = FUNC_COLS
         cities = feats_by_city
-    feature_cols = func_cols + ['mean_distance', 'median_income_combined']
+    # income is NOT a rank-channel predictor (dropped 2026-08-04): the same
+    # ablation found it carries nothing the func shares and distance do not
+    # already say in rank space — removing it left every fold within +-0.04 and
+    # nudged the mean up (+0.280 -> +0.292).  The pooled_train paths (city-level
+    # reconstruction, STEP-7) keep it: there it is a LEVEL predictor, which is a
+    # different job and was not part of this test.
+    feature_cols = func_cols + ['mean_distance']
 
     train = [c for c in split.get('train', []) if c in cities]
     test  = [c for c in split.get('test', []) if c in cities]
     pooled_loo = bool(train) and (set(train) == set(test))
-    train_lbl  = '+'.join(train)
 
     results = {}
     for method in methods:
@@ -1625,32 +1644,78 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
         r2_table, pred, groups = cross_city_resilience(
             cities, res_cols, feature_cols, rank=rank, split=split,
             target_std=std_mode, level_feature_cols=level_feature_cols, model=model,
-            pooled_feature_cols=pooled_feature_cols, min_rows=min_rows)
+            # Only the pooled columns this call actually has: the rank channel
+            # dropped income from feature_cols, and the engine indexes
+            # pooled_feature_cols INTO feature_cols before it reaches the branch
+            # that would have ignored them.
+            pooled_feature_cols=[c for c in pooled_feature_cols
+                                 if c in feature_cols],
+            min_rows=min_rows)
         if r2_table.shape[1] == 0:
             continue                                    # skipped/empty (warning already emitted)
         results[method] = r2_table
 
         # Predicted-vs-actual scatter per output column (test unit, or the pool).
         for col, pred_data in pred.items():
+            # The engine hands back the model frame (within-unit z-scored ranks);
+            # the figure shows the RANKS themselves.  The z-score's constants are
+            # the rank vector's own mean/sd, so inverting is exact and carries no
+            # test-label information: for untied ranks mean=(n+1)/2 and
+            # sd=sqrt((n^2-1)/12) depend on n alone.  rankdata on the surviving
+            # rows (cidx) reproduces them and stays correct under ties.
+            # Only `pred` is rewritten here — r2_table was computed upstream on
+            # the standardized arrays and the other cross_city_resilience callers
+            # (STEP-6 city reconstruction, STEP-7) read the engine directly, so
+            # none of them sees this.
+            plot_data = dict(pred_data)
+            if rank and std_mode == 'within_unit':
+                col_groups_u = groups.get(col) or {}
+                for m, pm in pred_data.items():
+                    if pm is None:
+                        continue
+                    y_std, p_std, cidx = (np.asarray(pm[0], dtype=float),
+                                          np.asarray(pm[1], dtype=float), pm[2])
+                    gm = col_groups_u.get(m)
+                    # transfer -> every point is the test unit; pooled-LOO ->
+                    # each unit was z-scored on its own ranks, so invert per unit.
+                    src = (np.asarray(gm) if gm is not None
+                           else np.array([col] * len(cidx)))
+                    y_r, p_r = y_std.copy(), p_std.copy()
+                    for u in dict.fromkeys(src.tolist()):
+                        k = (src == u)
+                        r = rankdata(cities[u].loc[cidx[k], m].to_numpy(float))
+                        sd = r.std() or 1.0
+                        y_r[k] = y_std[k] * sd + r.mean()
+                        p_r[k] = p_std[k] * sd + r.mean()
+                    plot_data[m] = (y_r, p_r, cidx)
+            # Spearman replaces R² on the panel: the target IS a within-unit rank,
+            # so ordering is what this channel claims to transfer, while R² also
+            # scores prediction amplitude (a 2026-08-04 sandbox found the two
+            # rank models tie on rho and differ on R² almost entirely through the
+            # amplitude of their predictions).  Invariant to the inversion above.
+            col_stat = {}
+            for m in res_cols:
+                pm = pred_data.get(m)
+                col_stat[m] = (np.nan if pm is None or len(pm[0]) < 3
+                               else float(spearmanr(pm[0], pm[1]).statistic))
             col_summary = pd.DataFrame({
-                'loo_r2': {m: r2_table.loc[m, col] for m in res_cols},
-                'passed': {m: (bool(r2_table.loc[m, col] > 0)
-                               if pd.notna(r2_table.loc[m, col]) else False)
-                           for m in res_cols},
+                'stat': col_stat,
+                'passed': {m: (bool(col_stat[m] > 0) if pd.notna(col_stat[m])
+                               else False) for m in res_cols},
                 'status': {m: ('ok' if pred_data[m] is not None else 'insufficient_data')
                            for m in res_cols},
             })
-            if pooled_loo:
-                title = f'Pooled-LOO ({method}): {train_lbl}'
-                fname = f'cross_city_scatter_pooledLOO_{lambda_tag}.png'
-            else:
-                title = f'Cross-city ({method}): train [{train_lbl}] -> test {col}'
-                fname = f'cross_city_scatter_{col}_{lambda_tag}.png'
+            # No suptitle: it named every training unit, which at 13 units wrapped
+            # to four lines over a single panel.  The filename carries the test
+            # unit and the training set is every other unit by construction.
+            fname = (f'cross_city_scatter_pooledLOO_{lambda_tag}.png' if pooled_loo
+                     else f'cross_city_scatter_{col}_{lambda_tag}.png')
             vis_scatter_reg_pred(
-                pred_data, col_summary, res_cols, r2_label='test R²',
-                unit=('std rank' if rank else 'std value'),
+                plot_data, col_summary, res_cols, stat_label='test Spearman ρ',
+                unit=('rank within unit' if rank and std_mode == 'within_unit'
+                      else 'std value'),
                 groups=groups.get(col),         # colours pooled-LOO points by city-event
-                title=title,
+                title=None,
                 save_path=os.path.join(out_dir, fname))
 
             # Raw data behind this scatter (predicted vs actual per metric), so each
@@ -1659,14 +1724,18 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
             col_groups = groups.get(col) or {}
             rows = []
             for m in res_cols:
-                pm = pred_data.get(m)
+                pm = plot_data.get(m)
                 if pm is None:
                     continue
                 y_true, y_pred, comp_index = pm
                 grp_m = col_groups.get(m)
                 for i in range(len(y_true)):
+                    # Same scale as the figure (within-unit ranks on the rank
+                    # path), plus the panel's rho so the number stays with the
+                    # points that produced it.
                     rows.append({'metric': m, 'comp_index': comp_index[i],
                                  'y_true': float(y_true[i]), 'y_pred': float(y_pred[i]),
+                                 'spearman': col_stat.get(m, np.nan),
                                  'unit': (grp_m[i] if grp_m is not None else col)})
             if rows:
                 os.makedirs(raw_dir, exist_ok=True)
@@ -1898,6 +1967,83 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
           f"({len(res)} city-events)")
 
 
+# Seed for the pairwise-transfer Louvain partition.  Louvain's node sweep is
+# order-randomised, so an unpinned seed would repartition on every run and the
+# heatmap's boxes would move between otherwise identical pipeline runs.  The
+# partition is barely seed-sensitive here (50 seeds at gamma=1.0: ridge 50/50
+# identical, cosine-kNN 48/50) — the seed buys literal reproducibility, not
+# stability.
+PAIR_LOUVAIN_SEED = 0
+# Modularity's resolution gamma, which scales the null-model term
+# gamma*k_i*k_j/2m: larger gamma charges more for keeping two units together,
+# so communities come out smaller and more numerous.  Louvain takes no
+# cluster-COUNT argument, so this is the only dial on how many boxes appear.
+# Measured on the 13-unit transfer matrices (clusters as cosine-kNN / ridge):
+# gamma 0.5 -> 1/1, 0.8 -> 2/2, 1.0 -> 3/2, 1.2 -> 3/3, 1.5 -> 4/4, 2.0 -> 7/6,
+# 5.0 -> 11/11.  1.2 is the lowest value at which BOTH rank models return the
+# same partition size, so the boxes stop depending on which predictor drew them.
+# Note modularity's resolution limit (~sqrt(2m), and m ~ 17 here) sits at the
+# scale of these 4-5 unit communities, so gamma below ~1 cannot split them at
+# all whatever the data says.
+PAIR_LOUVAIN_RESOLUTION = 1.2
+
+
+def _transfer_communities(mat, seed=PAIR_LOUVAIN_SEED,
+                          resolution=PAIR_LOUVAIN_RESOLUTION):
+    """Louvain communities over the MEASURED pairwise transfer matrix, used only
+    to order and box the heatmap.
+
+    The matrix is directed (rows=train, cols=test) and Louvain needs an
+    undirected non-negative graph, so three reductions are applied, in order:
+      * the diagonal is dropped — it is a within-unit leave-one-component-out,
+        not a transfer between units, and as a self-loop it would only inflate
+        each node's own degree;
+      * negative R² is clipped to 0 — a source that transfers worse than the
+        test unit's own mean carries no affinity, and a negative edge weight is
+        not a modularity input;
+      * the two directions are averaged, w_ab = (r_ab + r_ba)/2, so a
+        one-directional transfer still counts as half an edge.
+
+    NOTE this partition is DESCRIPTIVE only.  Every edge is an R² measured
+    against the test unit's real labels, so the clusters cannot be used to pick
+    a source for a genuinely unseen city — that is the label leakage the
+    2026-07 cluster experiment was rolled back for.  STEP 8 answers the
+    source-selection question from features alone instead.
+
+    Returns (ordered_codes, {code -> cluster_id}, [(start, size, cluster_id)]).
+    """
+    import networkx as nx
+    from networkx.algorithms.community import louvain_communities
+
+    codes = list(mat.index)
+    A = np.nan_to_num(mat.reindex(index=codes, columns=codes)
+                      .to_numpy(dtype=float), nan=0.0)
+    np.fill_diagonal(A, 0.0)
+    A = np.clip(A, 0.0, None)
+    Wsym = (A + A.T) / 2.0
+
+    G = nx.Graph()
+    G.add_nodes_from(range(len(codes)))
+    for i in range(len(codes)):
+        for j in range(i + 1, len(codes)):
+            if Wsym[i, j] > 0:
+                G.add_edge(i, j, weight=float(Wsym[i, j]))
+    comms = louvain_communities(G, weight='weight', seed=seed,
+                                resolution=resolution)
+    # Deterministic presentation: communities ordered by their first member's
+    # original position, members kept in the caller's order.
+    comms = sorted((sorted(c) for c in comms), key=lambda c: c[0])
+
+    ordered, labels, blocks, start = [], {}, [], 0
+    for cid, members in enumerate(comms, start=1):
+        for i in members:
+            ordered.append(codes[i])
+            labels[codes[i]] = cid
+        blocks.append((start, len(members), cid))
+        start += len(members)
+    return ordered, labels, blocks
+
+
 def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
                               target_std=None, subdir=None, level_feature_cols=(),
                               model='ridge', pooled_feature_cols=(),
@@ -1918,20 +2064,22 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
             f"analysis_cross_city_pairs: method '{method}' has no cross-city "
             f"output (CROSS_CITY_METHOD_STD lists "
             f"{sorted(CROSS_CITY_METHOD_STD)}); the raw-value path was retired")
-    expected_std, std_label = CROSS_CITY_METHOD_STD[method]
+    expected_std, paired_label = CROSS_CITY_METHOD_STD[method]
+    std_label = subdir if subdir is not None else paired_label
     if target_std is not None and target_std != expected_std:
         raise ValueError(
             f"analysis_cross_city_pairs: method '{method}' is paired with target_std "
             f"'{expected_std}' (CROSS_CITY_METHOD_STD); got '{target_std}'")
-    if subdir is not None and subdir != std_label:
+    if not str(std_label).startswith(paired_label):
         raise ValueError(
-            f"analysis_cross_city_pairs: method '{method}' writes to subdir "
-            f"'{std_label}' (CROSS_CITY_METHOD_STD); got '{subdir}'")
+            f"analysis_cross_city_pairs: method '{method}' writes under subdir "
+            f"'{paired_label}' (CROSS_CITY_METHOD_STD); got '{std_label}'")
     target_std = expected_std
     subdir = std_label
     rank = (method == 'spearman')
-    feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
-                    + ['mean_distance', 'median_income_combined'])
+    # Same rank channel as analysis_cross_city, so the same predictors:
+    # income is out (see that function).
+    feature_cols = [f'func_{c}' for c in SF_CATEGORIES] + ['mean_distance']
 
     def _merge(feats):
         m = feats.copy()
@@ -1951,7 +2099,9 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
                 feats_pair, RES_COLS, feature_cols, rank=rank,
                 split={'train': [a], 'test': [b]}, target_std=target_std,
                 level_feature_cols=level_feature_cols, model=model,
-                pooled_feature_cols=pooled_feature_cols, min_rows=min_rows)
+                pooled_feature_cols=[c for c in pooled_feature_cols
+                                     if c in feature_cols],
+                min_rows=min_rows)
             col = 'pooled_LOO' if a == b else b
             mat.loc[a, b] = (float(r2_t.loc['cum_loss', col])
                              if col in r2_t.columns and pd.notna(r2_t.loc['cum_loss', col])
@@ -1960,13 +2110,25 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
     out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, subdir)
     raw_dir = os.path.join(out_dir, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
+
+    # Louvain over the off-diagonal transfer; the matrix is REORDERED into the
+    # partition so each community is a contiguous block the figure can box, and
+    # the CSV is written in the same order as the figure it backs.
+    ordered, cl_labels, blocks = _transfer_communities(mat)
+    mat = mat.reindex(index=ordered, columns=ordered)
     mat.to_csv(os.path.join(raw_dir, 'cross_city_pair_heatmap.csv'))
+    pd.Series(cl_labels, name='cluster').rename_axis('code').loc[ordered].to_csv(
+        os.path.join(raw_dir, 'cross_city_pair_clusters.csv'))
     vis_heatmap_pair_r2(
-        mat, title=f'Pairwise cross-city cum_loss R² ({method}; test k=10)',
-        xlabel='test city-event', ylabel='train city-event',
+        mat, title=f'Pairwise cross-city cum_loss R² ({method}; test k=10)\n'
+                   f'Louvain transfer communities boxed (γ={PAIR_LOUVAIN_RESOLUTION}); '
+                   f'diagonal (within-unit LOO) excluded',
+        xlabel='test city-event', ylabel='train city-event', blocks=blocks,
         save_path=os.path.join(out_dir, 'cross_city_pair_heatmap.png'))
     print(f"  [pairwise] cum_loss R² heatmap ({method}) -> "
-          f"{os.path.join(out_dir, 'cross_city_pair_heatmap.png')}")
+          f"{os.path.join(out_dir, 'cross_city_pair_heatmap.png')}  "
+          f"[{len(blocks)} Louvain clusters: "
+          f"{', '.join(f'C{c}={s}' for _, s, c in blocks)}]")
     return mat
 
 
@@ -3262,8 +3424,11 @@ def main():
             cc_train[code] = cc_test[code] = feats_cc
 
         # ── STEP 6 — Cross-city prediction (LOO transfer, pairwise, reconstruction) ──
-        for method, (std_mode, std_label) in CROSS_CITY_METHOD_STD.items():
-            print(f"\n── Cross-city LOO [{method}: {std_label}] ({len(all_codes)} folds) ──")
+        for method, (std_mode, base_label) in CROSS_CITY_METHOD_STD.items():
+          for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
+            std_label = os.path.join(base_label, model_dir)
+            print(f"\n── Cross-city LOO [{method}: {std_label}] "
+                  f"({len(all_codes)} folds, model={model_id}) ──")
             loo_r2 = {}   # held_code -> r2 Series over RES_COLS
             for held in all_codes:
                 rest = [c for c in all_codes if c != held]
@@ -3281,7 +3446,7 @@ def main():
                     methods=[method],
                     split={'train': rest, 'test': [held]},
                     target_std=std_mode, subdir=std_label,
-                    level_feature_cols=LEVEL_FEATURE_COLS, model=CROSS_CITY_MODEL,
+                    level_feature_cols=LEVEL_FEATURE_COLS, model=model_id,
                     pooled_feature_cols=POOLED_FEATURE_COLS)
                 r2_table = (res or {}).get(method)
                 if r2_table is not None and held in r2_table.columns:
@@ -3296,16 +3461,17 @@ def main():
                 os.makedirs(raw_dir, exist_ok=True)
                 out_csv = os.path.join(raw_dir, 'loo_cross_city_r2_baseline.csv')
                 mat.to_csv(out_csv)
-                print(f"  [{method}] LOO cross-city R² matrix -> {out_csv}")
+                print(f"  [{model_dir}] LOO cross-city R² mean="
+                      f"{mat.loc['cum_loss'].mean():+.3f} -> {out_csv}")
 
             # Pairwise single-train -> single-test cum_loss R² (ordered pairs);
-            # test at k=10, train at its own k; diagonal = within-unit LOO.
-            print(f"── Cross-city pairwise cum_loss heatmap [{method}: {std_label}] ──")
+            # the diagonal is the within-unit leave-one-component-out.
+            print(f"── Cross-city pairwise cum_loss heatmap [{std_label}] ──")
             analysis_cross_city_pairs(cc_train, cc_test, all_codes,
                                       method=method,
                                       target_std=std_mode, subdir=std_label,
                                       level_feature_cols=LEVEL_FEATURE_COLS,
-                                      model=CROSS_CITY_MODEL,
+                                      model=model_id,
                                       pooled_feature_cols=POOLED_FEATURE_COLS)
 
         # City-level reconstruction of the cross-city cum_loss prediction vs ground
