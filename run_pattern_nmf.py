@@ -201,13 +201,11 @@ from utils.pattern_analysis.graph_io import (
     load_graphs_trimmed, build_distance_array, build_income_array,
 )
 from utils.pattern_analysis.decomposition import select_segment_columns
-from utils.pattern_analysis.nmf_pipeline import (
-    build_city_matrices, decompose_city, decompose_city_context,
-    nmf_quality_metrics, rank_cv_entry,
+from utils.pattern_analysis.nmf_pipeline import build_city_matrices
+from utils.pattern_analysis.cbg_units import (
+    build_cbg_units, cbg_functional_features, cbg_socioeconomic_features,
 )
 from utils.pattern_analysis.visualization import (
-    vis_heatmap_temporal_signature, vis_nmf_quality, vis_nmf_quality_summary,
-    vis_nmf_rank_cv,
     vis_line_nmf_component_timeline, vis_heatmap_od_function,
     vis_line_resilience_curves,
     vis_heatmap_corr,
@@ -215,7 +213,7 @@ from utils.pattern_analysis.visualization import (
     vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
     vis_heatmap_pair_r2, vis_scatter_intensity_resilience,
     vis_bar_cross_city_resi_pred, vis_bar_curve_mae, vis_curves_city_pred,
-    vis_component_curves_grid, vis_od_flow_slider_html, vis_w2_decomposition,
+    vis_component_curves_grid, vis_w2_decomposition,
     vis_rank_pred_vs_true, vis_rank_to_cumloss_qm,
     vis_alpha_level_relationship,
     vis_transferability_map,
@@ -225,7 +223,7 @@ from utils.pattern_analysis.space_function import (
 )
 from utils.pattern_analysis.component_features import (
     PERIOD_BANDS,
-    temporal_features, functional_features, time_function_correlation,
+    temporal_features, time_function_correlation,
     resilience_features, resilience_curves, component_function_entropy,
     spatial_features, socioeconomic_features, recovery_curve_features,
     daily_baselines,
@@ -434,7 +432,11 @@ CITY_EVENTS = [
          first_day_normal='Monday', first_day_disaster='Friday'),
 ]
 
-OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf')
+# UNIT = census block group on this branch, so the outputs live under their own
+# root: outputs/nmf/ stays exactly as the component pipeline left it and the two
+# unit definitions can be compared side by side without either overwriting the
+# other.
+OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'cbg')
 
 # Per-city block-group space-function data (EPA Smart Location Database).
 SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')
@@ -896,7 +898,7 @@ OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '4-cross_city_curve_pred')
 # cross_city_od_pred/<code>/.  OD_MAP_TOP_ARCS caps the arcs drawn per
 # day-and-view (kept by |flow|) so the embedded data stays a few MB.
 OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, '5-cross_city_od_pred')
-CURVE_OD_MAPS = True
+CURVE_OD_MAPS = False   # needs H as a learned basis to reconstruct OD flows
 OD_MAP_TOP_ARCS = 600
 
 # ── STEP 8 parameters — transferability (source selection) ─────────────────────
@@ -977,159 +979,6 @@ def _lambda_tag(lambda_ctx):
     return f"lambda{lambda_ctx:g}" if lambda_ctx is not None else "baseline"
 
 
-def _rank_cv_fit_matrix(cfg):
-    """A unit's FIT-window matrix [n_fit_slots × n_OD] — the only data the rank
-    CV touches (no disaster columns, no downstream quantity)."""
-    graphs = load_graphs_trimmed(cfg['graph'], cfg['analysis_days'],
-                                 SLOT_PER_DAY, label=cfg['label'])
-    X_all, n_nor, _m = build_city_matrices(
-        graphs, cfg['window'], cfg['buffer'] + cfg['disaster'],
-        cfg['filter_factor'])
-    n_dis = n_nor + cfg['buffer'] * SLOTS_ACTIVE
-    fit = (None if set(cfg['fit_segments']) == {'normal', 'buffer', 'disaster'}
-           else select_segment_columns(cfg['fit_segments'], n_nor, n_dis,
-                                       X_all.shape[1]))
-    Xt = X_all.T
-    return Xt[fit] if fit is not None else Xt
-
-
-def _rank_cv_k_grid(X):
-    """Candidate ranks: every k up to 12, then coarser.  Starts at k = 1 so a
-    minimum sitting at the left edge is visible as such rather than being an
-    artefact of where the grid begins."""
-    k_max = int(min(RANK_CV_K_MAX, *X.shape))
-    ks = list(range(1, min(13, k_max + 1)))
-    ks += [k for k in (15, 18, 21, 25, 30, 35, 40) if k <= k_max]
-    return sorted(set(ks))
-
-
-def analysis_rank_cv(cfgs):
-    """STEP 1 — how many components does each unit's data support?
-
-    Sweeps k for every registry unit under held-out-entry cross-validation and
-    writes the per-unit curves plus the selection table.  Runs over ALL units,
-    including those EXCLUDED_CODES drops from the later steps: the exclusion is
-    a CONSEQUENCE of this analysis, so its own record has to stay complete.
-
-    Reuses the cached curves when they already cover every unit (the curves do
-    not depend on n_behaviors — see the RANK_CV_CURVES_CSV comment); otherwise
-    computes the missing units and rewrites the cache.
-    """
-    codes = [c['code'] for c in cfgs]
-    cached = (pd.read_csv(RANK_CV_CURVES_CSV)
-              if os.path.exists(RANK_CV_CURVES_CSV) else
-              pd.DataFrame(columns=['code', 'n_od', 'k', 'mean', 'sd']))
-    todo = [c for c in cfgs if c['code'] not in set(cached.get('code', []))]
-    if todo:
-        print(f"  computing rank CV for {len(todo)} unit(s) "
-              f"({len(codes) - len(todo)} cached)")
-        rows = []
-        for cfg in todo:
-            X = _rank_cv_fit_matrix(cfg)
-            print(f"    {cfg['code']}  X_fit {X.shape}", flush=True)
-            for k in _rank_cv_k_grid(X):
-                # Identical seeds at every k, so the curve compares ranks on
-                # the same held-out cells rather than differently-lucky masks.
-                errs = np.array([rank_cv_entry(X, k, cfg['l1_reg'],
-                                               np.random.default_rng(RANK_CV_SEED + r),
-                                               frac=RANK_CV_ENTRY_FRAC)
-                                 for r in range(RANK_CV_REPEATS)], dtype=float)
-                rows.append(dict(code=cfg['code'], n_od=X.shape[1], k=k,
-                                 mean=np.nanmean(errs), sd=np.nanstd(errs)))
-        cached = pd.concat([cached, pd.DataFrame(rows)], ignore_index=True)
-        os.makedirs(OUTPUT_QUALITY_RAW, exist_ok=True)
-        cached.to_csv(RANK_CV_CURVES_CSV, index=False)
-    else:
-        print(f"  reusing cached rank-CV curves for all {len(codes)} units")
-
-    df = cached[cached.code.isin(codes)]
-    recs = {}
-    for cfg in cfgs:
-        s = df[df.code == cfg['code']].sort_values('k')
-        k = s['k'].to_numpy(); m = s['mean'].to_numpy(); sd = s['sd'].to_numpy()
-        i = int(np.nanargmin(m))
-        rec = dict(n_od=int(s['n_od'].iloc[0]), k_current=cfg['n_behaviors'],
-                   k_min=int(k[i]))
-        for name, mult, use_se in RANK_CV_BANDS:
-            tol = mult * (sd[i] / np.sqrt(RANK_CV_REPEATS) if use_se else sd[i])
-            ok = np.where(m <= m[i] + tol)[0]
-            rec[name + '_lo'] = int(k[ok].min())
-            rec[name + '_hi'] = int(k[ok].max())
-        rec['excluded'] = cfg['code'] in EXCLUDED_CODES
-        recs[cfg['code']] = rec
-
-    # Ordered by matrix size: the size effect is the pattern to read off.
-    table = pd.DataFrame(recs).T.sort_values('n_od', ascending=False)
-    curves = {c: (df[df.code == c].sort_values('k')['k'].to_numpy(),
-                  df[df.code == c].sort_values('k')['mean'].to_numpy(),
-                  df[df.code == c].sort_values('k')['sd'].to_numpy())
-              for c in table.index}
-    os.makedirs(OUTPUT_QUALITY, exist_ok=True)
-    vis_nmf_rank_cv(curves, table, band=RANK_CV_FIGURE_BAND,
-                    save_path=os.path.join(OUTPUT_QUALITY, 'nmf_rank_cv.png'))
-    table.to_csv(os.path.join(OUTPUT_QUALITY_RAW, 'nmf_rank_cv_selected.csv'))
-    print(f"  [rank CV] {len(table)} units -> {OUTPUT_QUALITY}; "
-          f"dropped downstream: {', '.join(sorted(EXCLUDED_CODES))}")
-
-
-def analysis_decomposition_quality(label, code, X_all, W, H, fit_time_cols):
-    """Per-unit decomposition-quality check (see the OUTPUT_QUALITY
-    comment for the three metric families; FIT-window only, the disaster
-    period is out of scope by design).  Saves the unit's figure and returns
-    the summary row for the cross-city dashboard."""
-    q = nmf_quality_metrics(X_all.T, W, H, fit_time_cols,
-                            min_comp_frac=NMF_MIN_COMP_FRAC)
-    os.makedirs(OUTPUT_QUALITY, exist_ok=True)
-    vis_nmf_quality(
-        q,
-        title=f'{label} [{code}]: NMF decomposition quality, fit window '
-              f'(k = {W.shape[1]})',
-        save_path=os.path.join(OUTPUT_QUALITY, f'nmf_quality_{code}.png'))
-    print(f"  Quality (fit window): dist_err={q['dist_err_mean']:.4f}  "
-          f"rel_err={q['rel_err']:.4f}  "
-          f"comps below {NMF_MIN_COMP_FRAC:.0%}: {q['n_below']}/{W.shape[1]}")
-    return dict(code=code, k=W.shape[1],
-                dist_err_mean=q['dist_err_mean'],
-                rel_err=q['rel_err'], n_below=q['n_below'])
-
-
-def analysis_decomposition_quality_summary(rows):
-    """Cross-city quality dashboard + raw CSV, after every unit is decomposed."""
-    df = pd.DataFrame(rows).set_index('code')
-    os.makedirs(OUTPUT_QUALITY_RAW, exist_ok=True)
-    df.to_csv(os.path.join(OUTPUT_QUALITY_RAW, 'nmf_quality_metrics.csv'))
-    vis_nmf_quality_summary(
-        df, NMF_MIN_COMP_FRAC,
-        save_path=os.path.join(OUTPUT_QUALITY, 'nmf_quality_summary.png'))
-    bad = df[df['n_below'] > 0]
-    flag = (f"{len(bad)} unit(s) VIOLATE the component-count rule: "
-            + ", ".join(f"{c} ({int(n)})" for c, n in bad['n_below'].items())
-            if len(bad) else "all units satisfy the component-count rule")
-    print(f"\n  [decomposition quality] {flag} -> {OUTPUT_QUALITY}")
-
-
-def analysis_component_signature(W, n_nor, n_dis, first_day_normal,
-                                 first_day_disaster, tag):
-    """Component temporal and spatial characteristics.  Plots the full-window W
-    heatmap and the per-component timeline (normal blue, buffer amber, disaster
-    red, black dashed line at landfall).  n_nor marks the end of the clean
-    normal columns and n_dis the disaster start, so [n_nor, n_dis) is the
-    buffer."""
-    os.makedirs(OUTPUT_TEMPORAL_HM, exist_ok=True)
-    os.makedirs(OUTPUT_TEMPORAL_CV, exist_ok=True)
-    vis_heatmap_temporal_signature(
-        W, first_day=first_day_normal, show_days=True,
-        slots_per_day=SLOTS_ACTIVE, interval_hours=_INTERVAL_HOURS,
-        output_dir=OUTPUT_TEMPORAL_HM, tag=tag,
-    )
-    vis_line_nmf_component_timeline(
-        W[:n_nor], W[n_dis:], W_buffer=W[n_nor:n_dis],
-        first_day_normal=first_day_normal, first_day_disaster=first_day_disaster,
-        slots_per_day=SLOTS_ACTIVE,
-        output_dir=OUTPUT_TEMPORAL_CV, tag=tag,
-    )
-
-
 def analysis_spatial(label, H, mapping, gdf, weights, tag, lambda_ctx=None):
     """Per-component SPATIAL characteristics block (structurally parallel to the
     O×D functional block).  Builds the OD centroid distance array
@@ -1156,6 +1005,18 @@ def analysis_spatial(label, H, mapping, gdf, weights, tag, lambda_ctx=None):
     spatial_feats.to_csv(os.path.join(OUTPUT_SPATIAL_DIST_RAW,
                                       f'spatial_features_{lambda_tag}{tag}.csv'))
     return distances
+
+
+def _income_by_aggr(label, key, gdf, year=ACS_INCOME_YEAR):
+    """aggr_id -> ACS median household income, from the same cache the
+    component path uses.  RAISES if the data cannot be obtained (e.g. a missing
+    CENSUS_API_KEY) — loud, not a silent skip."""
+    os.makedirs(ACS_DATA_DIR, exist_ok=True)
+    raw_csv = os.path.join(ACS_DATA_DIR,
+                           f'{key}_block_group_acs_income_{year}_raw.csv')
+    ensure_city_income_raw(label, gdf['aggr_id'].tolist(), raw_csv, year=year)
+    income = load_city_income(raw_csv)
+    return dict(zip(income['aggr_id'], income['median_household_income']))
 
 
 def analysis_socioeconomic(label, key, tag, gdf, H, mapping, weights,
@@ -1199,55 +1060,6 @@ def analysis_socioeconomic(label, key, tag, gdf, H, mapping, weights,
     # The median_income_<mode> columns join `feats` and appear as right-hand
     # columns of the resilience-correlation heatmap.
     return socio
-
-
-def analysis_od_function(label, tag, H, mapping, weights, landuse,
-                         lambda_ctx=None):
-    """O×D functionality block.  Takes the city's GLOBAL-recipe land-use
-    classification (`landuse`, from the STEP-1 global classification pass),
-    aggregates each component's OD flows into an origin×destination functional
-    cross-tab, and saves the heatmap grid plus a per-component functional-share
-    CSV.  Also saves the across-component entropy distribution of each
-    component's outflow/inflow functional mix (the heatmap M marginals);
-    lambda_ctx tags the filename so context-aware strengths can be compared.
-    Returns M [k × C × C]."""
-    os.makedirs(OUTPUT_FUNC, exist_ok=True)
-    print(f"  {label}: dominant_category counts: "
-          f"{landuse['dominant_category'].value_counts().to_dict()}")
-
-    cat_lookup = category_lookup_from_landuse(landuse)
-    M, retained = build_od_function_matrix(H, mapping, cat_lookup, AXIS_CATEGORIES)
-    print(f"  {label}: O×D flow retained in-category per component: "
-          + ", ".join(f"[{i}]={r:.2f}" for i, r in enumerate(retained)))
-    vis_heatmap_od_function(
-        M, AXIS_CATEGORIES, weights=weights, ncols=3,
-        save_path=os.path.join(OUTPUT_FUNC, f'heatmap_od_functionality{tag}.png'),
-    )
-    # Per-component functional dimensions — the 12 from/to shares, one row per
-    # component (index), for inspecting the raw values behind the heatmap.
-    os.makedirs(OUTPUT_FUNC_HM_RAW, exist_ok=True)
-    functional_features(M, AXIS_CATEGORIES).to_csv(
-        os.path.join(OUTPUT_FUNC_HM_RAW, f'component_functionality{tag}.csv'))
-
-    # Functional-entropy distribution across components.  `entropy` is the
-    # Shannon entropy of the MERGED exposure (outflow row sums + inflow column
-    # sums) of the SAME heatmap M (categories include 'Mix'); lower = more
-    # functionally concentrated.  The x axis is fixed to [0, ln K] so every
-    # city-event's histogram is on one scale.  λ is in the filename for
-    # cross-strength comparison.
-    lambda_tag = _lambda_tag(lambda_ctx)
-    ent = component_function_entropy(M)
-    os.makedirs(OUTPUT_FUNC_ENT_RAW, exist_ok=True)
-    ent.to_csv(os.path.join(OUTPUT_FUNC_ENT_RAW,
-                            f'component_function_entropy_{lambda_tag}{tag}.csv'))
-    vis_hist_function_entropy(
-        ent, lambda_ctx=lambda_ctx,
-        max_entropy=float(np.log(len(AXIS_CATEGORIES))),
-        title=f'{label}: functional entropy across components',
-        save_path=os.path.join(OUTPUT_FUNC,
-                               f'hist_function_entropy_{lambda_tag}{tag}.png'),
-    )
-    return M
 
 
 def analysis_time_function_corr(feats, tag):
@@ -1520,33 +1332,22 @@ def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
 # ── STEP 5 — cross-city feature tables ──────────────────────────────────────────
 
 def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_cols, k,
-                            cat_lookup):
-    """Decompose this city at `k` and assemble ONLY the cross-city predictor/target
-    columns (share_from/to_<c>, mean_distance/std_distance, median_income_combined,
-    RES_COLS) — no figures, no within-city side effects.  Used by the leave-one-city-
-    event-out cross-city loop to build the HELD-OUT (test) unit's feats at a fixed k
-    (k=10), independent of the unit's own n_behaviors used elsewhere.  l1_reg is
-    the unit's CITY_EVENTS value (only k differs).  `cat_lookup` is the unit's block-group
-    -> category map from the STEP-1 global classification.
-    Returns (feats, (W, H)) — the decomposition is reused by STEP 7."""
-    W, H, weights = decompose_city(X_all, k, l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
-    M, _ = build_od_function_matrix(H, mapping, cat_lookup, AXIS_CATEGORIES)
+                            cat_lookup, landuse=None):
+    """Build this city's block-group units and assemble ONLY the cross-city
+    predictor/target columns (share_from/to_<c>, mean_distance/std_distance,
+    median_income_combined, RES_COLS) — no figures, no within-city side effects.
+    `k` is accepted and ignored: it selected a component count, and the unit set
+    is now given by the data.  Land use and income are the unit's OWN, matching
+    the within-city block.
+    Returns (feats, (W, H)) — reused by STEP 7."""
+    W, H, nodes, weights = build_cbg_units(X_all, mapping)
     distances = build_distance_array(mapping, gdf)
-    # Per-component loading-weighted median household income (ACS cache; 'combined' =
-    # nan-aware mean of the origin+destination BG incomes per flow).  A cross-city
-    # PREDICTOR (POOLED_FEATURE_COLS): its cross-city signal is the WITHIN-city spread
-    # across components, which the static city-wide income does not carry.
-    inc_csv = os.path.join(ACS_DATA_DIR,
-                           f"{cfg['key']}_block_group_acs_income_{ACS_INCOME_YEAR}_raw.csv")
-    ensure_city_income_raw(cfg['label'], gdf['aggr_id'].tolist(), inc_csv,
-                           year=ACS_INCOME_YEAR)
-    income = load_city_income(inc_csv)
-    income_by_aggr = dict(zip(income['aggr_id'], income['median_household_income']))
-    income_array = build_income_array(mapping, income_by_aggr, mode='combined')
+    income_by_aggr = _income_by_aggr(cfg['label'], cfg['key'], gdf)
     feats = pd.concat([
-        functional_features(M, AXIS_CATEGORIES),
+        cbg_functional_features(nodes, landuse, SF_CATEGORIES),
         spatial_features(H, distances),
-        socioeconomic_features(H, income_array, name='median_income_combined'),
+        cbg_socioeconomic_features(nodes, income_by_aggr,
+                                   ['combined'], name='median_income'),
         resilience_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE, n_dis=n_dis),
         recovery_curve_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
                                 n_dis=n_dis, max_rate=ALPHA_MAX_RATE,
@@ -3018,14 +2819,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    # ── STEP 1 — How many components does each unit support? ───────────────────
-    # Runs over EVERY registry unit; its verdict is what EXCLUDED_CODES encodes.
-    print("\n── Rank cross-validation (all registry units) ──")
-    analysis_rank_cv(CITY_EVENTS)
-
-    # ── STEP 2 — Load the retained units and classify land use once ────────────
-    # EXCLUDED_CODES drop out here, so nothing downstream — not the pooled
-    # land-use classification, not the cross-city steps — sees them.
+    # ── STEP 1 — Load the units and classify land use once ─────────────────────
+    # There is no rank cross-validation here: it chose how many COMPONENTS a
+    # matrix supports, and block groups are given, not estimated.  EXCLUDED_CODES
+    # is kept so this branch analyses the SAME 13 city-events as the component
+    # branch and any difference in the results is the unit definition alone.
     active = [c for c in CITY_EVENTS if c['code'] not in EXCLUDED_CODES]
     print(f"\n── {len(active)} of {len(CITY_EVENTS)} units retained ──")
 
@@ -3046,11 +2844,13 @@ def main():
     print("\n── Global land-use classification (pooled TF-IWF) ──")
     global_iwf, landuse_by_code, cc_lookups = _global_landuse_classification(units)
 
-    # ── STEP 2 — Decompose every unit ───────────────────────────────────────────
-    # Trimming keeps the FIRST analysis_days days,
-    # which drops the late recovery tail and leaves landfall + 14 recovery days at
-    # the sequence end for the trailing window taken in build_city_matrices.
-    _ALL_SEGMENTS = {'normal', 'buffer', 'disaster'}
+    # ── STEP 2 — Build the block-group units ──────────────────────────────────
+    # Trimming keeps the FIRST analysis_days days, which drops the late recovery
+    # tail and leaves landfall + 14 recovery days at the sequence end for the
+    # trailing window taken in build_city_matrices.  What follows is the ONLY
+    # structural difference from the component branch: instead of learning k
+    # latent units, every block group present in the filtered OD matrix becomes
+    # a unit, and (W, H, weights) are assembled directly from the flows.
     for code, u in units.items():
         cfg, label = u['cfg'], u['label']
         print()
@@ -3060,31 +2860,12 @@ def main():
         X_all, n_nor, mapping = build_city_matrices(
             graphs, cfg['window'], cfg['buffer'] + cfg['disaster'], cfg['filter_factor'])
         n_dis = n_nor + cfg['buffer'] * SLOTS_ACTIVE
-        # All three fit segments -> fit_time_cols=None (exact original full-window fit);
-        # a subset fits the basis on those columns and projects the full window onto it.
-        fit_time_cols = (None if set(cfg['fit_segments']) == _ALL_SEGMENTS
-                         else select_segment_columns(cfg['fit_segments'],
-                                                     n_nor, n_dis, X_all.shape[1]))
-        print(f"── NMF: {label} [{code}] ──")
-        if cfg['context_aware']:
-            W, H, weights = decompose_city_context(
-                X_all, cfg['n_behaviors'], mapping, landuse_by_code[code],
-                lambda_ctx=cfg['lambda_ctx'], feature_mode=FLOW_FEATURE_MODE,
-                l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
-        else:
-            W, H, weights = decompose_city(
-                X_all, cfg['n_behaviors'], l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
+        W, H, nodes, weights = build_cbg_units(X_all, mapping)
+        print(f"── Units: {label} [{code}] — {len(nodes)} block groups "
+              f"(vs k = {cfg['n_behaviors']} components on the other branch) ──")
         u.update(
             H=H, W=W, mapping=mapping, weights=weights, n_nor=n_nor, n_dis=n_dis,
-            # Kept for the cross-city LOO, which re-decomposes the held-out unit at k=10.
-            X_all=X_all, fit_time_cols=fit_time_cols)
-
-    # ── STEP 3b — Decomposition-quality check, retained units + summary ───────
-    quality_rows = [
-        analysis_decomposition_quality(u['label'], code, u['X_all'], u['W'],
-                                       u['H'], u['fit_time_cols'])
-        for code, u in units.items()]
-    analysis_decomposition_quality_summary(quality_rows)
+            nodes=nodes, X_all=X_all, fit_time_cols=None)
 
     # ── STEP 3 — Within-city analyses: characterise each unit's components ──
 
@@ -3100,22 +2881,26 @@ def main():
         first_day_nor, first_day_dis, ctx_lambda = (
             u['first_day_nor'], u['first_day_dis'], u['ctx_lambda'])
         print(f"\n── {label}: analysis ──")
-        analysis_component_signature(W, n_nor, n_dis, first_day_nor, first_day_dis, tag)
-        
+        # No per-unit temporal-signature figure: that displayed a LEARNED basis
+        # vector, and a block group's activity curve is already its timeline.
         distances = analysis_spatial(label, H, mapping, gdf, weights, tag,
                                      lambda_ctx=ctx_lambda)
-        socio = analysis_socioeconomic(label, key, tag, gdf, H, mapping,
-                                       weights, lambda_ctx=ctx_lambda)
-        M = analysis_od_function(label, tag, H, mapping, weights,
-                                 landuse_by_code[code], lambda_ctx=ctx_lambda)
+        # Land use and income are read off the unit ITSELF rather than averaged
+        # over the endpoints of its flows — a block group HAS both, a component
+        # only has them through the trips it loads on.  Same column names, so
+        # every downstream selector still finds what it expects.
+        socio = cbg_socioeconomic_features(
+            u['nodes'], _income_by_aggr(label, key, gdf), INCOME_ENDPOINT_MODES)
+        func = cbg_functional_features(u['nodes'], landuse_by_code[code],
+                                       SF_CATEGORIES)
 
         feats = pd.concat([
             # Temporal features read W[:n_nor].
             temporal_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, _INTERVAL_HOURS,
                               weekend_ratio_threshold=WEEKEND_RATIO_THRESHOLD),
 
-            # Functional profile reads M.
-            functional_features(M, AXIS_CATEGORIES),
+            # Functional profile: the unit's OWN land-use composition.
+            func,
 
             # Spatial: mean_distance, std_distance (reads H + OD centroid distances).
             spatial_features(H, distances),
@@ -3215,7 +3000,7 @@ def main():
             feats_cc, dec_test[code] = _build_cross_city_feats(
                 u['cfg'], u['X_all'], u['n_nor'], u['n_dis'], u['mapping'],
                 u['gdf'], u['fit_time_cols'], u['cfg']['n_behaviors'],
-                cat_lookup=cc_lookups[code])
+                cat_lookup=cc_lookups[code], landuse=landuse_by_code[code])
             # Both roles now read the SAME decomposition: the test-role k used to
             # be pinned at a fixed K_LOO_TEST because a brand-new city had no
             # tuned k, but the rank CV supplies one from the city's own matrix
