@@ -192,7 +192,7 @@ def functional_features(M, categories, drop=('Mix', 'Unknown')):
     Parameters
     ----------
     M          : ndarray [k × C × C]  per-component O×D proportions
-                 (build_od_function_matrix output)
+                 (build_od_function_matrix_soft output)
     categories : list[str] axis categories of M (length C)
     drop       : categories excluded before renormalisation
 

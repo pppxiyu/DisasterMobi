@@ -2,9 +2,9 @@
 Visualisation helpers for pattern analysis.
 
 Most functions serve the production NMF pipeline (run_pattern_nmf.py).  The
-functions marked "only used by archive/..." in their docstrings serve the
-archived exploration scripts and can be skipped by production readers.
-contextily is imported for the archive-only vis_map_spatial_factors basemap.
+flow time-series section marked "only used by archive/..." in its header
+serves archive/run_pattern_temporal_decay.py (via utils.pattern_analysis
+.temporal) and can be skipped by production readers.
 """
 import os
 import numpy as np
@@ -20,7 +20,6 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.ticker as ticker
 import seaborn as sns
-import contextily as cx
 
 
 # ── Flow time-series (only used by archive/run_pattern_temporal_decay.py) ─────
@@ -162,115 +161,6 @@ def vis_heatmap_temporal_signature(
     os.makedirs(output_dir, exist_ok=True)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, f'heatmap_temporal_signature{tag}.png'), bbox_inches='tight', dpi=150)
-    plt.close()
-
-
-# ── Tucker factor plots (only used by archive/run_pattern_tucker.py) ──────────
-
-def vis_heatmap_spatial_profiles(factors, output_dir='outputs', tag=''):
-    """Side-by-side heatmaps of origin (U1) and destination (U2) spatial factor matrices.
-    Saves to: <output_dir>/spatial_profiles<tag>.png
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    U_ori, U_dest, _ = factors
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    sns.heatmap(U_ori,  ax=axes[0], cmap='YlGnBu')
-    axes[0].set_title("Origin Profiles (U1)")
-    sns.heatmap(U_dest, ax=axes[1], cmap='YlOrRd')
-    axes[1].set_title("Destination Profiles (U2)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'spatial_profiles{tag}.png'), bbox_inches='tight', dpi=150)
-    plt.close()
-
-
-def vis_map_spatial_factors(U_ori, gdf, spatial_mapping,
-                             component_indices=None, ncols=3,
-                             output_dir='outputs', tag=''):
-    """Choropleth maps for selected columns of U_ori overlaid on a contextily basemap.
-    Saves to: <output_dir>/spatial_factors<tag>.png
-    """
-    if component_indices is None:
-        component_indices = list(range(U_ori.shape[1]))
-    plot_gdf = gdf.copy()
-    n_comps  = len(component_indices)
-    nrows    = int(np.ceil(n_comps / ncols))
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 6 * nrows))
-    axes = np.array([axes]).flatten() if n_comps == 1 else axes.flatten()
-    cmaps = ['viridis','plasma','inferno','magma','cividis','YlGnBu']
-
-    for i, comp_idx in enumerate(component_indices):
-        ax = axes[i]
-        col = f'factor_{comp_idx}'
-        fv  = {spatial_mapping[k]: U_ori[k, comp_idx] for k in range(len(spatial_mapping))}
-        plot_gdf[col] = plot_gdf['aggr_id'].map(fv)
-        gdf_3857 = plot_gdf.dropna(subset=[col]).to_crs(epsg=3857)
-        gdf_3857.plot(column=col, ax=ax, cmap=cmaps[i % len(cmaps)],
-                      alpha=0.6, legend=True,
-                      legend_kwds={'shrink': 0.5, 'label': 'Factor Loading'})
-        cx.add_basemap(ax, source=cx.providers.CartoDB.Positron)
-        ax.set_title(f"Spatial Factor {comp_idx}", fontsize=14, fontweight='bold')
-        ax.set_axis_off()
-
-    for j in range(i + 1, len(axes)):
-        fig.delaxes(axes[j])
-    os.makedirs(output_dir, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f'spatial_factors{tag}.png'), bbox_inches='tight', dpi=150)
-    plt.close()
-
-
-def vis_heatmap_core_interaction(core, time_slice=0, sum_temporal=False, threshold=0.1,
-                                  output_dir='outputs', tag=''):
-    """Heatmap of the Tucker core tensor G[:, :, time_slice]: origin-component ×
-    destination-component interaction strength for a single temporal component.
-    Saves to: <output_dir>/core_interaction_ts<time_slice><tag>.png
-              (or core_interaction_summed<tag>.png when sum_temporal=True)
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    plt.figure(figsize=(7, 6))
-    if sum_temporal:
-        data  = np.sum(core, axis=2)
-        title = "Core Interaction (G) – Summed"
-        fname = f'core_interaction_summed{tag}.png'
-    else:
-        data  = core[:, :, time_slice]
-        title = f"Core Interaction (G) for Temporal Component {time_slice}"
-        fname = f'core_interaction_ts{time_slice}{tag}.png'
-    labels = np.where(np.abs(data) > threshold,
-                      np.around(data, 2).astype(str), "")
-    sns.heatmap(data, annot=labels, fmt="", cmap='viridis',
-                annot_kws={"color": "white"})
-    plt.title(title, fontweight='bold', pad=15)
-    plt.xlabel("Destination Factor (U2)"); plt.ylabel("Origin Factor (U1)")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
-    plt.close()
-
-
-def vis_heatmap_component_mapping(weights, basis_name, target_name,
-                                   output_dir='outputs', tag=''):
-    """Annotated heatmap of the softmax-weighted component mapping matrix
-    (rows=basis components, cols=target components).
-    Saves to: <output_dir>/component_mapping_<basis>_to_<target><tag>.png
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(
-        weights, annot=True, fmt=".3f", cmap='YlGnBu',
-        xticklabels=[f'{target_name} Comp {i}' for i in range(weights.shape[1])],
-        yticklabels=[f'{basis_name} Comp {i}' for i in range(weights.shape[0])],
-    )
-    plt.title(f'Component Mapping: {basis_name} → {target_name}',
-              fontsize=14, pad=20, fontweight='bold')
-    plt.xlabel(f'{target_name} (Target)', fontsize=12)
-    plt.ylabel(f'{basis_name} (Basis)',   fontsize=12)
-    plt.xticks(rotation=45); plt.yticks(rotation=0)
-    fname = (f"component_mapping"
-             f"_{basis_name.replace(' ', '_')}"
-             f"_to_{target_name.replace(' ', '_')}"
-             f"{tag}.png")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, fname), bbox_inches='tight', dpi=150)
     plt.close()
 
 
@@ -433,179 +323,6 @@ def vis_line_nmf_component_timeline(
     plt.savefig(os.path.join(output_dir, f'line_component_timeline{tag}.png'),
                 bbox_inches='tight', dpi=150)
     plt.close()
-
-
-# ── Distance decay (only used by archive/run_pattern_distance_decay_paired.py) ─
-#
-# Pure plotting helper for per-component distance-decay fits.  The truncated
-# power-law fitting itself happens upstream (see run_pattern_nmf.py's
-# add-on block) and the result is passed in.  No `powerlaw` import is needed
-# here — `fits[i]['_fit']` carries the powerlaw.Fit object whose `.plot_pdf`
-# method we call.
-
-def vis_grid_distance_decay(fits, weights, city_label, output_path, ncols=3):
-    """
-    Figure-7 style grid: one log-log panel per NMF component showing the
-    empirical OD-distance PDF (above x_min) and the fitted truncated
-    power-law.
-
-    Parameters
-    ----------
-    fits : list of dict
-        Each entry is the output of fit_truncated_power_law() — must contain
-        'alpha', 'lambda', 'xmin', and '_fit' (a powerlaw.Fit object whose
-        `plot_pdf` and `truncated_power_law.plot_pdf` methods are called).
-    weights : 1-D array
-        Per-component importance (from normalize_nmf_components); used only
-        in the panel title.
-    city_label : str
-        Title prefix (e.g. 'Baton Rouge').
-    output_path : str
-        Full destination PNG path; parent directory is auto-created.
-    ncols : int, optional
-        Subplots per row (default 3).
-    """
-    k     = len(fits)
-    nrows = int(np.ceil(k / ncols))
-    fig, axes = plt.subplots(nrows, ncols,
-                              figsize=(4.8 * ncols, 4 * nrows),
-                              squeeze=False)
-    for i, ax in enumerate(axes.flat):
-        if i >= k:
-            ax.axis('off'); continue
-        fit = fits[i]
-        if fit is None:
-            # Dead component (sparse NMF set its H row to zero)
-            ax.axis('off')
-            ax.text(0.5, 0.5,
-                    f'Comp {i}\n(dead — H row ≈ 0)',
-                    ha='center', va='center', transform=ax.transAxes,
-                    fontsize=11, alpha=0.5)
-            continue
-        fit['_fit'].plot_pdf(ax=ax, color='#1976D2', linewidth=1.6,
-                              original_data=False, label='Empirical (≥ x_min)')
-        fit['_fit'].truncated_power_law.plot_pdf(
-            ax=ax, color='#D32F2F', linestyle='--', linewidth=1.6,
-            label='Truncated PL fit',
-        )
-        ax.set_xscale('log'); ax.set_yscale('log')
-        ax.set_title(f'Comp {i}  (weight={weights[i]:.2g})', fontsize=11)
-        ax.text(
-            0.97, 0.95,
-            f"α = {fit['alpha']:.2f}\n"
-            f"λ = {fit['lambda']:.3f}\n"
-            f"x_min = {fit['xmin']:.2f} km",
-            transform=ax.transAxes, ha='right', va='top', fontsize=9,
-            bbox=dict(facecolor='white', alpha=0.75, edgecolor='none'),
-        )
-        ax.legend(fontsize=8, loc='lower left')
-        ax.set_xlabel('Distance (km)')
-        ax.set_ylabel('P(x)')
-        ax.grid(True, which='both', linestyle=':', alpha=0.4)
-
-    fig.suptitle(f'{city_label} — per-component distance decay '
-                  '(truncated power law)',
-                  fontsize=13, fontweight='bold')
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-
-
-def vis_slope_paired_alpha(rows, city_label, output_path):
-    """
-    Paired-NMF slope graph: each NMF component shown as a line from its
-    normal-half α to its disaster-half α.
-
-    Lines are colour-coded by the sign and magnitude of Δα = α_dis − α_pre:
-        red    → Δα > 0  (distance friction intensified)
-        blue   → Δα < 0  (distance friction relaxed)
-        grey   → |Δα| < 0.1 (essentially unchanged)
-    Line thickness ∝ |Δα|.
-
-    Each component is annotated with its index, weight, and match correlation
-    (how well the warm-started disaster component preserved its identity).
-
-    Parameters
-    ----------
-    rows : list of dict
-        One entry per component, with keys at least:
-            component, alpha_normal, alpha_disaster,
-            weight_normal, weight_disaster, match_correlation
-    city_label : str
-    output_path : str
-        Full destination PNG path; parent directory is auto-created.
-    """
-    fig, ax = plt.subplots(figsize=(8, max(5, 0.6 * len(rows) + 3)))
-    x_left, x_right = 0.0, 1.0
-    cmap_red  = '#D32F2F'
-    cmap_blue = '#1976D2'
-    cmap_grey = '#9E9E9E'
-    cmap_dead = '#BDBDBD'
-
-    alphas_n = np.array([r['alpha_normal']   for r in rows], dtype=float)
-    alphas_d = np.array([r['alpha_disaster'] for r in rows], dtype=float)
-    deltas   = alphas_d - alphas_n
-    valid    = ~np.isnan(deltas)
-    max_abs  = max(np.abs(deltas[valid]).max(), 1e-9) if valid.any() else 1.0
-
-    for r, dn, dd, dlt in zip(rows, alphas_n, alphas_d, deltas):
-        if np.isnan(dn) and np.isnan(dd):
-            # Dead in both halves — skip entirely
-            continue
-        if np.isnan(dn) or np.isnan(dd):
-            # Dead in one half — show a single dot at the surviving end
-            xy = (x_left, dn) if not np.isnan(dn) else (x_right, dd)
-            ax.plot(*xy, 'x', color=cmap_dead, markersize=10,
-                    markeredgewidth=2)
-            ax.annotate(
-                f"C{r['component']} (dead in "
-                f"{'disaster' if np.isnan(dd) else 'normal'})",
-                xy=xy,
-                xytext=(8, 0), textcoords='offset points',
-                ha='left', va='center', fontsize=9, color=cmap_dead,
-            )
-            continue
-        colour = cmap_grey
-        if abs(dlt) >= 0.1:
-            colour = cmap_red if dlt > 0 else cmap_blue
-        lw = 1.0 + 4.0 * abs(dlt) / max_abs
-        ax.plot([x_left, x_right], [dn, dd],
-                '-o', color=colour, linewidth=lw, markersize=6, alpha=0.85)
-        ax.annotate(f"C{r['component']}", xy=(x_left - 0.02, dn),
-                    ha='right', va='center', fontsize=9, color=colour)
-        ax.annotate(
-            f"C{r['component']}  Δα={dlt:+.2f}  "
-            f"(corr={r['match_correlation']:.2f})",
-            xy=(x_right + 0.02, dd),
-            ha='left', va='center', fontsize=9, color=colour,
-        )
-
-    ax.set_xticks([x_left, x_right])
-    ax.set_xticklabels(['Normal half', 'Disaster half'])
-    ax.set_xlim(-0.3, 1.6)
-    ax.set_ylabel(r'Distance-decay $\alpha$  (truncated PL)')
-    ax.set_title(f'{city_label} — per-component α: normal → disaster')
-    ax.grid(axis='y', linestyle=':', alpha=0.4)
-    ax.tick_params(axis='x', labelsize=11)
-
-    # Legend
-    import matplotlib.lines as mlines
-    legend_handles = [
-        mlines.Line2D([], [], color=cmap_red,  linewidth=2,
-                       label='Δα > 0  distance friction ↑'),
-        mlines.Line2D([], [], color=cmap_blue, linewidth=2,
-                       label='Δα < 0  distance friction ↓'),
-        mlines.Line2D([], [], color=cmap_grey, linewidth=2,
-                       label='|Δα| < 0.1  ~unchanged'),
-    ]
-    ax.legend(handles=legend_handles, loc='upper left',
-              bbox_to_anchor=(0, 1.0), fontsize=9, frameon=True)
-
-    fig.tight_layout()
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
 
 
 # ── Origin × Destination functional heatmaps (paper Fig. 9) ───────────────────
@@ -1125,7 +842,7 @@ def vis_bar_curve_mae(df, save_path=None, title=None, colors=None,
     order, y = the mean absolute deviation between the predicted and observed city
     relative curve over the disaster window.  Unlike vis_bar_cross_city_resi_pred there
     is no ground-truth bar, because every bar IS an error and lower is better; the
-    five-unit mean of each method is annotated in the corner instead of an MAE-vs-GT
+    all-unit mean of each method is annotated in the corner instead of an MAE-vs-GT
     line.  Bar values are printed VERTICALLY and the legend sits BELOW the axes, so
     neither collides with a neighbour.  PNG >= 300 dpi."""
     codes = list(df.index)
@@ -1412,7 +1129,7 @@ def vis_scatter_intensity_resilience(df, intensity_col, metric_cols, group_col=N
 
 def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
                          save_path=None, ncols=3, stat_label='LOO R²',
-                         unit='rank within unit', groups=None):
+                         unit='rank within unit'):
     """
     Regression diagnostic scatter for ONE city: one panel per resilience metric,
     each plotting the ACTUAL value (y, ground truth) against the leave-one-out
@@ -1424,10 +1141,6 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
     summary['stat'] under `stat_label` (Spearman ρ for the rank channel, R² for
     the raw one) and PASS/FAIL.  An 'insufficient data' metric gets a blank
     panel.
-
-    `groups` (optional) dict metric -> per-point label array (e.g. the city-event
-    each pooled component belongs to): when given the points are coloured + a
-    legend is drawn, so a pooled scatter distinguishes its different city-events.
     """
     import math
     metrics = list(res_cols)
@@ -1447,21 +1160,8 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
             continue
         y_true, y_pred, comp_idx = pd_m
         # Prediction on x, ground truth on y (observed-vs-predicted calibration).
-        g = groups.get(m) if isinstance(groups, dict) else None
-        if g is not None:
-            g = np.asarray(g)
-            uniq = list(dict.fromkeys(g.tolist()))
-            cmap = plt.get_cmap('tab10')
-            for k, u in enumerate(uniq):
-                msk = (g == u)
-                ax.scatter(np.asarray(y_pred)[msk], np.asarray(y_true)[msk], s=32,
-                           color=cmap(k % 10), alpha=0.85, edgecolor='white',
-                           linewidth=0.5, label=str(u))
-            if idx == 0:
-                ax.legend(fontsize=6, loc='best', framealpha=0.6)
-        else:
-            ax.scatter(y_pred, y_true, s=32, color='#1976D2', alpha=0.85,
-                       edgecolor='white', linewidth=0.5)
+        ax.scatter(y_pred, y_true, s=32, color='#1976D2', alpha=0.85,
+                   edgecolor='white', linewidth=0.5)
         for xp, yt, ci in zip(y_pred, y_true, comp_idx):
             ax.annotate(str(int(ci)), (xp, yt), fontsize=6, color='grey',
                         xytext=(2, 2), textcoords='offset points')
@@ -1716,7 +1416,7 @@ def vis_od_flow_slider_html(frames, day_labels, save_path, title, note=''):
     value]; `value` is the daily OD flow (signed for the Difference view).
     Arc width is normalized per view by its own max |value| across all days so
     the slider animates on a fixed scale.  Basemap and deck.gl load from CDN
-    (same dependency model as the archived pydeck maps)."""
+    """
     import json
     lons, lats = [], []
     vmax = {}

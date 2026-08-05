@@ -26,19 +26,13 @@ SINGLE-NMF pipeline (production: run_pattern_nmf.py)
         Held-out-ENTRY cross-validation, the criterion for CHOOSING k: mask
         random matrix entries, fit without them by EM imputation, score the
         prediction.  Unlike reconstruction error it has an interior optimum in
-        k.  Driver: analyze_nmf_rank_cv.py.
+        k.  Driver: run_pattern_nmf.py STEP 1 (analysis_rank_cv).
     nmf_quality_metrics(X_full, W, H, fit_time_cols, min_comp_frac)
         Decomposition-quality metrics on the FIT window only (no disaster /
         predictive scope): absolute reconstruction error, per-slot
         distribution (KS) error, component-count health.  Reported by the
         pipeline's quality-check step; k itself is NOT tuned from these, it is
         set per unit from the rank CV (see rank_cv_entry).
-
-PAIRED pipeline (only used by archive/run_pattern_distance_decay_paired.py)
-    The OPPOSITE design: two INDEPENDENT NMFs, one per segment, whose
-    components are then matched by cosine similarity.
-    build_paired_matrices(...)   – split the window into normal/disaster halves
-    decompose_city_paired(...)   – two NMFs + cosine matching
 """
 import textwrap
 
@@ -375,115 +369,3 @@ def decompose_city_context(X_all, n_behaviors, mapping, landuse_df,
                         initial_indent="    ", subsequent_indent="    "))
     return W, H, weights
 
-
-# ── Paired (two-segment) NMF helpers ─────────────────────────────────────────
-# Used by archive/run_pattern_distance_decay_paired.py — splits the same trailing
-# window into normal vs. disaster halves, runs NMF on each separately, and
-# uses warm-start so component identities are preserved across periods.
-
-def build_paired_matrices(graphs, days_window, days_disaster, filter_factor):
-    """
-    Build two OD-aligned matrices from the LAST `days_window` days of `graphs`:
-
-        X_normal   : first  (days_window - days_disaster) days
-        X_disaster : last   days_disaster days
-
-    Both matrices share the SAME OD-pair row ordering because the low-activity
-    filter is applied jointly on the full window before splitting.  This
-    routine follows the last-N-days trailing window convention (not a fixed
-    28-day-normal + 14-day-disaster split); it also skips the weekly
-    segment-averaging since normal here is exactly 7 days.
-
-    Returns
-    -------
-    X_normal   : ndarray [n_OD × (days_normal   * SLOTS_ACTIVE)]
-    X_disaster : ndarray [n_OD × (days_disaster * SLOTS_ACTIVE)]
-    mapping    : list of (origin_id, dest_id) aligned to the rows of both.
-    """
-    days_normal = days_window - days_disaster
-
-    window_graphs = periodic_trim(
-        graphs[-SLOT_PER_DAY * days_window:],
-        cycle_len=SLOT_PER_DAY,
-        trim_start=SLOT_TRIM_START, trim_end=SLOT_TRIM_END,
-    )
-    X_full, mapping = graphs_to_2d_matrix(window_graphs)
-
-    # Joint filter on the full window (same threshold rule as build_city_matrices).
-    threshold = SLOTS_ACTIVE * days_window * filter_factor
-    X_full, _, mapping = filter_inactive_locations_2d(
-        X_full, X_full, mapping, threshold,
-    )
-
-    n_nor_col  = days_normal * SLOTS_ACTIVE
-    X_normal   = X_full[:, :n_nor_col]
-    X_disaster = X_full[:, n_nor_col:]
-
-    print(f"  Paired matrices: normal={X_normal.shape}, "
-          f"disaster={X_disaster.shape}, n_OD={X_full.shape[0]}")
-    print_matrix_diagnostics(X_normal,   mapping, label='normal half')
-    print_matrix_diagnostics(X_disaster, mapping, label='disaster half')
-    return X_normal, X_disaster, mapping
-
-
-def decompose_city_paired(X_normal, X_disaster, n_behaviors, l1_reg=0.0):
-    """
-    Two INDEPENDENT NMFs (one per period), then match disaster components to
-    normal components by spatial (H-row) cosine similarity via optimal
-    assignment.
-
-    Why independent (not warm-start): a warm-start NMF seeded with H_normal
-    keeps H's *direction* frozen and only rescales it — so H_disaster[k] ends
-    up proportional to H_normal[k], the distance distribution is identical, and
-    α_disaster ≡ α_normal (Δα ≡ 0, no signal).  Decomposing each period on its
-    own lets the disaster genuinely re-learn its spatial patterns; we then
-    realign component indices by spatial cosine so component k means the same
-    behaviour in both periods (the match cosine is a real 0–1 diagnostic).
-
-    Both NMFs are normalised with normalize_nmf_components so W columns have
-    unit L2 norm and H rows carry the magnitude.
-
-    Returns
-    -------
-    (W_normal,   H_normal,   weights_normal,
-     W_disaster, H_disaster, weights_disaster,   # disaster reordered to match normal
-     match_cosine)                                # [k] cosine of each matched pair
-    """
-    from scipy.optimize import linear_sum_assignment
-
-    # 1. Two independent cold-start NMFs.
-    print("  NMF on normal half …")
-    Wn_raw, Hn_raw = decompose_mobility_patterns(
-        X_normal.T, n_behaviors=n_behaviors, l1_reg=l1_reg,
-    )
-    W_normal, H_normal, weights_normal = normalize_nmf_components(Wn_raw, Hn_raw)
-
-    print("  NMF on disaster half (independent cold start) …")
-    Wd_raw, Hd_raw = decompose_mobility_patterns(
-        X_disaster.T, n_behaviors=n_behaviors, l1_reg=l1_reg,
-    )
-    W_disaster, H_disaster, weights_disaster = normalize_nmf_components(Wd_raw, Hd_raw)
-
-    # 2. Spatial cosine between every (normal, disaster) H-row pair.
-    Hn_u = H_normal   / (np.linalg.norm(H_normal,   axis=1, keepdims=True) + 1e-12)
-    Hd_u = H_disaster / (np.linalg.norm(H_disaster, axis=1, keepdims=True) + 1e-12)
-    cos = Hn_u @ Hd_u.T                       # [k_normal × k_disaster] ∈ [0, 1]
-
-    # 3. Optimal one-to-one assignment maximising total spatial similarity,
-    #    then reorder the disaster factors so column/row k aligns with normal k.
-    row, col = linear_sum_assignment(-cos)    # row = arange(k) for square cos
-    W_disaster       = W_disaster[:, col]
-    H_disaster       = H_disaster[col, :]
-    weights_disaster = weights_disaster[col]
-    match_cosine     = cos[row, col]          # match_cosine[k] for normal comp k
-
-    order_n = np.argsort(weights_normal)[::-1]
-    print("  Normal-half importance: "
-          + ", ".join(f"[{i}]={weights_normal[i]:.1f}" for i in order_n))
-    print("  Matched disaster importance (normal-index order): "
-          + ", ".join(f"[{i}]={weights_disaster[i]:.1f}" for i in range(n_behaviors)))
-    print("  Match cosine (normal↔disaster spatial): "
-          + ", ".join(f"[{i}]={match_cosine[i]:.2f}" for i in range(n_behaviors)))
-    return (W_normal,   H_normal,   weights_normal,
-            W_disaster, H_disaster, weights_disaster,
-            match_cosine)

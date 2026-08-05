@@ -1,20 +1,13 @@
 """
-Matrix factorization (NMF) and tensor decomposition (Tucker) functions.
+Matrix factorization (NMF) functions (production: run_pattern_nmf.py via
+nmf_pipeline.py).
 
-NMF section (production: run_pattern_nmf.py via nmf_pipeline.py)
------------
   select_segment_columns                 – time-column indices for named segments
   decompose_mobility_patterns            – standard NMF
   fit_nmf_basis_and_project              – fit H on a column subset, project the full window
   normalize_nmf_components               – unit-L2 W columns, scale absorbed into H
   nmf_context_multiplicative             – context-aware shared-factor NMF (Chen et al. 2018)
   project_W_onto_H                       – re-solve W with H frozen
-
-Tucker section (only used by archive/run_pattern_tucker.py)
---------------
-  non_negative_tucker_hals               – custom HALS Tucker with temporal regularisation
-  non_negative_tucker_decomposition      – convenience wrapper around tensorly's NNTucker
-  check_reconstruction_error_detailed    – per-zero / per-nonzero error diagnostics
 """
 import warnings
 from collections.abc import Iterable
@@ -23,17 +16,6 @@ import numpy as np
 import pandas as pd
 
 from sklearn.decomposition import NMF
-
-import tensorly as tl
-from tensorly.tenalg import multi_mode_dot
-from tensorly.base import unfold
-from tensorly.tucker_tensor import (
-    tucker_to_tensor, validate_tucker_rank,
-    tucker_normalize, TuckerTensor,
-)
-from tensorly.decomposition import non_negative_tucker
-from tensorly.decomposition._tucker import initialize_tucker
-from tensorly.solvers.nnls import hals_nnls, fista, active_set_nnls
 
 
 # ── NMF ──────────────────────────────────────────────────────────────────────
@@ -283,171 +265,4 @@ def project_W_onto_H(X_full, H, l1_reg=0.0, max_iter=5000, tol=1e-6,
                 break
             prev = obj
     return W
-
-
-# ── Tucker / HALS ─────────────────────────────────────────────────────────────
-
-def non_negative_tucker_hals(
-    tensor, rank, n_iter_max=100, init="svd", svd="truncated_svd",
-    tol=1e-8, sparsity_coefficients=None, core_sparsity_coefficient=None,
-    fixed_modes=None, random_state=None, verbose=False,
-    normalize_factors=False, return_errors=False, exact=False,
-    algorithm="fista",
-    temporal_lambda=0,
-):
-    """
-    Non-negative Tucker decomposition with HALS and optional cosine-similarity
-    regularisation on the temporal factor (mode 2).
-
-    temporal_lambda > 0 pulls the temporal factor towards the reference supplied
-    via init=(core_ref, [U1_ref, U2_ref, U3_ref]).
-    """
-    rank   = validate_tucker_rank(tl.shape(tensor), rank=rank)
-    n_modes = tl.ndim(tensor)
-
-    reference_factors = None
-    if isinstance(init, (tuple, list)) and len(init) == 2:
-        reference_factors = init[1]
-
-    if sparsity_coefficients is None or not isinstance(sparsity_coefficients, Iterable):
-        sparsity_coefficients = [sparsity_coefficients] * n_modes
-    if fixed_modes is None:
-        fixed_modes = []
-    if tl.ndim(tensor) - 1 in fixed_modes:
-        warnings.warn("Fixing the last mode is not supported.")
-        fixed_modes.remove(tl.ndim(tensor) - 1)
-    for fm in fixed_modes:
-        sparsity_coefficients[fm] = None
-
-    modes = [m for m in range(n_modes) if m not in fixed_modes]
-    nn_core, nn_factors = initialize_tucker(
-        tensor, rank, modes, init=init, svd=svd,
-        random_state=random_state, non_negative=True,
-    )
-
-    norm_tensor = tl.norm(tensor, 2)
-    rec_errors  = []
-
-    for iteration in range(n_iter_max):
-        for mode in modes:
-            pseudo_inverse = nn_factors.copy()
-            for i, f in enumerate(nn_factors):
-                if i != mode:
-                    pseudo_inverse[i] = tl.dot(tl.conj(tl.transpose(f)), f)
-
-            core_cross = multi_mode_dot(nn_core, pseudo_inverse, skip=mode)
-            UtU = tl.dot(unfold(core_cross, mode), tl.transpose(unfold(nn_core, mode)))
-
-            tensor_cross = multi_mode_dot(tensor, nn_factors, skip=mode, transpose=True)
-            MtU  = tl.dot(unfold(tensor_cross, mode), tl.transpose(unfold(nn_core, mode)))
-            UtM  = tl.transpose(MtU)
-
-            # Cosine-similarity temporal regularisation
-            if mode == 2 and temporal_lambda > 0 and reference_factors is not None:
-                ref_f      = reference_factors[2]
-                ref_norms  = tl.norm(ref_f, order=2, axis=0)
-                ref_f_unit = ref_f / (ref_norms + 1e-12)
-                UtM       += temporal_lambda * tl.transpose(ref_f_unit)
-                rank_dim   = UtU.shape[0]
-                UtU       += temporal_lambda * tl.eye(rank_dim, **tl.context(tensor))
-
-            nn_factor = hals_nnls(
-                UtM, UtU, tl.transpose(nn_factors[mode]),
-                n_iter_max=100,
-                sparsity_coefficient=sparsity_coefficients[mode],
-                exact=exact,
-            )
-            nn_factors[mode] = tl.transpose(nn_factor)
-
-        # Core update
-        if algorithm == "fista":
-            pseudo_inverse[-1] = tl.dot(tl.transpose(nn_factors[-1]), nn_factors[-1])
-            core_est  = multi_mode_dot(tensor, nn_factors, transpose=True)
-            lr        = 1
-            for MtM in pseudo_inverse:
-                s   = tl.truncated_svd(MtM, n_eigenvecs=1)[1]
-                lr *= 1 / s[0]
-            nn_core = fista(core_est, pseudo_inverse, x=nn_core,
-                            n_iter_max=n_iter_max,
-                            sparsity_coef=core_sparsity_coefficient, lr=lr)
-        elif algorithm == "active_set":
-            pseudo_inverse[-1] = tl.dot(tl.transpose(nn_factors[-1]), nn_factors[-1])
-            core_est_vec       = tl.base.tensor_to_vec(
-                tl.tenalg.mode_dot(tensor_cross,
-                                   tl.transpose(nn_factors[modes[-1]]), modes[-1])
-            )
-            pseudo_inverse_kr  = tl.tenalg.kronecker(pseudo_inverse)
-            vectorcore         = active_set_nnls(core_est_vec, pseudo_inverse_kr,
-                                                  x=nn_core, n_iter_max=n_iter_max)
-            nn_core = tl.reshape(vectorcore, tl.shape(nn_core))
-
-        rec_error = tl.norm(tensor - tucker_to_tensor((nn_core, nn_factors)), 2) / norm_tensor
-        rec_errors.append(rec_error)
-
-        if iteration > 1:
-            if verbose:
-                print(f"  iter {iteration}: error={rec_errors[-1]:.6f}, "
-                      f"Δ={rec_errors[-2]-rec_errors[-1]:.2e}")
-            if tol and tl.abs(rec_errors[-2] - rec_errors[-1]) < tol:
-                break
-
-    if normalize_factors:
-        nn_core, nn_factors = tucker_normalize((nn_core, nn_factors))
-
-    result = TuckerTensor((nn_core, nn_factors))
-    return (result, rec_errors) if return_errors else result
-
-
-def non_negative_tucker_decomposition(X, core_shape, n_iter_max=1000,
-                                       tol=1e-6, random_state=None, verbose=False):
-    """
-    Convenience wrapper around tensorly's non_negative_tucker.
-    Returns (G, [U1, U2, U3]) as plain NumPy arrays.
-    """
-    tl.set_backend("numpy")
-    core, factors = non_negative_tucker(
-        tl.tensor(X, dtype=tl.float64),
-        rank=list(core_shape),
-        n_iter_max=n_iter_max, init='svd', tol=tol,
-        random_state=random_state, verbose=verbose,
-        normalize_factors=True,
-    )
-    G       = np.array(core)
-    factors = [np.array(f) for f in factors]
-
-    if verbose:
-        X_approx = tl.tucker_to_tensor((tl.tensor(G), [tl.tensor(f) for f in factors]))
-        err = np.linalg.norm(X - np.array(X_approx)) / np.linalg.norm(X)
-        print(f"Final relative reconstruction error: {err:.6f}")
-
-    return G, factors
-
-
-# ── Diagnostics ───────────────────────────────────────────────────────────────
-
-def check_reconstruction_error_detailed(original, core, factors):
-    """
-    Splits error into zero vs non-zero entries of the original tensor.
-    Prints a breakdown and returns (rel_err_nonzero, rmse_zero, diff_tensor).
-    """
-    reconstructed = tl.tucker_to_tensor((core, factors))
-    diff          = original - reconstructed
-
-    mask_zero    = (original == 0)
-    mask_nonzero = ~mask_zero
-
-    err_nz   = diff[mask_nonzero]
-    orig_nz  = original[mask_nonzero]
-    rel_err  = np.linalg.norm(err_nz) / np.linalg.norm(orig_nz)
-
-    err_zero         = reconstructed[mask_zero]
-    rmse_zero        = np.sqrt(np.mean(err_zero ** 2))
-    max_hallucination= np.max(np.abs(err_zero))
-
-    print("=== Reconstruction Error Analysis ===")
-    print(f"Sparsity: {np.mean(mask_zero)*100:.2f}%")
-    print(f"Non-zero relative error:   {rel_err:.6f}")
-    print(f"Zero-location RMSE:        {rmse_zero:.6f}")
-    print(f"Zero-location max abs err: {max_hallucination:.6f}")
-    return rel_err, rmse_zero, diff
 

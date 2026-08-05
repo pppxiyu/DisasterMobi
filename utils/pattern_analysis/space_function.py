@@ -10,84 +10,29 @@ origin/destination land-use heatmaps of the reference paper's Figure 9.
 
 Labelling
 ---------
-HARD labels: each block group is assigned its single `dominant_category`, so an
-OD pair contributes its whole flow to one (origin_cat, dest_cat) cell.
-
-A SOFT variant would instead distribute each flow by the outer product of the
-endpoints' category shares,  M_k = Sᵀ F_k S  (S = [n_BG × C] share matrix);
-the hard version is the special case where S is one-hot.  Not implemented here.
+SOFT labels (production since 2026-08-04): each block group keeps its full
+TF-IWF category-share vector, and every flow is distributed by the outer
+product of its endpoints' shares, M_k = Sᵀ F_k S (S = [n_BG × C] share
+matrix).  There is no Mix bucket and no dominant-label threshold.  (The
+retired HARD-label pair — one-hot S via `dominant_category`, with sub-threshold
+block groups pooled into Mix — silently dropped most of the flow through the
+Mix cut; recover it from the full-code-2026-08-05 tag if ever needed.)
 
 Conventions
 -----------
-- Axis categories = the functional categories + 'Mix'; 'Unknown' (and any OD
-  endpoint missing a category) is DROPPED.
 - Matrices are DIRECTED (origin rows, destination cols; asymmetric).
 - Each component is normalised independently to proportions (its kept cells
   sum to 1), so only within-component structure is comparable across cells.
+- Endpoints absent from the land-use table contribute zero weight.
 
 Functions
 ---------
-category_lookup_from_landuse(landuse_df, ...) -> dict{aggr_id: category}
-build_od_function_matrix(H, mapping, cat_lookup, categories) -> (M[k×C×C], retained[k])
+build_flow_poi_feature(mapping, landuse_df, flow_scale, ...) -> [OD × C] flow-POI features
+share_lookup_from_landuse(landuse_df, categories)            -> dict{aggr_id: share vector}
+build_od_function_matrix_soft(H, mapping, share_lookup, categories) -> (M[k×C×C], retained[k])
 """
 import numpy as np
 import pandas as pd
-
-
-def category_lookup_from_landuse(landuse_df, id_col='aggr_id',
-                                 cat_col='dominant_category'):
-    """Map each block group's id to its dominant functional category."""
-    return dict(zip(landuse_df[id_col].astype(str), landuse_df[cat_col].astype(str)))
-
-
-def build_od_function_matrix(H, mapping, cat_lookup, categories):
-    """
-    Aggregate each NMF component's OD flows into a [C × C] origin×destination
-    functional matrix, normalised per component to proportions.
-
-    Parameters
-    ----------
-    H          : ndarray [k × OD]   spatial factors (normalised; carries magnitude)
-    mapping    : list of (origin_id, dest_id) aligned to the columns of H
-    cat_lookup : dict {aggr_id: category}
-    categories : list[str]   axis categories (order defines rows/cols).  OD pairs
-                 whose origin OR destination category is not in this list are
-                 dropped (e.g. 'Unknown' / endpoints absent from the lookup).
-
-    Returns
-    -------
-    M        : ndarray [k × C × C]  per-component proportions (each slice sums to
-               1, unless a component had zero in-category flow).
-    retained : ndarray [k]          fraction of each component's TOTAL flow that
-               fell inside `categories` (1 - share dropped to Unknown/missing).
-    """
-    H = np.asarray(H, dtype=float)
-    k = H.shape[0]
-    C = len(categories)
-    idx = {c: i for i, c in enumerate(categories)}
-
-    # Per-OD-column category indices (−1 marks a dropped endpoint).
-    oi = np.full(len(mapping), -1, dtype=int)
-    di = np.full(len(mapping), -1, dtype=int)
-    for j, (o, d) in enumerate(mapping):
-        co = cat_lookup.get(str(o))
-        cd = cat_lookup.get(str(d))
-        if co in idx and cd in idx:
-            oi[j], di[j] = idx[co], idx[cd]
-    keep = (oi >= 0) & (di >= 0)
-    oi_k, di_k = oi[keep], di[keep]
-
-    M = np.zeros((k, C, C))
-    retained = np.zeros(k)
-    for comp in range(k):
-        row = H[comp]
-        total = row.sum()
-        np.add.at(M[comp], (oi_k, di_k), row[keep])   # accumulate kept flows
-        kept = M[comp].sum()
-        retained[comp] = (kept / total) if total > 0 else 0.0
-        if kept > 0:
-            M[comp] /= kept                            # per-component proportion
-    return M, retained
 
 
 def build_flow_poi_feature(mapping, landuse_df, flow_scale, mode='outer',
@@ -183,7 +128,7 @@ def share_lookup_from_landuse(landuse_df, categories, id_col='aggr_id'):
 
 
 def build_od_function_matrix_soft(H, mapping, share_lookup, categories):
-    """SOFT counterpart of build_od_function_matrix: every endpoint contributes
+    """Soft O x D functional cross-tab: every endpoint contributes
     its full TF-IWF share VECTOR instead of one hard dominant label.
 
     Component i's cross-tab is the flow-weighted expected origin×destination

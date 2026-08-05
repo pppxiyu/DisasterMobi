@@ -1,6 +1,6 @@
 """
 Utilities for loading raw graph data and converting it into matrix/tensor formats
-suitable for NMF and Tucker decomposition.
+suitable for NMF decomposition.
 """
 import pickle
 import numpy as np
@@ -232,36 +232,12 @@ def filter_inactive_locations_2d(X, X_impact, edge_names, threshold=10):
     return np.array(rows_X), np.array(rows_Xi), filt_edges
 
 
-# ── 3-D (Tucker) conversion ───────────────────────────────────────────────────
-
-def graphs_to_3d_tensor(graph_list):
-    """
-    Converts a list of DiGraphs into a 3-D NumPy tensor (Origin × Dest × Time).
-    Called by archive/run_pattern_tucker.py and by filter_inactive_locations_2d.
-
-    Returns
-    -------
-    tensor      : ndarray of shape (N, N, T)
-    idx_to_node : dict mapping tensor index → node name
-    """
-    all_nodes = sorted(set().union(*(G.nodes() for G in graph_list)))
-    node_to_idx = {n: i for i, n in enumerate(all_nodes)}
-    idx_to_node = {i: n for n, i in node_to_idx.items()}
-
-    N, T = len(all_nodes), len(graph_list)
-    tensor = np.zeros((N, N, T))
-    for t, G in enumerate(graph_list):
-        for u, v, d in G.edges(data=True):
-            if u in node_to_idx and v in node_to_idx:
-                tensor[node_to_idx[u], node_to_idx[v], t] = d.get('flow', 1)
-
-    return tensor, idx_to_node
-
-
 def filter_inactive_locations(tensor1, tensor2, spatial_mapping, threshold=10):
     """
     Removes zones with low total activity (inflow + outflow in tensor1).
     The same zone mask is applied to tensor2 to keep spatial alignment.
+    Operates on 3-D (O × D × T) tensors; the production 2-D path reaches it
+    through filter_inactive_locations_2d, which rebuilds the tensor inline.
 
     Returns filtered tensor1, tensor2, and the updated index→node mapping.
     """
@@ -276,25 +252,6 @@ def filter_inactive_locations(tensor1, tensor2, spatial_mapping, threshold=10):
     print(f"Locations: {tensor1.shape[0]} → {X1.shape[0]} "
           f"(removed {tensor1.shape[0] - X1.shape[0]} below threshold)")
     return X1, X2, new_map
-
-
-def calculate_segment_average(tensor, segment_len):
-    """
-    Splits the time axis (axis 2) into segments and averages them.
-    Only used by archive/run_pattern_tucker.py.
-    Input:  (I, J, T)
-    Output: (I, J, segment_len)
-
-    segment_len is required (no default) — callers must pass SLOTS_ACTIVE * 7
-    so the value stays correct when switching between 2h and 3h resolution.
-    """
-    I, J, T = tensor.shape
-    if T % segment_len != 0:
-        n = T // segment_len
-        tensor = tensor[:, :, :n * segment_len]
-        T = tensor.shape[2]
-    n_seg = T // segment_len
-    return np.mean(tensor.reshape(I, J, n_seg, segment_len), axis=2)
 
 
 # ── Geometry ──────────────────────────────────────────────────────────────────

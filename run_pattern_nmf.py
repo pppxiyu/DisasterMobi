@@ -1,8 +1,8 @@
 """
 Production pipeline: NMF decomposition of disaster origin–destination (OD) flow
-mobility for the five hurricane city-events in CITY_EVENTS (BR_Ida, FM_Ian,
-WM_Dorian, WM_Isaias, LC_Laura), per-component characterisation, and cross-city
-resilience prediction.
+mobility for the hurricane city-events in CITY_EVENTS (13 units retained of the
+17 registered; see EXCLUDED_CODES), per-component characterisation, and
+cross-city resilience prediction.
 
 Core decomposition idea
 -----------------------
@@ -195,9 +195,7 @@ Run
     python run_pattern_nmf.py
 """
 import os
-import pickle
 import re
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -206,9 +204,7 @@ from scipy.stats import rankdata, spearmanr
 from sklearn.metrics import r2_score
 
 from config import (
-    BR_GRAPH_PATH, FM_GRAPH_PATH, BR_ANALYSIS_DAYS, FM_ANALYSIS_DAYS,
-    BR_GEO_CSV, FM_GEO_CSV, AGG_LEVEL,
-    DATA_DIR, OUTPUT_DIR, SLOT_PER_DAY, SLOTS_ACTIVE,
+    AGG_LEVEL, DATA_DIR, OUTPUT_DIR, SLOT_PER_DAY, SLOTS_ACTIVE,
 )
 from utils.pattern_analysis.graph_io import (
     load_graphs_trimmed, build_distance_array, build_income_array,
@@ -583,7 +579,8 @@ CURVE_PRED_SHRINK = 0.5  # STEP-7 plateau inversion: the solved-L target is
 # quantile-mapped cum_loss prediction and differ ONLY in how each component's
 # (α, L) is set from the shrunk target):
 #   CURVE_PRED_SOLVER  'solve_L'      α pinned at the backbone mean ᾱ, L solved
-#                                     exactly by brentq (PRODUCTION; 0.0706)
+#                                     exactly by brentq (the pre-2026-07-21
+#                                     production solver; 15-day city-MAE 0.0706)
 #                      'joint_alphaL' α AND L jointly least-squares-fitted to the
 #                                     target, optionally plus λ·(L − line(α))²
 #                                     pulling L toward the training α-L
@@ -708,7 +705,8 @@ EXTRA_CORR_COLS = ['mean_distance'] + [f'median_income_{m}' for m in INCOME_ENDP
 # distribution (KS) error, and the component-count health rule.  One figure per
 # unit + a cross-city summary + raw CSV.  These are DIAGNOSTICS only — nothing
 # optimises them.  k comes from the rank CV plus a manual reading of it (see
-# EXCLUDED_CODES / RANK_CV_K_FLOOR); reconstruction error cannot choose k,
+# EXCLUDED_CODES and the k-policy notes above CITY_EVENTS); reconstruction
+# error cannot choose k,
 # since it falls monotonically with k.
 OUTPUT_QUALITY      = os.path.join(OUTPUT_PLOTS, '0-decomposition_quality')
 OUTPUT_QUALITY_RAW  = os.path.join(OUTPUT_QUALITY, 'raw_data')
@@ -744,8 +742,8 @@ EXCLUDED_CODES = frozenset({'HH_Dorian', 'LC_Laura', 'LC_Delta', 'HU_Ida'})
 # Retained units take k = the TOP of the 2-standard-error band, floored at 5 so
 # the within-city correlations keep a usable number of observations, with two
 # manual overrides (SL_Ida, FM_Ian -> 6).  The resulting values live in each
-# CITY_EVENTS entry's n_behaviors; this comment records where they came from.
-RANK_CV_K_FLOOR       = 5
+# CITY_EVENTS entry's n_behaviors; this comment records where they came from
+# (nothing reads the floor programmatically).
 
 # ── K-policy TRIAL switch ────────────────────────────────────────────────────
 # 'manual'      — the registry n_behaviors (the hand-read values): the
@@ -762,18 +760,6 @@ K_MIN_TRIAL_FLOOR = 4
 # whether the component characteristics survive at the smaller k, so the
 # cross-city machinery stays untouched.
 PIPELINE_SCOPE    = 'full'
-# Where the cross-city STATE that STEP 7 and STEP 8 consume is cached, so those
-# steps can be re-run without redoing the decomposition and STEP 6.
-#   'full'       run everything; the cache is (re)written on the way past.
-#   'from_step7' load the cache and run ONLY STEP 7-8 (folders 3-, 4-, 5-).
-# The cached objects are exactly STEP 5's outputs — the per-unit feature tables
-# in both roles, their (W, H), the unit records and the pooled IWF vector — and
-# STEP 7/8 read no STEP-6 output, so skipping STEP 6 changes nothing about them.
-# The fingerprint below covers everything upstream that would alter those
-# objects; the STEP-7/8 constants are deliberately NOT in it, since editing
-# those is the whole point of the shortcut.  Lives under outputs/ (gitignored).
-PIPELINE_CACHE = os.path.join(OUTPUT_PLOTS, '.pipeline_cache',
-                              'cross_city_state.pkl')
 # The X% of the component-size health check: a component whose weight
 # ‖W_i‖·‖H_i‖ falls below this fraction of the largest component's weight
 # counts as a too-large-k symptom.  Reported per unit as a pass/fail check; it
@@ -825,8 +811,6 @@ OUTPUT_RESI_CORR_RANK_ALL = os.path.join(OUTPUT_FUNC_VS_RESI, 'all_city')
 OUTPUT_RESI_CORR_RANK_RAW = os.path.join(OUTPUT_RESI_CORR_RANK_ALL, 'raw_data')
 OUTPUT_TL_BY_FUNC    = os.path.join(OUTPUT_CHAR_RESIL, 'line_component_timeline_by_func')
 OUTPUT_RC_BY_FUNC    = os.path.join(OUTPUT_CHAR_RESIL, 'line_component_resilience_curves_by_func')
-# Numeric tables for the pooled temporal × resilience heatmap, out of the
-# figure folder (same convention as everywhere else).
 
 # ── STEP 4 parameters — pooled severity-vs-resilience ───────────────────────────
 
@@ -953,21 +937,15 @@ LEVEL_FEATURE_COLS = ['hurricane_intensity', 'evac_level']
 POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
                        + ['mean_distance', 'median_income_combined'])
 
-# Cross-city predictor for the resilience regression: 'ridge' (global linear, can
-# extrapolate) or 'cosine_knn' (Nadaraya-Watson with a cosine kernel = similarity-
-# weighted mean of the training components' target; bounded to the training range).
-# Applies to the LOO scatters/matrix and the pairwise analyses; the city-level
-# reconstruction (STEP 6) and the curve prediction (STEP 7) pin 'cosine_knn'.
-CROSS_CITY_MODEL = 'cosine_knn'
 # The RANK channel runs BOTH predictors side by side, each into its own folder
 # under component_rank/, because neither dominates: a 2026-08-04 leave-one-out
 # ablation put ridge ahead on average (mean test R2 +0.36 vs +0.28, better on 8
 # of 13 units) but it is the riskier of the two exactly where it matters most —
 # BR_Ida, the largest unit at k=12, goes +0.10 -> -0.15, while cosine-kNN's
 # bounded, shrunken predictions never blow up.  Showing both is the honest
-# reading; CROSS_CITY_MODEL above stays the pipeline-wide default that the
-# city-level reconstruction and the STEP-7 curve prediction use (ridge was
-# tested there in 2026-07-13 and every absolute-level path exploded).
+# reading.  (Model choices elsewhere are pinned at their own sites: the legacy
+# kNN(sigma) reference and the raw pooled channel hardcode 'cosine_knn'; the
+# STEP-7 channels read CURVE_PRED_CITY_MODEL / CURVE_PRED_RANK_MODEL.)
 CROSS_CITY_RANK_MODELS = {'cos_KNN': 'cosine_knn', 'ridge': 'ridge'}
 
 
@@ -1620,24 +1598,24 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
 
 # ── STEP 6 — cross-city prediction analyses ─────────────────────────────────────
 
-def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
+def analysis_cross_city(feats_by_city, lambda_ctx=None,
                         merge_func_directions=True, res_cols=None,
                         methods=tuple(CROSS_CITY_METHOD_STD), split=None,
                         target_std=None, subdir=None, level_feature_cols=(),
                         model='ridge', pooled_feature_cols=(),
                         min_rows=CROSS_CITY_MIN_ROWS):
-    """Cross-city resilience generalisation driven by an explicit train/test `split`
-    of city-event codes.  Each method's target standardization is HARD-PAIRED via
-    CROSS_CITY_METHOD_STD (spearman->within_unit, pearson->pooled_train): target_std=None
-    resolves the pairing per method, an explicit mismatching value raises ValueError.
-    Two modes by `split`:
-      - train & test DISJOINT  -> TRANSFER: pooled(train) -> predict each test unit.
-      - train & test the SAME set -> POOLED-LOO across the pool's components.
-    Per method into cross_city_resi_pred/<subdir>/ (subdir=None -> the method's paired
-    label, e.g. cross_city_pred_raw_value): writes the predicted-vs-actual scatter AND
-    its raw data (raw_data/cross_city_scatter_<col>_*_raw.csv), and RETURNS
+    """Cross-city rank-transfer generalisation driven by an explicit disjoint
+    train/test `split` of city-event codes: pooled(train) -> predict each test
+    unit.  Each method's target standardization is HARD-PAIRED via
+    CROSS_CITY_METHOD_STD (only spearman -> within_unit survives; the pearson /
+    pooled_train method and the pooled-LOO display mode were retired 2026-08-04
+    with the raw-value channel): target_std=None resolves the pairing, an
+    explicit mismatching value raises ValueError.  Per method into
+    cross_city_resi_pred/<subdir>/ (subdir=None -> the method's paired label):
+    writes the predicted-vs-actual scatter AND its raw data
+    (raw_data/cross_city_scatter_<col>_*_raw.csv), and RETURNS
     {method -> r2_table} so the caller can aggregate (e.g. the LOO matrix).
-    split=None -> skipped (returns {}).  loo_by_city is accepted but unused.
+    split=None -> skipped (returns {}).
     lambda_ctx tags the filenames.  res_cols=None -> the full RES_COLS."""
     res_cols = list(RES_COLS) if res_cols is None else list(res_cols)
     # Defensive guard: reject a method/std combo OR an output label that contradicts the
@@ -1685,7 +1663,6 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
 
     train = [c for c in split.get('train', []) if c in cities]
     test  = [c for c in split.get('test', []) if c in cities]
-    pooled_loo = bool(train) and (set(train) == set(test))
 
     results = {}
     for method in methods:
@@ -1695,7 +1672,7 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
                                std_label if subdir is None else subdir)
         raw_dir = os.path.join(out_dir, 'raw_data')
 
-        r2_table, pred, groups = cross_city_resilience(
+        r2_table, pred, _groups = cross_city_resilience(
             cities, res_cols, feature_cols, rank=rank, split=split,
             target_std=std_mode, level_feature_cols=level_feature_cols, model=model,
             # Only the pooled columns this call actually has: the rank channel
@@ -1722,26 +1699,16 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
             # (STEP-6 city reconstruction, STEP-7) read the engine directly, so
             # none of them sees this.
             plot_data = dict(pred_data)
-            if rank and std_mode == 'within_unit':
-                col_groups_u = groups.get(col) or {}
-                for m, pm in pred_data.items():
-                    if pm is None:
-                        continue
-                    y_std, p_std, cidx = (np.asarray(pm[0], dtype=float),
-                                          np.asarray(pm[1], dtype=float), pm[2])
-                    gm = col_groups_u.get(m)
-                    # transfer -> every point is the test unit; pooled-LOO ->
-                    # each unit was z-scored on its own ranks, so invert per unit.
-                    src = (np.asarray(gm) if gm is not None
-                           else np.array([col] * len(cidx)))
-                    y_r, p_r = y_std.copy(), p_std.copy()
-                    for u in dict.fromkeys(src.tolist()):
-                        k = (src == u)
-                        r = rankdata(cities[u].loc[cidx[k], m].to_numpy(float))
-                        sd = r.std() or 1.0
-                        y_r[k] = y_std[k] * sd + r.mean()
-                        p_r[k] = p_std[k] * sd + r.mean()
-                    plot_data[m] = (y_r, p_r, cidx)
+            for m, pm in pred_data.items():
+                if pm is None:
+                    continue
+                y_std, p_std, cidx = (np.asarray(pm[0], dtype=float),
+                                      np.asarray(pm[1], dtype=float), pm[2])
+                # Every point belongs to the (single) test unit `col`.
+                r = rankdata(cities[col].loc[cidx, m].to_numpy(float))
+                sd = r.std() or 1.0
+                plot_data[m] = (y_std * sd + r.mean(), p_std * sd + r.mean(),
+                                cidx)
             # Spearman replaces R² on the panel: the target IS a within-unit rank,
             # so ordering is what this channel claims to transfer, while R² also
             # scores prediction amplitude (a 2026-08-04 sandbox found the two
@@ -1762,35 +1729,27 @@ def analysis_cross_city(feats_by_city, loo_by_city, lambda_ctx=None,
             # No suptitle: it named every training unit, which at 13 units wrapped
             # to four lines over a single panel.  The filename carries the test
             # unit and the training set is every other unit by construction.
-            fname = (f'cross_city_scatter_pooledLOO_{lambda_tag}.png' if pooled_loo
-                     else f'cross_city_scatter_{col}_{lambda_tag}.png')
+            fname = f'cross_city_scatter_{col}_{lambda_tag}.png'
             vis_scatter_reg_pred(
                 plot_data, col_summary, res_cols, stat_label='test Spearman ρ',
-                unit=('rank within unit' if rank and std_mode == 'within_unit'
-                      else 'std value'),
-                groups=groups.get(col),         # colours pooled-LOO points by city-event
-                title=None,
+                unit='rank within unit', title=None,
                 save_path=os.path.join(out_dir, fname))
 
             # Raw data behind this scatter (predicted vs actual per metric), so each
-            # point stays recoverable for later analysis.  groups[col] is keyed by
-            # METRIC -> per-point unit array (non-None only in pooled-LOO mode).
-            col_groups = groups.get(col) or {}
+            # point stays recoverable for later analysis.
             rows = []
             for m in res_cols:
                 pm = plot_data.get(m)
                 if pm is None:
                     continue
                 y_true, y_pred, comp_index = pm
-                grp_m = col_groups.get(m)
                 for i in range(len(y_true)):
-                    # Same scale as the figure (within-unit ranks on the rank
-                    # path), plus the panel's rho so the number stays with the
-                    # points that produced it.
+                    # Same scale as the figure (within-unit ranks), plus the
+                    # panel's rho so the number stays with its points.
                     rows.append({'metric': m, 'comp_index': comp_index[i],
                                  'y_true': float(y_true[i]), 'y_pred': float(y_pred[i]),
                                  'spearman': col_stat.get(m, np.nan),
-                                 'unit': (grp_m[i] if grp_m is not None else col)})
+                                 'unit': col})
             if rows:
                 os.makedirs(raw_dir, exist_ok=True)
                 pd.DataFrame(rows).to_csv(
@@ -3329,69 +3288,8 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def _cross_city_fingerprint(units):
-    """Everything UPSTREAM of STEP 7 that would change the cached objects: which
-    units survived, each one's k and fit window, and the global feature recipe.
-    Deliberately excludes the STEP-7/8 constants — editing those is exactly what
-    the 'from_step7' shortcut is for, so they must not invalidate the cache."""
-    return {
-        'codes': sorted(units),
-        'k': {c: units[c]['cfg']['n_behaviors'] for c in sorted(units)},
-        'fit_segments': {c: tuple(units[c]['cfg']['fit_segments'])
-                         for c in sorted(units)},
-        'agg_level': AGG_LEVEL,
-        'global_iwf_scale': GLOBAL_IWF_SCALE,
-        'k_policy': K_POLICY,
-        'excluded': sorted(EXCLUDED_CODES),
-    }
-
-
-def _save_cross_city_cache(units, cc_train, cc_test, dec_test, all_codes,
-                           global_iwf):
-    """Persist STEP 5's outputs so STEP 7-8 can be re-run on their own."""
-    os.makedirs(os.path.dirname(PIPELINE_CACHE), exist_ok=True)
-    with open(PIPELINE_CACHE, 'wb') as fh:
-        pickle.dump({'fingerprint': _cross_city_fingerprint(units),
-                     'units': units, 'cc_train': cc_train, 'cc_test': cc_test,
-                     'dec_test': dec_test, 'all_codes': all_codes,
-                     'global_iwf': global_iwf}, fh, protocol=4)
-    mb = os.path.getsize(PIPELINE_CACHE) / 1e6
-    print(f"  [cache] cross-city state written ({len(all_codes)} units, "
-          f"{mb:.1f} MB) -> {PIPELINE_CACHE}")
-
-
-def _load_cross_city_cache():
-    """Load the STEP-5 state.  Raises with an actionable message when the cache
-    is absent — a silent full re-run would defeat the shortcut, and a silent
-    empty run would look like a passing pipeline."""
-    if not os.path.exists(PIPELINE_CACHE):
-        raise FileNotFoundError(
-            f"PIPELINE_SCOPE='from_step7' needs the cross-city cache at "
-            f"{PIPELINE_CACHE}, which does not exist.  Run once with "
-            f"PIPELINE_SCOPE='full' to create it.")
-    with open(PIPELINE_CACHE, 'rb') as fh:
-        st = pickle.load(fh)
-    fp = st.get('fingerprint', {})
-    print(f"  [cache] loaded {len(st['all_codes'])} units from {PIPELINE_CACHE}")
-    print(f"  [cache] built under: k={fp.get('k')}, "
-          f"GLOBAL_IWF_SCALE={fp.get('global_iwf_scale')}, "
-          f"K_POLICY={fp.get('k_policy')}")
-    # The upstream config may have moved since the cache was written; STEP 7-8
-    # would then silently describe a decomposition that no longer exists.
-    live = _cross_city_fingerprint(st['units'])
-    drift = {k: (fp.get(k), live[k]) for k in live if fp.get(k) != live[k]}
-    if drift:
-        warnings.warn(
-            f"cross-city cache was built under a different upstream config "
-            f"{drift}; STEP 7-8 results will describe the CACHED state.  "
-            f"Re-run with PIPELINE_SCOPE='full' to refresh.")
-    return st
-
-
 def _run_steps_78(cc_train, cc_test, units, all_codes, dec_test):
-    """STEP 7 (curve prediction + OD maps) and STEP 8 (transferability) — the
-    only consumers of the cached cross-city state, factored out so the cached
-    path and the full path run identical code."""
+    """STEP 7 (curve prediction + OD maps) and STEP 8 (transferability)."""
     print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
     analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
     print("\n── Transferability: domain proximity vs rank transfer ──")
@@ -3399,19 +3297,6 @@ def _run_steps_78(cc_train, cc_test, units, all_codes, dec_test):
 
 
 def main():
-    # Shortcut for iterating on STEP 7-8: reuse the cached STEP-5 state instead
-    # of redoing the decomposition, the within-city figures and STEP 6.
-    if PIPELINE_SCOPE == 'from_step7':
-        print("── PIPELINE_SCOPE=from_step7: reusing the cached cross-city "
-              "state; folders 0- 1- 2- are NOT refreshed ──")
-        st = _load_cross_city_cache()
-        _run_steps_78(st['cc_train'], st['cc_test'], st['units'],
-                      st['all_codes'], st['dec_test'])
-        return
-    return _main_full()
-
-
-def _main_full():
     # ── STEP 1 — How many components does each unit support? ───────────────────
     # Runs over EVERY registry unit; its verdict is what EXCLUDED_CODES encodes.
     print("\n── Rank cross-validation (all registry units) ──")
@@ -3496,7 +3381,6 @@ def _main_full():
     # ── STEP 3 — Within-city analyses: characterise each unit's components ──
 
     feats_by_city = {}   # short code -> per-component feats, for the cross-city test
-    loo_by_city   = {}   # short code -> within-city LOO R² (for the comparison)
 
     # Each unit's per-component feats + within-unit LOO are keyed by its city-event
     # code ('BR_Ida', 'WM_Dorian', ...), the key the cross-city folds address.
@@ -3694,12 +3578,6 @@ def _main_full():
             # with no labels, so the held-out unit uses its own k like any other.
             cc_train[code] = cc_test[code] = feats_cc
 
-        # Everything STEP 7-8 consume is now built.  Cache it here — BEFORE
-        # STEP 6, which those steps do not read — so a later
-        # PIPELINE_SCOPE='from_step7' run reproduces this exact state.
-        _save_cross_city_cache(units, cc_train, cc_test, dec_test, all_codes,
-                               global_iwf)
-
         # ── STEP 6 — Cross-city prediction (LOO transfer, pairwise, reconstruction) ──
         for method, (std_mode, base_label) in CROSS_CITY_METHOD_STD.items():
           for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
@@ -3713,7 +3591,7 @@ def _main_full():
                 fold_feats.update({c: cc_train[c] for c in rest})
                 print(f"  fold: test [{held}] <- train [{'+'.join(rest)}]")
                 res = analysis_cross_city(
-                    fold_feats, loo_by_city, lambda_ctx=None,
+                    fold_feats, lambda_ctx=None,
                     merge_func_directions=MERGE_FUNC_DIRECTIONS,
                     # component_rank/ carries cum_loss only (2026-08-04):
                     # recovery_alpha's rank transfer was never the analysis of
