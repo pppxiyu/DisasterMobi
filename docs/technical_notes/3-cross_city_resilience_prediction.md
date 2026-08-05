@@ -232,8 +232,11 @@ keeping only the `cum_loss` R², the metric the project's tuning and the city-le
 a equals b, is a's within-unit leave-one-component-out at k = 10, the reference for how predictable that city is from itself
 along its own row and column (run_pattern_nmf.py:1402-1471). The product is a 5 by 5 matrix, rows train and columns test, saved
 as `cross_city_pair_heatmap.png` with `raw_data/cross_city_pair_heatmap.csv` in each method's folder, rendered by
-`vis_heatmap_pair_r2` on a diverging color scale centered at 0 with every cell annotated
-(utils/pattern_analysis/visualization.py:1140). Comparing an off-diagonal cell to its row's diagonal shows how much is lost going
+`vis_heatmap_pair_transfer` on a diverging color scale centered at 0 with every cell
+annotated. **Updated 2026-08-04**: the cells now carry the pair's Spearman rho, not R²
+(this channel predicts an ordering, and R², being unbounded below, let a few catastrophic
+pairs dominate); the diagonal is excluded, and the matrix is reordered into Louvain
+communities that are boxed. Comparing an off-diagonal cell to its row's diagonal shows how much is lost going
 cross-city, and comparing the two method folders shows whether a pair shares ordering, level, both, or neither.
 
 ## Step 6 · Analysis 3, city-level cum_loss against the decomposition-free baseline
@@ -289,10 +292,22 @@ MAE from 1.246 to 1.288.
 The verified city-level cum_loss figures, as MAE and correlation with ground truth over the five-city LOO in day-equivalents,
 dated 2026-07-12 with income and evac level under the unified global recipe, are M1 0.270 and +0.993, kNN(σ) 0.789 and +0.998,
 city-kNN 0.802 and +0.513, baseline 1.288 and −0.120, and constant-mean 1.187. The output is a grouped bar per city-event
-showing all five, y in day-equivalents and each predictor's MAE annotated, saved as `bar_cross_city_resi_pred.png` with
-`raw_data/cross_city_resi_pred.csv` (columns `cum_loss_gt`, `cum_loss_pred_knn`, `cum_loss_pred_m1`, `cum_loss_pred_city`,
-`cum_loss_baseline`) at the `cross_city_resi_pred/` root (`vis_bar_cross_city_resi_pred`, run_pattern_nmf.py:1385-1398;
-utils/pattern_analysis/visualization.py:936).
+showing all five, y in day-equivalents and each predictor's MAE annotated.
+
+> **Superseded 2026-08-04.** The M1 (pre-r0 aggregate-then-denormalize) and city-kNN
+> reconstructions were removed, so `cum_loss_pred_m1` and `cum_loss_pred_city` no longer
+> exist. `raw_data/cross_city_resi_pred.csv` now holds `cum_loss_gt`, `cum_loss_pred_knn`
+> (legacy kNN(σ), CSV-only), `cum_loss_baseline`, and
+> `cum_loss_pred_aggr_denorm_<model>` for each of cosine-kNN and ridge — the surviving
+> `aggr_denorm` strategy, which adds the day-0 anchor r0 to the pooled features. The
+> figure is no longer a grouped bar: `bar_cross_city_resi_pred.png`/`.svg` is a two-panel
+> figure (a: observed bars with predictions as markers on error stems, cities sorted by
+> observed loss; b: leave-one-out R² per method with MAE). Both live under
+> `cross_city_resi_pred/city_total/`, with a per-predictor calibration scatter in
+> `decomp_pred_aggr_denorm/<model>/`. The five-city numbers quoted above are provenance
+> for the retired methods, not current results; at 13 city-events the surviving figures
+> are LOO R² −0.46 (cosine-kNN) and +0.17 (ridge) against a baseline at −0.55.
+> NOTE this note still describes the five-city era throughout and needs a full pass.
 
 ### 3 · Interpretation · why is weight_normal the right aggregation weight?
 

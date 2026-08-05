@@ -940,73 +940,180 @@ def vis_heatmap_corr(rho, pval=None, time_cols=None,
     return fig
 
 
+def vis_scatter_city_pred(df, pred_col, gt_col='cum_loss_gt', title=None,
+                          save_path=None):
+    """CITY-level LOO calibration scatter: one point per city-event, predicted
+    city cum_loss (x) against the ground-truth city cum_loss (y), both in
+    day-equivalents; points labelled with the city-event code.  The dashed y=x
+    line is perfect prediction; the title carries the LOO R² and MAE over the
+    plotted cities.  Rows where either value is missing are dropped (and the
+    stats computed on what is plotted)."""
+    from sklearn.metrics import r2_score
+    sub = df[[gt_col, pred_col]].dropna()
+    y, p = sub[gt_col].to_numpy(float), sub[pred_col].to_numpy(float)
+    fig, ax = plt.subplots(figsize=(5.2, 4.6))
+    ax.scatter(p, y, s=42, color='#1976D2', alpha=0.85, edgecolor='white',
+               linewidth=0.6, zorder=3)
+    for code, xp, yt in zip(sub.index, p, y):
+        ax.annotate(str(code), (xp, yt), fontsize=6.5, color='#555555',
+                    xytext=(3, 3), textcoords='offset points')
+    lo, hi = float(min(p.min(), y.min())), float(max(p.max(), y.max()))
+    pad = 0.05 * (hi - lo if hi > lo else 1.0)
+    ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], '--', color='grey',
+            lw=1, zorder=2)
+    r2 = r2_score(y, p) if len(y) >= 2 else np.nan
+    mae = float(np.mean(np.abs(y - p)))
+    head = (title + '\n') if title else ''
+    ax.set_title(f'{head}LOO R²={r2:+.2f}   MAE={mae:.2f}   (n={len(y)})',
+                 fontsize=10)
+    ax.set_xlabel('predicted city cum_loss (day-equivalents)', fontsize=9)
+    ax.set_ylabel('actual city cum_loss (day-equivalents)', fontsize=9)
+    ax.tick_params(labelsize=8)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+    return fig
+
+
 def vis_bar_cross_city_resi_pred(df, gt_col='cum_loss_gt',
-                                 pred_cols=(('Prediction (kNN)', 'cum_loss_pred_knn', 'kNN'),
-                                            ('Prediction (ridge)', 'cum_loss_pred_ridge', 'ridge')),
+                                 pred_cols=(('Prediction (kNN)', 'cum_loss_pred_knn'),
+                                            ('Prediction (ridge)', 'cum_loss_pred_ridge')),
                                  baseline_col='cum_loss_baseline', baseline_label='Baseline',
                                  save_path=None, title=None,
-                                 ylabel='cum_loss (day-equivalents)'):
-    """Publication (Nature-style) grouped bar: per city-event (x), the CITY-LEVEL
-    cum_loss as side-by-side bars — Ground truth, one bar per prediction in `pred_cols`
-    (each a (legend_label, column, mae_tag); columns absent from df are skipped), and (if
-    `baseline_col` is present) a baseline labelled `baseline_label` — y in day-equivalents.
-    Nature styling: Arial sans, no top/right spines, restrained palette, no legend frame.
-    Per-bar values are printed VERTICALLY (no horizontal collisions) and the legend sits
-    BELOW the axes (long labels do not overlap the bars); MAE vs GT annotated.  PNG >=300 dpi."""
-    codes = list(df.index)
-    _PRED_COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7']       # blue, green, purple
-    # (legend_label, mae_tag, values, color); GT has no MAE tag.
-    series = [('Ground truth', None, df[gt_col].to_numpy(dtype=float), '#767676')]
-    for i, (lab, col, tag) in enumerate(pred_cols):
+                                 ylabel='city cum_loss (day-equivalents)'):
+    """Two-panel city-level prediction figure, `pred_cols` = ((label, column), ...)
+    with absent columns skipped and `baseline_col` appended as a further method.
+
+    Panel a (hero) — observed city cum_loss as a grey bar per city-event, each
+    prediction a marker on a stem dropped to the observed value, so the ERROR is
+    the segment rather than a height difference the eye must subtract.  Cities
+    are sorted by observed cum_loss DESCENDING: the observed series becomes a
+    monotone staircase, which makes the predictors' compression toward the
+    middle legible at a glance instead of hidden across an arbitrary order.
+
+    Panel b — the aggregate verdict: leave-one-out R² per method as a horizontal
+    bar against a marked zero (the threshold for beating a constant mean), MAE
+    printed at the bar end.  Its method labels are drawn IN each method's colour
+    and thereby serve as the figure's only legend, so panel a carries none.
+
+    Method names are passed through verbatim — spell them out rather than using
+    internal codenames, since this is the reader-facing figure.  `title` is
+    optional and normally left unset: the axes label themselves and the caption
+    belongs to the manuscript.  Saves a 600 dpi PNG."""
+    import textwrap
+    from matplotlib.transforms import blended_transform_factory
+    from sklearn.metrics import r2_score
+    # One neutral family (observed, baseline) + one signal family (the two
+    # predictors).  Green/red stay reserved for directional cues elsewhere.
+    # The baseline's grey is kept DARKER than the observed bar so the control
+    # series never reads as part of the reference bars.
+    _PRED_COLORS = ['#0F4D92', '#9A4D8E', '#42949E', '#B64342']
+    _OBS_FILL, _OBS_EDGE, _NEUTRAL = '#E3E3E3', '#9A9A9A', '#4D4D4D'
+
+    methods = []                                   # (label, values, colour)
+    for i, (lab, col) in enumerate([tuple(p)[:2] for p in pred_cols]):
         if col in df.columns:
-            series.append((lab, tag, df[col].to_numpy(dtype=float),
-                           _PRED_COLORS[i % len(_PRED_COLORS)]))
+            methods.append((lab, df[col].to_numpy(dtype=float),
+                            _PRED_COLORS[i % len(_PRED_COLORS)]))
     if baseline_col in df.columns:
-        series.append((baseline_label, baseline_label, df[baseline_col].to_numpy(dtype=float),
-                       '#E28E2C'))
-    gt = series[0][2]
-    mae_txt = "    ".join(f"MAE({tag})={np.nanmean(np.abs(gt - vals)):.3f}"
-                          for lab, tag, vals, _ in series[1:])
+        methods.append((baseline_label, df[baseline_col].to_numpy(dtype=float),
+                        _NEUTRAL))
+
+    gt = df[gt_col].to_numpy(dtype=float)
+    order = np.argsort(-gt)                        # observed, high -> low
+    codes = [str(c) for c in np.asarray(df.index)[order]]
+    gt_s = gt[order]
+
     nature_rc = {
         'font.family': 'sans-serif',
         'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-        'font.size': 8, 'axes.spines.right': False, 'axes.spines.top': False,
+        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
         'axes.linewidth': 0.8, 'legend.frameon': False,
         'svg.fonttype': 'none', 'pdf.fonttype': 42,
     }
     with plt.rc_context(nature_rc):
-        n = len(series)
+        fig = plt.figure(figsize=(7.2, 3.4))
+        gs = fig.add_gridspec(1, 2, width_ratios=[2.75, 1.25], wspace=0.30)
+        ax = fig.add_subplot(gs[0, 0])
+        axr = fig.add_subplot(gs[0, 1])
+
         x = np.arange(len(codes))
-        w = 0.8 / n
-        fig, ax = plt.subplots(figsize=(1.35 * len(codes) + 1.4, 3.9))
-        for i, (lab, _tag, vals, color) in enumerate(series):
-            offset = (i - (n - 1) / 2) * w
-            bars = ax.bar(x + offset, vals, width=w * 0.92, label=lab, color=color,
-                          edgecolor='black', linewidth=0.7)
-            for bar in bars:
-                h = bar.get_height()
-                if np.isnan(h):
-                    continue
-                # Vertical labels above each bar -> no horizontal overlap between neighbours.
-                ax.annotate(f'{h:.2f}', (bar.get_x() + bar.get_width() / 2, max(h, 0)),
-                            xytext=(0, 2), textcoords='offset points', rotation=90,
-                            ha='center', va='bottom', fontsize=5.5, color='#3a3a3a')
+        bar_w = 0.76
+        ax.bar(x, gt_s, width=bar_w, color=_OBS_FILL, edgecolor=_OBS_EDGE,
+               linewidth=0.6, zorder=2, label='Observed')
+        n_m = len(methods)
+        # Every stem must sit INSIDE its own bar: the span is a fraction of the
+        # bar's HALF-width, so a marker can never drift over the neighbouring
+        # city and make its stem look mis-assigned.
+        span = 0.60 * (bar_w / 2.0)
+        offs = (np.linspace(-span, span, n_m) if n_m > 1 else np.array([0.0]))
+        marks = ['o', 's', '^', 'D']
+        for j, (lab, vals, color) in enumerate(methods):
+            v = vals[order]
+            xs = x + offs[j]
+            # Stem from the observed value to the prediction: the visible
+            # segment IS the signed error.
+            ax.vlines(xs, gt_s, v, color=color, linewidth=0.7, alpha=0.55,
+                      zorder=3)
+            ax.plot(xs, v, marks[j % len(marks)], color=color, markersize=3.1,
+                    markeredgecolor='white', markeredgewidth=0.35, linestyle='none',
+                    zorder=4)
+        ax.axhline(0, color='#B0B0B0', linewidth=0.6, zorder=1)
         ax.set_xticks(x)
-        ax.set_xticklabels(codes, rotation=20, ha='right')
-        ax.set_ylabel(ylabel)
-        ax.set_xlabel('city-event')
-        ax.margins(y=0.22)                                  # headroom for vertical labels
-        # Legend BELOW the axes so the long labels never overlap the bars.
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.20), ncol=2, fontsize=7,
-                  columnspacing=1.4, handlelength=1.3)
-        ax.text(0.99, 0.99, mae_txt, transform=ax.transAxes, ha='right', va='top',
-                fontsize=6.5, color='#4D4D4D')
+        ax.set_xticklabels(codes, rotation=45, ha='right', fontsize=6.2)
+        ax.set_ylabel(ylabel, fontsize=7.5)
+        ax.set_xlabel('city-event, sorted by observed loss', fontsize=7.5)
+        ax.margins(x=0.02, y=0.10)
+        ax.tick_params(axis='y', labelsize=6.8)
+        ax.text(0.0, 1.04, 'a', transform=ax.transAxes, fontsize=8,
+                fontweight='bold', va='bottom')
+        # Name the observed series in place — the only direct label panel a needs.
+        ax.text(0.035, 1.045, 'grey bar = observed; marker = predicted',
+                transform=ax.transAxes, ha='left', va='bottom', fontsize=6.3,
+                color='#5A5A5A')
+
+        # Panel b: LOO R² per method.  Method names are drawn INSIDE this axis,
+        # above their own bar and in their own colour — they are the figure's
+        # only legend, and keeping them inside stops long names from spilling
+        # over panel a (which y-tick labels would do).
+        r2s, maes = [], []
+        for lab, vals, color in methods:
+            ok = np.isfinite(vals) & np.isfinite(gt)
+            r2s.append(r2_score(gt[ok], vals[ok]) if ok.sum() >= 2 else np.nan)
+            maes.append(float(np.mean(np.abs(gt[ok] - vals[ok]))))
+        ypos = np.arange(len(methods))[::-1] * 1.0      # first method on top
+        axr.barh(ypos, r2s, height=0.42,
+                 color=[c for _l, _v, c in methods], edgecolor='none', zorder=3)
+        axr.axvline(0, color='#4D4D4D', linewidth=0.8, zorder=4)
+        lo, hi = float(np.nanmin(r2s + [0.0])), float(np.nanmax(r2s + [0.0]))
+        pad = 0.18 * max(hi - lo, 0.1)
+        axr.set_xlim(lo - pad * 1.9, hi + pad * 1.9)
+        axr.set_ylim(min(ypos) - 0.55, max(ypos) + 0.72)
+        tr = blended_transform_factory(axr.transAxes, axr.transData)
+        for yp, r2v, mae, (lab, _v, color) in zip(ypos, r2s, maes, methods):
+            axr.text(0.015, yp + 0.20, textwrap.fill(lab, 26), transform=tr,
+                     ha='left', va='bottom', fontsize=6.2, color=color,
+                     linespacing=1.15)
+            # MAE at the far end of the bar, pointing away from zero.
+            axr.text(r2v + (pad * 0.22 if r2v >= 0 else -pad * 0.22), yp,
+                     f'R² {r2v:+.2f}   MAE {mae:.2f}', va='center',
+                     ha='left' if r2v >= 0 else 'right', fontsize=5.9,
+                     color='#4D4D4D')
+        axr.set_yticks([])
+        axr.set_xlabel(f'leave-one-out R²  (n = {len(gt)} city-events)',
+                       fontsize=7.5)
+        axr.tick_params(axis='x', labelsize=6.5)
+        axr.spines['left'].set_visible(False)
+        axr.text(0.0, 1.04, 'b', transform=axr.transAxes, fontsize=8,
+                 fontweight='bold', va='bottom')
+
         if title:
-            ax.set_title(title, fontsize=8.5)
-        fig.tight_layout()
+            fig.suptitle(textwrap.fill(title, 118), fontsize=8, y=1.06)
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            fig.savefig(save_path, dpi=600, bbox_inches='tight')
             plt.close(fig)
     return fig
 
@@ -1383,12 +1490,16 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
     return fig
 
 
-def vis_heatmap_pair_r2(mat, title=None, save_path=None, vmax=0.6,
-                        xlabel='test', ylabel='train', blocks=None):
-    """Square pairwise cross-city R² heatmap: rows = train unit, cols = test unit,
-    each cell = the transfer R² of that (train, test) pair.  Diverging colour
-    centred at 0 (green = beats the mean, red = worse), clipped to ±vmax; each
-    cell annotated (n/a if undefined).
+def vis_heatmap_pair_transfer(mat, title=None, save_path=None, vmax=1.0,
+                              xlabel='test', ylabel='train', blocks=None,
+                              cbar_label='Spearman ρ'):
+    """Square pairwise cross-city transfer heatmap: rows = train unit, cols =
+    test unit, each cell = how well that (train, test) pair transfers.  The
+    metric is the caller's — name it in `cbar_label` — and `vmax` must match its
+    range: 1.0 leaves a correlation untouched, while an unbounded metric needs a
+    smaller vmax and the colour then saturates.  Diverging colour centred at 0
+    (green = positive transfer, red = negative); each cell annotated (n/a if
+    undefined).
 
     The DIAGONAL is excluded — a cell where train and test are the same unit is
     that unit's own leave-one-component-out, not a transfer between units, and
@@ -1437,8 +1548,8 @@ def vis_heatmap_pair_r2(mat, title=None, save_path=None, vmax=0.6,
     ax.set_yticklabels(rows, fontsize=9)
     ax.set_xlabel(xlabel, fontsize=10)
     ax.set_ylabel(ylabel, fontsize=10)
-    ax.set_title(title or 'Pairwise cross-city R²', fontsize=12)
-    fig.colorbar(im, ax=ax, pad=0.02, shrink=0.8).set_label('R² (clipped)', fontsize=9)
+    ax.set_title(title or 'Pairwise cross-city transfer', fontsize=12)
+    fig.colorbar(im, ax=ax, pad=0.02, shrink=0.8).set_label(cbar_label, fontsize=9)
     fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)

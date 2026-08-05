@@ -81,9 +81,10 @@ STEP 5 — Build the cross-city feature tables.
     The predictor tables are rebuilt with the same STEP-1 classification
     (functional shares are therefore cross-city comparable by construction;
     the technical notes call this single-recipe design "config C").  Each
-    unit gets two tables, because the two prediction roles decompose the same
-    matrix at different k: the train role at the unit's own k, and the test
-    role re-decomposed at a fixed k = 10.
+    unit gets two tables for historical reasons: the roles used to decompose the
+    same matrix at different k (train at the unit's own k, test pinned at k = 10).
+    Since the rank CV supplies a label-free k from the unit's own matrix, BOTH
+    roles read that own-k decomposition and the two tables are the same object.
 STEP 6 — Cross-city prediction.
     Each method runs in its enforced standardization frame (spearman in the
     rank frame, pearson in the raw-value frame) through three analyses on the
@@ -114,8 +115,9 @@ STEP 7 — Cross-city curve prediction.
     kNN orders the components within the city, the pooled-train cum_loss
     quantiles give the values their shape, a ratio of observable backbone-loss
     spreads rescales them to the held city's own dispersion, and an additive
-    shift pins the weight_normal aggregate to the STEP-6 D+comp predicted
-    city total.
+    shift pins the weight_normal aggregate to the city total of STEP 6's
+    aggr_denorm strategy (pooled features + observed r0, ridge — the same
+    estimator the city_total/ headline figure reports; re-wired 2026-08-04).
     weight_normal aggregation turns the component curves into the city
     trajectory, compared against the observed curve alongside three reference
     lines: a city-wise forecast (one rate for the whole city, a single
@@ -160,12 +162,16 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
         6-socioeconomic/     per-component median-income bars + raw CSV
         7-spatial/           per-component flow-distance bar (H) + raw CSV
     2-cross_city_resi_pred/      the cross-city outputs, split by what is predicted:
-        city_total/     bar_cross_city_resi_pred.png + raw_data/ — the CITY-LEVEL
-                        cum_loss reconstruction, one number per city-event
+        city_total/     the CITY-LEVEL cum_loss prediction, one number per
+                        city-event: bar_cross_city_resi_pred.png/.svg (observed
+                        vs predicted + a leave-one-out R² panel), raw_data/, and
+                        decomp_pred_aggr_denorm/<model>/ per predictor with its
+                        own calibration scatter + raw_data/
         component_rank/ the per-COMPONENT rank transfer (cum_loss only, and
                         no income predictor), one subfolder per predictor —
                         cos_KNN/ and ridge/ — each with its leave-one-out
-                        scatters, R² matrix, pairwise heatmap and raw_data/
+                        scatters (Spearman ρ), the LOO R² matrix, the pairwise
+                        transfer heatmap (Spearman ρ) and raw_data/
     3-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
         plus the three mechanism figures (rank_pred_vs_true, rank_to_cumloss_qm,
         alphaL_relationship_softreg),
@@ -189,12 +195,15 @@ Run
     python run_pattern_nmf.py
 """
 import os
+import pickle
 import re
+import warnings
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, least_squares
 from scipy.stats import rankdata, spearmanr
+from sklearn.metrics import r2_score
 
 from config import (
     BR_GRAPH_PATH, FM_GRAPH_PATH, BR_ANALYSIS_DAYS, FM_ANALYSIS_DAYS,
@@ -217,9 +226,10 @@ from utils.pattern_analysis.visualization import (
     vis_heatmap_corr,
     vis_hist_function_entropy,
     vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
-    vis_heatmap_pair_r2, vis_scatter_intensity_resilience,
+    vis_heatmap_pair_transfer, vis_scatter_intensity_resilience,
     vis_exposure_vs_cumloss,
-    vis_bar_cross_city_resi_pred, vis_bar_curve_mae, vis_curves_city_pred,
+    vis_bar_cross_city_resi_pred, vis_scatter_city_pred, vis_bar_curve_mae,
+    vis_curves_city_pred,
     vis_component_curves_grid, vis_od_flow_slider_html, vis_w2_decomposition,
     vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_func_vs_time_distribution,
     vis_alpha_level_relationship,
@@ -575,14 +585,15 @@ CURVE_PRED_SHRINK = 0.5  # STEP-7 plateau inversion: the solved-L target is
 #   CURVE_PRED_SOLVER  'solve_L'      α pinned at the backbone mean ᾱ, L solved
 #                                     exactly by brentq (PRODUCTION; 0.0706)
 #                      'joint_alphaL' α AND L jointly least-squares-fitted to the
-#                                     target, plus λ·(L − line(α))² pulling L
-#                                     toward the training α-L relationship
-#                                     (pooled OLS L = a0 + b·log10 α over the
-#                                     TRAINING units' ungated fits, bound-pinned
-#                                     included).  λ = 0 is the unregularized
-#                                     joint solve — its 15-day 0.0646 is ERROR
-#                                     CANCELLATION (true-cum_loss 0.0778), not
-#                                     a real gain; λ = 0.1 scores 0.0752.
+#                                     target, optionally plus λ·(L − line(α))²
+#                                     pulling L toward the training α-L
+#                                     relationship (pooled OLS L = a0 + b·log10 α
+#                                     over the TRAINING units' ungated fits,
+#                                     bound-pinned included).  CURRENT SETTING
+#                                     λ = 0: unregularized, so the fit is
+#                                     under-determined and its 15-day 0.0646 is
+#                                     ERROR CANCELLATION (true-cum_loss 0.0778),
+#                                     not a real gain; λ = 0.1 scored 0.0752.
 #   CURVE_JOINT_LAMBDA regularization strength, read only by 'joint_alphaL'.
 #   CURVE_ALPHA_BACKBONE 'surge'      ᾱ = pooled-train mean of the surge-model
 #                                     CLEAN rate (production)
@@ -591,15 +602,22 @@ CURVE_PRED_SHRINK = 0.5  # STEP-7 plateau inversion: the solved-L target is
 #                                     logistic) — the surge-contaminated rate;
 #                                     worse at 15 days (0.0740) but the best
 #                                     backbone at extended windows (T ≥ 20).
-CURVE_PRED_SOLVER = 'joint_alphaL'   # owner choice 2026-07-21: joint (α,L) solve
-                                     # with the α-L-line ridge (λ below).  NOTE: on
-                                     # the DEPLOYED predicted cum_loss this scores
-                                     # city-MAE ~0.0752 vs solve_L's 0.0706 — the
-                                     # line-reg advantage holds only under TRUE
-                                     # cum_loss (see the sandbox sweep).  Set back
-                                     # to 'solve_L' to restore the 0.0706 forecast.
-CURVE_JOINT_LAMBDA = 0.1             # λ-insensitive on predicted cum_loss (~0.0752
-                                     # across 1e-4..10)
+CURVE_PRED_SOLVER = 'joint_alphaL'   # joint (α, L) solve; the α-L-line ridge is
+                                     # switched OFF by λ = 0 below.
+CURVE_JOINT_LAMBDA = 0.0             # α-L regularization REMOVED (owner choice
+                                     # 2026-08-04; was 0.1, and λ-insensitive at
+                                     # ~0.0752 across 1e-4..10).
+                                     # READ BEFORE QUOTING THE NUMBER: at λ = 0
+                                     # the solve is under-determined — only
+                                     # cum_loss constrains (α, L), so the free
+                                     # direction absorbs prediction error.  The
+                                     # 2026-07-21 sweep measured 15-day city-MAE
+                                     # 0.0646 here against 0.0778 under TRUE
+                                     # cum_loss, i.e. the apparent gain is error
+                                     # CANCELLATION, not a better forecast.  The
+                                     # solved α and L are individually no longer
+                                     # identified and must not be read as
+                                     # estimates of the recovery rate or plateau.
 CURVE_ALPHA_BACKBONE = 'surge'
 
 # ── STEP 1 parameters — the global land-use classification ──────────────────────
@@ -744,6 +762,18 @@ K_MIN_TRIAL_FLOOR = 4
 # whether the component characteristics survive at the smaller k, so the
 # cross-city machinery stays untouched.
 PIPELINE_SCOPE    = 'full'
+# Where the cross-city STATE that STEP 7 and STEP 8 consume is cached, so those
+# steps can be re-run without redoing the decomposition and STEP 6.
+#   'full'       run everything; the cache is (re)written on the way past.
+#   'from_step7' load the cache and run ONLY STEP 7-8 (folders 3-, 4-, 5-).
+# The cached objects are exactly STEP 5's outputs — the per-unit feature tables
+# in both roles, their (W, H), the unit records and the pooled IWF vector — and
+# STEP 7/8 read no STEP-6 output, so skipping STEP 6 changes nothing about them.
+# The fingerprint below covers everything upstream that would alter those
+# objects; the STEP-7/8 constants are deliberately NOT in it, since editing
+# those is the whole point of the shortcut.  Lives under outputs/ (gitignored).
+PIPELINE_CACHE = os.path.join(OUTPUT_PLOTS, '.pipeline_cache',
+                              'cross_city_state.pkl')
 # The X% of the component-size health check: a component whose weight
 # ‖W_i‖·‖H_i‖ falls below this fraction of the largest component's weight
 # counts as a too-large-k symptom.  Reported per unit as a pass/fail check; it
@@ -815,10 +845,14 @@ OUTPUT_RC_BY_FUNC    = os.path.join(OUTPUT_CHAR_RESIL, 'line_component_resilienc
 # ground-truth cum_loss per city-event).  Only for pearson + multi_city_std.
 OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, '2-cross_city_resi_pred')
 # Two sibling views of the same STEP-6 transfer, each with its own raw_data/:
-#   city_total/    the CITY-LEVEL cum_loss reconstruction (one number per unit)
-#   component_rank/ the per-COMPONENT rank transfer (leave-one-out scatters, R²
-#                  matrix, pairwise heatmap; the folder name comes from
-#                  CROSS_CITY_METHOD_STD)
+#   city_total/    the CITY-LEVEL cum_loss prediction (one number per unit),
+#                  with decomp_pred_aggr_denorm/<model>/ per predictor
+#   component_rank/ the per-COMPONENT rank transfer; the folder name comes from
+#                  CROSS_CITY_METHOD_STD.  Two metrics live here and are NOT
+#                  interchangeable: the leave-one-out scatters and the pairwise
+#                  transfer heatmap report SPEARMAN rho (this channel predicts
+#                  an ordering), while loo_cross_city_r2_baseline.csv stays R²
+#                  as the pipeline-wide headline number.
 OUTPUT_CITY_TOTAL = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'city_total')
 # Disaster (Saffir-Simpson arrival intensity) vs cum_loss scatter, all
 # city-events pooled (not split into train/test) — filed with the other
@@ -890,14 +924,18 @@ CROSS_CITY_METHOD_STD = {
 # ordinal evacuation strength (0 none / 1 voluntary / 2 mandatory) per city-event.  evac_level
 # varies across same-city events (WM_Dorian 0.81 vs WM_Isaias 0.02) whereas the static POI /
 # income covariates do not, so it carries a per-event severity signal those cannot; it cut the
-# component-wise (M1) city cum_loss MAE 0.499 -> 0.270 (sandbox-validated 2026-07-08).  Within-
+# city cum_loss MAE 0.499 -> 0.270 of the then-current aggregate-then-denormalize
+# reconstruction (sandbox-validated 2026-07-08; that PRE-r0 variant was removed from
+# STEP 6 on 2026-08-04, so the number is provenance, not a property of today's
+# features+r0 aggr_denorm strategy).  Within-
 # unit standardization would zero a constant column, so both are standardized on the POOLED
 # TRAIN instead, and ONLY enter the model in the 'pooled_train' (multi-city) mode.  In
 # 'within_unit' (single-city) mode they are not used (single-city results are unchanged).
-# The level covariates feed the COMPONENT-level path only (M1, kNN(sigma), the LOO-R² and
-# pairwise cross-city analyses); the city-level cosine-kNN reconstruction and the decomposition-
-# free baseline do NOT take evac_level — over their low-dim cosine vector it is collinear with
-# intensity and reshuffled the n=5 neighbors unhelpfully (sandbox: both worsened).  See
+# The level covariates feed the COMPONENT-level path only (aggr_denorm, kNN(sigma), the
+# LOO-R² and pairwise cross-city analyses); the decomposition-free city baseline does NOT
+# take evac_level — over its low-dim cosine vector it is collinear with intensity and
+# reshuffled the n=5 neighbors unhelpfully (sandbox: both worsened; the other affected
+# path, the city-level "D+city" reconstruction, was removed 2026-08-04).  See
 # cross_city_resilience's level_feature_cols.
 LEVEL_FEATURE_COLS = ['hurricane_intensity', 'evac_level']
 
@@ -909,7 +947,8 @@ LEVEL_FEATURE_COLS = ['hurricane_intensity', 'evac_level']
 # raw magnitude comparable across cities, like mean_distance; its signal lives in the
 # WITHIN-city variation across components (the static city means are nearly identical
 # across these city-events), which only the decomposition exposes — adding it cut the
-# component-wise (M1) city MAE 0.953 -> 0.499 (sandbox-validated 2026-07-08).  In
+# city MAE 0.953 -> 0.499 of the then-current PRE-r0 reconstruction (sandbox-validated
+# 2026-07-08; provenance only — that variant left STEP 6 on 2026-08-04).  In
 # 'within_unit' (single-city) mode these are left within-unit.  See cross_city_resilience.
 POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
                        + ['mean_distance', 'median_income_combined'])
@@ -948,6 +987,20 @@ OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, '4-cross_city_od_pred')
 CURVE_OD_MAPS = True
 OD_MAP_TOP_ARCS = 600
 
+# Which predictor each of STEP-7's two transfer channels runs (2026-08-04,
+# when both consumers were re-wired to the improved STEP-6 recipes):
+#   city total — the aggr_denorm strategy on pooled features + r0.  ridge is
+#     the only variant that calibrates at 13 units (LOO R² +0.17, MAE 1.26 vs
+#     -0.46 / 1.74 for cosine-kNN), so the quantile mapping's location shift
+#     anchors on it.
+#   rank ordering — the component_rank recipe (func + mean_distance, income
+#     dropped 2026-08-04) plus STEP-7's own observed-r0 predictor.  ridge leads
+#     the rank channel on average (Spearman mean 0.550 vs 0.496, median 0.600
+#     vs 0.543; not significant at n=13, and cosine-kNN stays better on
+#     SL_Ida, 0.543 vs 0.086) — chosen for consistency with the city channel.
+CURVE_PRED_CITY_MODEL = 'ridge'
+CURVE_PRED_RANK_MODEL = 'ridge'
+
 # ── STEP 8 parameters — transferability (source selection) ─────────────────────
 
 # Everything analysis_transferability writes goes here.
@@ -970,7 +1023,7 @@ _TRANSFER_COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7', '#E28E2C', '#B0413E']
 # total per component), so splitting them would attribute one signal across six
 # mutually-constrained columns.
 _TRANSFER_GROUP_COLORS = {'func': '#0F4D92', 'dist': '#4C9F70',
-                          'income': '#E28E2C', 'r0': '#B0413E'}
+                          'r0': '#B0413E'}
 
 # Minimum usable rows per unit-and-metric inside the cross-city engine, for
 # BOTH the STEP-6 analyses and the STEP-7 curve prediction.  The engine
@@ -1495,9 +1548,10 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     """Decompose this city at `k` and assemble ONLY the cross-city predictor/target
     columns (share_from/to_<c>, mean_distance/std_distance, median_income_combined,
     RES_COLS) — no figures, no within-city side effects.  Used by the leave-one-city-
-    event-out cross-city loop to build the HELD-OUT (test) unit's feats at a fixed k
-    (k=10), independent of the unit's own n_behaviors used elsewhere.  l1_reg is
-    the unit's CITY_EVENTS value (only k differs).  `cat_lookup` is the unit's block-group
+    event-out cross-city loop to build each unit's cross-city feats.  `k` is now
+    always the unit's own rank-CV n_behaviors (it used to be a fixed k=10 for the
+    held-out role, hence the explicit parameter).  l1_reg is the unit's CITY_EVENTS
+    value.  `cat_lookup` is the unit's block-group
     -> category map from the STEP-1 global classification.
     Returns (feats, (W, H)) — the decomposition is reused by STEP 7."""
     W, H, weights = decompose_city(X_all, k, l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
@@ -1777,17 +1831,15 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     ONLY runs for pearson + multi_city_std (target_std='pooled_train'), where the prediction
     has an absolute, day-equivalent meaning; any other setting is skipped.
 
-    Per held-out city, THREE reconstructions of the same per-component cosine-kNN prediction:
-      * knn  — legacy: un-standardize each component with the fold's (mu, sigma) then
+    Per held-out city, ONE legacy reconstruction of the per-component cosine-kNN
+    prediction is kept, CSV-only, as a reference point:
+      * knn  — un-standardize each component with the fold's (mu, sigma) then
                weight_normal-average.  sigma ~ the large per-component cum_loss spread over-
                amplifies the mis-scaled prediction (good ranking, poor calibration).
-      * M1   — keep the standardized component predictions, aggregate to a city score, then
-               rescale to day-equivalents with a 1-parameter city-scale VARIANCE MATCH whose
-               scale is learned NESTED-LOO on the other training cities (never the held city).
-               Component-level prediction + city-scale calibration; avoids the per-component
-               sigma.  (n=5-fragile: the scale is estimated from 4 outlier-driven cities.)
-      * city — a city-level cosine-kNN over the weight_normal-aggregated feature vector,
-               predicting GT directly (bounded to the training cities' GT; no sigma).
+    Two further reconstructions were removed 2026-08-04 (see the comment above the LOO
+    loop): the pre-r0 D+aggr+denorm, superseded by the aggr_denorm strategy described
+    below (whose only difference is the r0 predictor), and the city-level "D+city"
+    cosine-kNN.
     Ground truth = cum_loss of the city's TOTAL activity curve (no decomposition).  A
     DECOMPOSITION-FREE BASELINE (cosine-weighted average of the OTHER cities' GT over
     [ss_intensity, city-wide POI shares, static city-wide mean BG income]) is emitted for
@@ -1795,9 +1847,24 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     and is the fair income-augmented control; it barely moves the baseline (its cross-city
     spread is tiny — two same-city events even share the value), which is what shows the
     income gain of the decompose methods comes from the flow-weighted WITHIN-city component
-    spread, not from income as a city covariate.  Saves a grouped bar
-    (GT / kNN / M1 / city-kNN / baseline) + raw CSV
-    (cum_loss_gt/_pred_knn/_pred_m1/_pred_city/_baseline) under cross_city_resi_pred/."""
+    spread, not from income as a city covariate.
+
+    The headline predictions are the aggr_denorm strategy — keep the standardized
+    component predictions, AGGREGATE them to a city score, then DENORMALIZE to
+    day-equivalents with a 1-parameter city-scale VARIANCE MATCH learned NESTED-LOO on
+    the other training cities (never the held city); the name is those three steps in
+    order — run on the pooled features EXTENDED by r0 (the component's observed day-0
+    baseline-normalized activity), under BOTH predictors (cosine-kNN and RidgeCV), into
+    decomp_pred_aggr_denorm/<model>/: the 13-point LOO calibration scatter (predicted vs
+    actual city cum_loss, R² quantified) + raw_data/city_pred.csv.  (A denorm_aggr
+    sibling strategy was measured 2026-08-04 and removed — see the comment at _fold_ex.)
+
+    Saves a two-panel figure (panel a: observed city cum_loss as bars with each
+    prediction as a marker on an error stem, cities sorted by observed loss; panel b:
+    leave-one-out R² per method with MAE annotated) as bar_cross_city_resi_pred.png/.svg,
+    covering aggr_denorm+r0 under both predictors against the baseline — the legacy
+    kNN(σ) stays CSV-only — plus the raw CSV (cum_loss_gt/_pred_knn/
+    _pred_aggr_denorm_<model>/_baseline) under cross_city_resi_pred/city_total/."""
     if method != 'pearson' or target_std != 'pooled_train':
         print(f"  [cross_city_resi_pred] skipped: only pearson + multi_city_std "
               f"(got {method} + {target_std}).")
@@ -1852,23 +1919,11 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
         return float(np.dot(a, b) / (na * nb)) if na > 0 and nb > 0 else 0.0
 
-    def _unit_rows(M):
-        n = np.linalg.norm(M, axis=-1, keepdims=True)
-        return M / np.where(n > 0, n, 1.0)
-
-    # City-level aggregated feature vector = weight_normal-weighted mean of the predictor
-    # columns (config-C func + mean_distance) plus the per-event-constant intensity — used
-    # by method (3) (city-level kNN) and computable for any unit's role table.
-    def _city_vec(feats):
-        w = feats['weight_normal'].to_numpy(dtype=float); sw = w.sum()
-        w = w / sw if sw > 0 else np.full(len(w), 1.0 / len(w))
-        v = [float(w @ feats[col].to_numpy(dtype=float)) for col in feature_cols]
-        return np.array(v + [float(feats['hurricane_intensity'].iloc[0])])
-
-    # One held-out fold of the COMPONENT-level cosine-kNN transfer.  Returns both the
-    # sigma-un-standardized weight_normal city prediction (`pcity`, the legacy kNN number)
-    # and the aggregated STANDARDIZED score (`scity` = Σ w·ŷ_std / Σ w) that method M1
-    # rescales at city scale.  Reused for the outer folds AND the nested-LOO inner folds.
+    # One held-out fold of the COMPONENT-level cosine-kNN transfer, returning the
+    # sigma-un-standardized weight_normal city prediction (`pcity`, the legacy
+    # kNN number).  Its aggregated STANDARDIZED score served the pre-r0
+    # D+aggr+denorm reconstruction and went with it (2026-08-04); the surviving
+    # aggr_denorm strategy computes its own in _fold_ex, on features + r0.
     def _fold(held, rest):
         fold = {held: test_merged[held]}
         fold.update({c: train_merged[c] for c in rest})
@@ -1889,51 +1944,71 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         pred_raw = ypred_std * sigma + mu
         w = feats_test[held].loc[cidx, 'weight_normal'].to_numpy(dtype=float); wsum = w.sum()
         pcity = float((w * pred_raw).sum() / wsum) if wsum > 0 else float(pred_raw.mean())
-        scity = float((w * ypred_std).sum() / wsum) if wsum > 0 else float(ypred_std.mean())
-        return dict(pcity=pcity, scity=scity)
+        return dict(pcity=pcity)
 
-    # Three reconstructions of the component predictions into a city day-equivalent:
-    #   knn  — legacy: un-standardize each component with the fold's (mu, sigma) then
-    #          weight_normal-average.  sigma ~ the huge per-component cum_loss spread over-
-    #          amplifies the (mis-scaled) prediction -> good ranking, poor calibration.
-    #   M1   — component-level: keep the standardized predictions, aggregate to `scity`, then
-    #          rescale to day-equivalents with a 1-parameter city-scale VARIANCE MATCH whose
-    #          scale is learned nested-LOO on the other training cities (never the held city).
-    #   city — method (3): a city-level cosine-kNN over the aggregated `_city_vec`, predicting
-    #          GT directly (bounded to the training cities' GT; no per-component sigma).
-    # NOTE: the M1 calibration is estimated from the |rest| training cities of each
-    # fold, so its std is outlier-driven and the calibration stays fragile at this
-    # sample size.
+    # ── The aggr_denorm STRATEGY on features + r0, both predictors ──
+    # Same component-level transfer as _fold but with r0 (each component's
+    # observed day-0 baseline-normalized activity — leak-free initial condition,
+    # cross-city comparable, already a STEP-7 pooled predictor) appended to the
+    # pooled features, and the predictor selectable.  Returns scity, the
+    # weight_normal aggregate of the STANDARDIZED component predictions, which
+    # the caller rescales at CITY scale (nested-LOO variance match).
+    # (A denorm_aggr sibling — invert each component with the pooled-train
+    # (mu, sigma) BEFORE aggregating — was measured 2026-08-04 and removed: an
+    # affine denorm commutes with the weighted average, so it only swaps the
+    # calibration frame to the component-level sigma, and both predictors
+    # scored WORSE under it: cos-kNN R2 -0.27, ridge -0.80, vs +0.17 for
+    # aggr_denorm/ridge here.)
+    fcols_r0 = feature_cols + ['r0']
+    pooled_r0 = POOLED_FEATURE_COLS + ['r0']
+
+    def _fold_ex(held, rest, model_id):
+        fold = {held: test_merged[held]}
+        fold.update({c: train_merged[c] for c in rest})
+        _, pred, _ = cross_city_resilience(
+            fold, RES_COLS, fcols_r0, rank=False,
+            split={'train': rest, 'test': [held]}, target_std=target_std,
+            level_feature_cols=LEVEL_FEATURE_COLS, model=model_id,
+            pooled_feature_cols=pooled_r0,
+            min_rows=CROSS_CITY_MIN_ROWS)
+        pm = pred.get(held, {}).get('cum_loss')
+        if pm is None:
+            return None
+        ypred_std = np.asarray(pm[1], dtype=float)
+        cidx = pm[2]
+        if len(cidx) == 0:
+            return None
+        w = feats_test[held].loc[cidx, 'weight_normal'].to_numpy(dtype=float)
+        wsum = float(w.sum())
+        if wsum <= 0:                       # degenerate weights -> plain mean
+            w, wsum = np.ones(len(cidx)), float(len(cidx))
+        return dict(scity=float((w * ypred_std).sum() / wsum))
+
+    # The legacy reconstruction of the component predictions into a city
+    # day-equivalent, kept CSV-only as a reference point:
+    #   knn — un-standardize each component with the fold's (mu, sigma) then
+    #         weight_normal-average.  sigma ~ the huge per-component cum_loss
+    #         spread over-amplifies the (mis-scaled) prediction -> good ranking,
+    #         poor calibration.
+    # (Two further reconstructions lived here and were removed 2026-08-04: the
+    # pre-r0 D+aggr+denorm, superseded by the aggr_denorm strategy defined just
+    # above, whose only difference is the r0 predictor (LOO R² -0.73 -> -0.46 on
+    # cosine-kNN), and a city-level cosine-kNN over the weight_normal-aggregated
+    # feature vector predicting GT directly ("D+city", LOO R² -0.15 — its low MAE
+    # came from predicting near the training mean, its correlation with GT was
+    # 0.00).)
     rows = []
     for held in codes:
         rest = [c for c in codes if c != held]
+        # The legacy kNN(sigma) number must NOT gate the row: it is a CSV-only
+        # reference, so a fold where it cannot be formed still has a usable
+        # ground truth, baseline and aggr_denorm prediction.  NaN it and carry
+        # on — the same failure semantics _fold_ex already uses below.
         outer = _fold(held, rest)
         if outer is None:
-            print(f"  [cross_city_resi_pred] {held}: no cum_loss prediction; skipping.")
-            continue
-        pred_knn = outer['pcity']
-
-        # M1: nested LOO on the training cities -> (scity, GT) pairs, fit the 1-param scale.
-        s_in, gt_in = [], []
-        for s2 in rest:
-            inn = _fold(s2, [c for c in rest if c != s2])
-            if inn is not None:
-                s_in.append(inn['scity']); gt_in.append(gt[s2])
-        if len(s_in) >= 2:
-            s_in, gt_in = np.array(s_in), np.array(gt_in)
-            sd_s = s_in.std()
-            pred_m1 = float(gt_in.mean() + (outer['scity'] - s_in.mean())
-                            * (gt_in.std() / (sd_s if sd_s > 0 else 1.0)))
-        else:
-            pred_m1 = pred_knn
-
-        # method (3): city-level cosine-kNN over aggregated features -> GT.
-        Xtr = np.vstack([_city_vec(train_merged[c]) for c in rest])
-        ytr = np.array([gt[c] for c in rest])
-        mu_x, sd_x = Xtr.mean(axis=0), Xtr.std(axis=0); sd_x[sd_x == 0] = 1.0
-        Ztr = (Xtr - mu_x) / sd_x; zte = (_city_vec(test_merged[held]) - mu_x) / sd_x
-        sims3 = np.clip(_unit_rows(Ztr) @ _unit_rows(zte), 0.0, None)
-        pred_city = (float(sims3 @ ytr / sims3.sum()) if sims3.sum() > 0 else float(ytr.mean()))
+            print(f"  [cross_city_resi_pred] {held}: legacy kNN(sigma) reference "
+                  f"unavailable; the row keeps its other predictions.")
+        pred_knn = outer['pcity'] if outer is not None else np.nan
 
         # Baseline (no decomposition): cosine-similarity-weighted average of the OTHER
         # cities' GT cum_loss over city features [ss_intensity, city-wide POI shares].
@@ -1941,9 +2016,35 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         gts = np.array([gt[t] for t in rest])
         base = (float((sims * gts).sum() / sims.sum()) if sims.sum() > 0 else float(gts.mean()))
 
-        rows.append({'code': held, 'cum_loss_gt': gt[held],
-                     'cum_loss_pred_knn': pred_knn, 'cum_loss_pred_m1': pred_m1,
-                     'cum_loss_pred_city': pred_city, 'cum_loss_baseline': base})
+        row = {'code': held, 'cum_loss_gt': gt[held],
+               'cum_loss_pred_knn': pred_knn, 'cum_loss_baseline': base}
+
+        # The aggr_denorm strategy x the same two predictors as the rank
+        # channel, on features + r0: aggregate the standardized scores, then
+        # the nested-LOO city-scale variance match (the inner scitys must come
+        # from the SAME predictor and feature set, so the nested loop reruns
+        # _fold_ex per fold).  Fewer than 2 usable inner cities -> NaN (the
+        # variance match is undefined; cannot happen at 12 training units).
+        for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
+            outer_ex = _fold_ex(held, rest, model_id)
+            if outer_ex is None:
+                row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = np.nan
+                continue
+            s_in2, gt_in2 = [], []
+            for s2 in rest:
+                inn2 = _fold_ex(s2, [c for c in rest if c != s2], model_id)
+                if inn2 is not None:
+                    s_in2.append(inn2['scity']); gt_in2.append(gt[s2])
+            if len(s_in2) >= 2:
+                s_in2, gt_in2 = np.array(s_in2), np.array(gt_in2)
+                sd_s2 = s_in2.std()
+                row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = float(
+                    gt_in2.mean() + (outer_ex['scity'] - s_in2.mean())
+                    * (gt_in2.std() / (sd_s2 if sd_s2 > 0 else 1.0)))
+            else:
+                row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = np.nan
+
+        rows.append(row)
 
     if not rows:
         print("  [cross_city_resi_pred] no usable city-events; skipping.")
@@ -1953,16 +2054,60 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     raw_dir = os.path.join(OUTPUT_CITY_TOTAL, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
     res.to_csv(os.path.join(raw_dir, 'cross_city_resi_pred.csv'))
-    # The bar omits the legacy kNN(σ) prediction (still in the CSV); it shows the two
-    # decomposition-based predictions and the decomposition-free baseline.
+
+    # One folder per predictor: the 13-point LOO calibration scatter
+    # (predicted vs actual city cum_loss, R² + MAE in the title) and its raw
+    # data, for the aggr_denorm strategy on features+r0.
+    _STRATEGY_TITLES = {
+        'aggr_denorm': 'Decompose+aggr+denorm (+r0)',
+    }
+    for strat, strat_title in _STRATEGY_TITLES.items():
+        for model_dir in CROSS_CITY_RANK_MODELS:
+            col = f'cum_loss_pred_{strat}_{model_dir}'
+            if col not in res.columns:
+                continue
+            sdir = os.path.join(OUTPUT_CITY_TOTAL, f'decomp_pred_{strat}',
+                                model_dir)
+            sraw = os.path.join(sdir, 'raw_data')
+            os.makedirs(sraw, exist_ok=True)
+            res[['cum_loss_gt', col]].rename(
+                columns={col: 'cum_loss_pred'}).to_csv(
+                os.path.join(sraw, 'city_pred.csv'))
+            vis_scatter_city_pred(
+                res, col,
+                title=f'{strat_title} — {model_dir}, LOO over {len(res)} '
+                      f'city-events',
+                save_path=os.path.join(sdir, 'scatter_city_pred.png'))
+            sub = res[['cum_loss_gt', col]].dropna()
+            r2v = (r2_score(sub['cum_loss_gt'], sub[col])
+                   if len(sub) >= 2 else np.nan)
+            print(f"  [cross_city_resi_pred] decomp_pred_{strat}/{model_dir}: "
+                  f"R2={r2v:+.3f} "
+                  f"MAE={float((sub['cum_loss_gt'] - sub[col]).abs().mean()):.3f}")
+
+    # The figure omits the legacy kNN(σ) prediction (still in the CSV); it shows
+    # the aggr_denorm strategy under both predictors against the
+    # decomposition-free baseline.  Labels are spelled out — this is the
+    # reader-facing figure, so no internal codenames.
+    # The series are BUILT from CROSS_CITY_RANK_MODELS rather than hardcoded:
+    # those keys name the columns written above, and vis_bar_cross_city_resi_pred
+    # silently drops a column it cannot find, so a hardcoded name that drifted
+    # out of sync would yield a headline figure showing only the baseline with
+    # no error anywhere.  The assertion below makes that failure loud instead.
+    _MODEL_LABELS = {'cos_KNN': 'cosine-kNN', 'ridge': 'ridge'}
+    bar_pred_cols = tuple(
+        (f'Component transfer, {_MODEL_LABELS.get(m, m)}',
+         f'cum_loss_pred_aggr_denorm_{m}') for m in CROSS_CITY_RANK_MODELS)
+    _missing = [c for _l, c in bar_pred_cols if c not in res.columns]
+    if _missing:
+        raise KeyError(f"analysis_cross_city_resi_pred: the headline figure's "
+                       f"prediction columns {_missing} were never written; "
+                       f"CROSS_CITY_RANK_MODELS and the LOO loop disagree.")
     vis_bar_cross_city_resi_pred(
         res, save_path=os.path.join(OUTPUT_CITY_TOTAL,
                                     'bar_cross_city_resi_pred.png'),
-        pred_cols=(('Decompose + component-wise', 'cum_loss_pred_m1', 'D+comp'),
-                   ('Decompose + city-wise', 'cum_loss_pred_city', 'D+city')),
-        baseline_label='City-wise',
-        title='City-level cum_loss: ground truth vs decomposition-based predictions '
-              'vs city-wise baseline (global-IWF features, pearson)')
+        pred_cols=bar_pred_cols,
+        baseline_label='City-similarity baseline (no decomposition)')
     print(f"  [cross_city_resi_pred] -> {OUTPUT_CITY_TOTAL} "
           f"({len(res)} city-events)")
 
@@ -1978,13 +2123,17 @@ PAIR_LOUVAIN_SEED = 0
 # gamma*k_i*k_j/2m: larger gamma charges more for keeping two units together,
 # so communities come out smaller and more numerous.  Louvain takes no
 # cluster-COUNT argument, so this is the only dial on how many boxes appear.
-# Measured on the 13-unit transfer matrices (clusters as cosine-kNN / ridge):
-# gamma 0.5 -> 1/1, 0.8 -> 2/2, 1.0 -> 3/2, 1.2 -> 3/3, 1.5 -> 4/4, 2.0 -> 7/6,
-# 5.0 -> 11/11.  1.2 is the lowest value at which BOTH rank models return the
-# same partition size, so the boxes stop depending on which predictor drew them.
-# Note modularity's resolution limit (~sqrt(2m), and m ~ 17 here) sits at the
-# scale of these 4-5 unit communities, so gamma below ~1 cannot split them at
-# all whatever the data says.
+# Measured on the 13-unit SPEARMAN transfer matrices (clusters as cosine-kNN /
+# ridge): gamma 0.5 -> 1/1, 0.8 -> 2/2, 1.0 -> 2/2, 1.2 -> 2/3, 1.5 -> 5/5,
+# 2.0 -> 7/9, 5.0 -> 13/13.  1.2 sits just above the plateau where everything
+# collapses into one or two communities and below 1.5, where the partition
+# shatters into five.  It does NOT make the two rank models agree — they return
+# 2 and 3 communities — so the boxes are read per model.  (Under the retired R²
+# version of this matrix 1.2 did make them agree; that agreement was a property
+# of the unbounded metric, not of the data.)  What survives both models and the
+# metric change is the {PG_Ian, NA_Ian, NP_Ian, DT_Ian, CH_Dorian} core.
+# Modularity's resolution limit (~sqrt(2m), m ~ 29-34 here) sits at the scale of
+# these communities, so gamma below ~1 cannot split them whatever the data says.
 PAIR_LOUVAIN_RESOLUTION = 1.2
 
 
@@ -2049,12 +2198,14 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
                               model='ridge', pooled_feature_cols=(),
                               min_rows=CROSS_CITY_MIN_ROWS):
     """Pairwise single-train -> single-test cross-city transfer for cum_loss.
-    For each ORDERED pair (train=a, test=b): train a uses its own-k feats
-    (feats_train), test b uses the k=10 feats (feats_test); the diagonal (a==b) is
-    a's within-unit leave-one-component-out at k=10.  The target standardization is
+    For each ORDERED pair (train=a, test=b): both a and b use their OWN rank-CV k
+    (feats_train and feats_test are the same own-k table per unit — the separate
+    parameters survive from when the test role was pinned at k = 10); the diagonal
+    (a==b) is a's within-unit leave-one-component-out.  The target standardization is
     HARD-PAIRED to the method via CROSS_CITY_METHOD_STD (target_std=None resolves it,
     a mismatching explicit value raises ValueError).  Saves the |codes|x|codes| matrix
-    (rows=train, cols=test, value = cum_loss R²) as cross_city_pair_heatmap (.png +
+    (rows=train, cols=test, value = the pair's cum_loss Spearman ρ) as
+    cross_city_pair_heatmap (.png +
     raw_data/.csv) under cross_city_resi_pred/<subdir>/ (subdir=None -> the method's
     paired label).  Returns the matrix."""
     # Defensive guard: same pairing rule as analysis_cross_city (std AND output label),
@@ -2090,12 +2241,22 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
     train_merged = {c: _merge(feats_train[c]) for c in codes}
     test_merged  = {c: _merge(feats_test[c]) for c in codes}
 
+    # Cell = SPEARMAN rho of the pair's predicted vs actual cum_loss ordering,
+    # not the engine's R².  This channel's target is a within-unit rank, so the
+    # ordering is what a pair can lend; R² additionally scores the amplitude of
+    # the prediction, which is nuisance here (rank-projecting the same
+    # predictions leaves rho untouched and moves R² by ~0.3).  R² also has no
+    # lower bound — the R² version of this matrix ran to -11.96 — so after the
+    # negative clipping below, a handful of catastrophic pairs decided which
+    # edges existed at all.  rho is bounded to [-1, 1] and needs no clipping in
+    # the colour scale.  Invariant to the standardization, so it is read off the
+    # engine's standardized arrays directly.
     mat = pd.DataFrame(index=codes, columns=codes, dtype=float)   # rows=train, cols=test
     for a in codes:
         for b in codes:
-            feats_pair = ({a: test_merged[a]} if a == b           # self: within-a LOO at k=10
+            feats_pair = ({a: test_merged[a]} if a == b           # self: within-a LOO
                           else {a: train_merged[a], b: test_merged[b]})
-            r2_t, _, _ = cross_city_resilience(
+            _r2_t, pred, _ = cross_city_resilience(
                 feats_pair, RES_COLS, feature_cols, rank=rank,
                 split={'train': [a], 'test': [b]}, target_std=target_std,
                 level_feature_cols=level_feature_cols, model=model,
@@ -2103,9 +2264,9 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
                                      if c in feature_cols],
                 min_rows=min_rows)
             col = 'pooled_LOO' if a == b else b
-            mat.loc[a, b] = (float(r2_t.loc['cum_loss', col])
-                             if col in r2_t.columns and pd.notna(r2_t.loc['cum_loss', col])
-                             else np.nan)
+            pm = pred.get(col, {}).get('cum_loss')
+            mat.loc[a, b] = (float(spearmanr(pm[0], pm[1]).statistic)
+                             if pm is not None and len(pm[0]) >= 3 else np.nan)
 
     out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, subdir)
     raw_dir = os.path.join(out_dir, 'raw_data')
@@ -2119,13 +2280,15 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
     mat.to_csv(os.path.join(raw_dir, 'cross_city_pair_heatmap.csv'))
     pd.Series(cl_labels, name='cluster').rename_axis('code').loc[ordered].to_csv(
         os.path.join(raw_dir, 'cross_city_pair_clusters.csv'))
-    vis_heatmap_pair_r2(
-        mat, title=f'Pairwise cross-city cum_loss R² ({method}; test k=10)\n'
-                   f'Louvain transfer communities boxed (γ={PAIR_LOUVAIN_RESOLUTION}); '
-                   f'diagonal (within-unit LOO) excluded',
+    vis_heatmap_pair_transfer(
+        mat, title=f'Pairwise cross-city cum_loss rank transfer, Spearman ρ '
+                   f'(each unit at its own rank-CV k)\nLouvain transfer '
+                   f'communities boxed (γ={PAIR_LOUVAIN_RESOLUTION}); diagonal '
+                   f'(within-unit LOO) excluded',
         xlabel='test city-event', ylabel='train city-event', blocks=blocks,
+        vmax=1.0, cbar_label='Spearman ρ',
         save_path=os.path.join(out_dir, 'cross_city_pair_heatmap.png'))
-    print(f"  [pairwise] cum_loss R² heatmap ({method}) -> "
+    print(f"  [pairwise] cum_loss Spearman ρ heatmap ({method}) -> "
           f"{os.path.join(out_dir, 'cross_city_pair_heatmap.png')}  "
           f"[{len(blocks)} Louvain clusters: "
           f"{', '.join(f'C{c}={s}' for _, s, c in blocks)}]")
@@ -2158,9 +2321,14 @@ def analysis_transferability(feats_test, codes):
     target's, scored by spearman(prediction, observed cum_loss).  Directed, so
     the matrix is asymmetric; panel A can only draw the symmetrized value.
 
-    Writes transferability_map.png plus the three matrices under raw_data/."""
+    Writes transferability_map.png plus the three matrices under raw_data/.
+
+    Features follow the rank channel they explain (re-aligned 2026-08-04, when
+    component_rank/ dropped income): func + mean_distance + r0.  Keeping income
+    here while the rank models no longer see it would measure domain proximity
+    over a coordinate the transfer being explained cannot use."""
     feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
-                    + ['mean_distance', 'median_income_combined', 'r0'])
+                    + ['mean_distance', 'r0'])
 
     def _unit(code):
         t = feats_test[code].copy()
@@ -2208,8 +2376,7 @@ def analysis_transferability(feats_test, codes):
     # yields both the pair's W2 and its exact split over feature groups.
     groups = {'func': list(range(len(SF_CATEGORIES))),
               'dist': [len(SF_CATEGORIES)],
-              'income': [len(SF_CATEGORIES) + 1],
-              'r0': [len(SF_CATEGORIES) + 2]}
+              'r0': [len(SF_CATEGORIES) + 1]}
     W2 = np.zeros((n, n))
     T = np.full((n, n), np.nan)
     pair_rows = []
@@ -2339,7 +2506,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
          predictors PLUS the observed r0 — the day-0 drop is the mechanically
          strongest predictor of cum_loss and already an allowed input as the
          anchor):
-           total     the D+comp city cum_loss of STEP 6 (standardized
+           total     the D+aggr+denorm city cum_loss of STEP 6 (standardized
                      component predictions aggregated by weight_normal, then
                      one city-scale variance match calibrated nested-LOO on
                      the training units): city-total MAE 0.270 against the
@@ -2409,8 +2576,19 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
       raw_data/                       per-day city curves + the per-component
                                       α/L/B table + the plotted MAE table
                                       (everything above is recomputable)."""
+    # Three feature sets, one per channel (2026-08-04 re-wiring):
+    #   feature_cols — the pooled/raw channel base (income stays: it is a LEVEL
+    #     predictor there); _param_prediction and the city-wise reference curve
+    #     keep it.
+    #   fcols_r0/pooled_r0 — the city-total channel, matching STEP-6's
+    #     aggr_denorm exactly (pooled features + observed r0).
+    #   rank_feature_cols — the rank channel, matching component_rank/ exactly
+    #     (income dropped) + STEP-7's own r0.
     feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
                     + ['mean_distance', 'median_income_combined'])
+    fcols_r0 = feature_cols + ['r0']
+    pooled_r0 = POOLED_FEATURE_COLS + ['r0']
+    rank_feature_cols = [f'func_{c}' for c in SF_CATEGORIES] + ['mean_distance']
 
     def _merge(feats):
         m = feats.copy()
@@ -2452,9 +2630,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
     # City-wise baseline inputs (decomposition-free forecast of the whole city's
     # recovery shape): per city, the weight_normal-aggregated predictor vector +
-    # the storm intensity (mirrors the STEP-6 city-wise reconstruction's
-    # _city_vec; evac_level deliberately excluded, as there), plus the observed
-    # city day-0 value that anchors the single city logistic.  TRAINING cities
+    # the storm intensity (evac_level deliberately excluded — over a low-dim
+    # cosine vector it is collinear with intensity; this mirrored the STEP-6
+    # "D+city" reconstruction, which was removed 2026-08-04, so this is now the
+    # only city-level aggregate in the pipeline), plus the observed city day-0
+    # value that anchors the single city logistic.  TRAINING cities
     # contribute their vector and their city-level α from the TRAIN role (own-k
     # tables) — the same role convention as the component transfer — while the
     # held city enters only through its own-k vector and its day-0 anchor.
@@ -2561,9 +2741,9 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         fold = {held: te}
         fold.update({c: train_merged[c] for c in rest})
         _, pred, _ = cross_city_resilience(
-            fold, [target], feature_cols + ['r0'], rank=True,
+            fold, [target], rank_feature_cols + ['r0'], rank=True,
             split={'train': rest, 'test': [held]}, target_std='within_unit',
-            model='cosine_knn', min_rows=CROSS_CITY_MIN_ROWS)
+            model=CURVE_PRED_RANK_MODEL, min_rows=CROSS_CITY_MIN_ROWS)
         pm = pred.get(held, {}).get(target)
         if pm is None:
             return None
@@ -2578,16 +2758,18 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         is what separates this from the raw channel, whose per-component
         un-standardization multiplies by the LARGE component-to-component spread
         and mis-calibrates the aggregate.  The test table's target is the usual
-        placeholder ramp, so nothing about the held unit's own losses enters."""
+        placeholder ramp, so nothing about the held unit's own losses enters.
+        Since 2026-08-04 this is STEP-6's aggr_denorm recipe verbatim: pooled
+        features + observed r0, predictor CURVE_PRED_CITY_MODEL."""
         te = test_merged[held].copy()
         te['cum_loss'] = np.arange(len(te), dtype=float)
         fold = {held: te}
         fold.update({c: train_merged[c] for c in rest})
         _, pred, _ = cross_city_resilience(
-            fold, ['cum_loss'], feature_cols, rank=False,
+            fold, ['cum_loss'], fcols_r0, rank=False,
             split={'train': rest, 'test': [held]}, target_std='pooled_train',
-            level_feature_cols=LEVEL_FEATURE_COLS, model='cosine_knn',
-            pooled_feature_cols=POOLED_FEATURE_COLS, min_rows=CROSS_CITY_MIN_ROWS)
+            level_feature_cols=LEVEL_FEATURE_COLS, model=CURVE_PRED_CITY_MODEL,
+            pooled_feature_cols=pooled_r0, min_rows=CROSS_CITY_MIN_ROWS)
         pm = pred.get(held, {}).get('cum_loss')
         if pm is None:
             return np.nan
@@ -2597,12 +2779,18 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         return float((w * yp).sum() / w.sum()) if w.sum() > 0 else float(yp.mean())
 
     def _city_total_prediction(held, rest):
-        """Predicted CITY cum_loss in day-equivalents, by the STEP-6 D+comp
-        reconstruction (§6 of the technical note): map the held unit's
+        """Predicted CITY cum_loss in day-equivalents: map the held unit's
         standardized city score onto the day-equivalent scale with a
         one-parameter variance match, whose mean and scale come from a NESTED
         leave-one-out over the training units only, so the held unit never
         enters its own calibration.
+
+        Since 2026-08-04 this matches STEP 6's surviving aggr_denorm strategy —
+        pooled features + observed r0, predictor CURVE_PRED_CITY_MODEL (ridge,
+        the only variant that calibrates at 13 units: LOO R² +0.17, MAE 1.26)
+        — so the city total the quantile mapping shifts onto and the city_total/
+        headline figure are the same estimator again.  (Until that date this
+        function kept the pre-r0 cosine-kNN recipe after STEP 6 dropped it.)
 
         This is the location the quantile mapping shifts onto.  It replaces the
         raw channel's weight_normal aggregate because the variance match uses
@@ -2655,12 +2843,12 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                     form cancels the unknown proxy-to-truth constant, leaving
                     zero fitted parameters;
           location  an additive shift so the weight_normal aggregate equals
-                    `c_city`, the D+comp predicted city cum_loss
+                    `c_city`, the D+aggr+denorm predicted city cum_loss
                     (_city_total_prediction).  Some city-total anchor is
                     essential: skipping the shift is WORSE than the train-mean
                     baseline, because the training world's loss LEVEL does not
                     fit every city even though its shape does.  The raw
-                    channel's own aggregate is the fallback when the D+comp
+                    channel's own aggregate is the fallback when the D+aggr+denorm
                     calibration cannot be formed.
 
         Error decomposition (exact, 1-D OT): with a correct ordering the mean
@@ -3141,7 +3329,89 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _cross_city_fingerprint(units):
+    """Everything UPSTREAM of STEP 7 that would change the cached objects: which
+    units survived, each one's k and fit window, and the global feature recipe.
+    Deliberately excludes the STEP-7/8 constants — editing those is exactly what
+    the 'from_step7' shortcut is for, so they must not invalidate the cache."""
+    return {
+        'codes': sorted(units),
+        'k': {c: units[c]['cfg']['n_behaviors'] for c in sorted(units)},
+        'fit_segments': {c: tuple(units[c]['cfg']['fit_segments'])
+                         for c in sorted(units)},
+        'agg_level': AGG_LEVEL,
+        'global_iwf_scale': GLOBAL_IWF_SCALE,
+        'k_policy': K_POLICY,
+        'excluded': sorted(EXCLUDED_CODES),
+    }
+
+
+def _save_cross_city_cache(units, cc_train, cc_test, dec_test, all_codes,
+                           global_iwf):
+    """Persist STEP 5's outputs so STEP 7-8 can be re-run on their own."""
+    os.makedirs(os.path.dirname(PIPELINE_CACHE), exist_ok=True)
+    with open(PIPELINE_CACHE, 'wb') as fh:
+        pickle.dump({'fingerprint': _cross_city_fingerprint(units),
+                     'units': units, 'cc_train': cc_train, 'cc_test': cc_test,
+                     'dec_test': dec_test, 'all_codes': all_codes,
+                     'global_iwf': global_iwf}, fh, protocol=4)
+    mb = os.path.getsize(PIPELINE_CACHE) / 1e6
+    print(f"  [cache] cross-city state written ({len(all_codes)} units, "
+          f"{mb:.1f} MB) -> {PIPELINE_CACHE}")
+
+
+def _load_cross_city_cache():
+    """Load the STEP-5 state.  Raises with an actionable message when the cache
+    is absent — a silent full re-run would defeat the shortcut, and a silent
+    empty run would look like a passing pipeline."""
+    if not os.path.exists(PIPELINE_CACHE):
+        raise FileNotFoundError(
+            f"PIPELINE_SCOPE='from_step7' needs the cross-city cache at "
+            f"{PIPELINE_CACHE}, which does not exist.  Run once with "
+            f"PIPELINE_SCOPE='full' to create it.")
+    with open(PIPELINE_CACHE, 'rb') as fh:
+        st = pickle.load(fh)
+    fp = st.get('fingerprint', {})
+    print(f"  [cache] loaded {len(st['all_codes'])} units from {PIPELINE_CACHE}")
+    print(f"  [cache] built under: k={fp.get('k')}, "
+          f"GLOBAL_IWF_SCALE={fp.get('global_iwf_scale')}, "
+          f"K_POLICY={fp.get('k_policy')}")
+    # The upstream config may have moved since the cache was written; STEP 7-8
+    # would then silently describe a decomposition that no longer exists.
+    live = _cross_city_fingerprint(st['units'])
+    drift = {k: (fp.get(k), live[k]) for k in live if fp.get(k) != live[k]}
+    if drift:
+        warnings.warn(
+            f"cross-city cache was built under a different upstream config "
+            f"{drift}; STEP 7-8 results will describe the CACHED state.  "
+            f"Re-run with PIPELINE_SCOPE='full' to refresh.")
+    return st
+
+
+def _run_steps_78(cc_train, cc_test, units, all_codes, dec_test):
+    """STEP 7 (curve prediction + OD maps) and STEP 8 (transferability) — the
+    only consumers of the cached cross-city state, factored out so the cached
+    path and the full path run identical code."""
+    print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
+    analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
+    print("\n── Transferability: domain proximity vs rank transfer ──")
+    analysis_transferability(cc_test, all_codes)
+
+
 def main():
+    # Shortcut for iterating on STEP 7-8: reuse the cached STEP-5 state instead
+    # of redoing the decomposition, the within-city figures and STEP 6.
+    if PIPELINE_SCOPE == 'from_step7':
+        print("── PIPELINE_SCOPE=from_step7: reusing the cached cross-city "
+              "state; folders 0- 1- 2- are NOT refreshed ──")
+        st = _load_cross_city_cache()
+        _run_steps_78(st['cc_train'], st['cc_test'], st['units'],
+                      st['all_codes'], st['dec_test'])
+        return
+    return _main_full()
+
+
+def _main_full():
     # ── STEP 1 — How many components does each unit support? ───────────────────
     # Runs over EVERY registry unit; its verdict is what EXCLUDED_CODES encodes.
     print("\n── Rank cross-validation (all registry units) ──")
@@ -3212,7 +3482,8 @@ def main():
                 X_all, cfg['n_behaviors'], l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
         u.update(
             H=H, W=W, mapping=mapping, weights=weights, n_nor=n_nor, n_dis=n_dis,
-            # Kept for the cross-city LOO, which re-decomposes the held-out unit at k=10.
+            # Kept for the cross-city LOO, which re-decomposes each unit for its
+            # cross-city feature table (at the unit's own rank-CV k).
             X_all=X_all, fit_time_cols=fit_time_cols)
 
     # ── STEP 3b — Decomposition-quality check, retained units + summary ───────
@@ -3423,6 +3694,12 @@ def main():
             # with no labels, so the held-out unit uses its own k like any other.
             cc_train[code] = cc_test[code] = feats_cc
 
+        # Everything STEP 7-8 consume is now built.  Cache it here — BEFORE
+        # STEP 6, which those steps do not read — so a later
+        # PIPELINE_SCOPE='from_step7' run reproduces this exact state.
+        _save_cross_city_cache(units, cc_train, cc_test, dec_test, all_codes,
+                               global_iwf)
+
         # ── STEP 6 — Cross-city prediction (LOO transfer, pairwise, reconstruction) ──
         for method, (std_mode, base_label) in CROSS_CITY_METHOD_STD.items():
           for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
@@ -3479,13 +3756,8 @@ def main():
         print("\n── Cross-city city-level cum_loss: prediction vs ground truth ──")
         analysis_cross_city_resi_pred(cc_train, cc_test, units, all_codes, global_iwf)
 
-        # ── STEP 7 — Cross-city curve prediction (α+L transfer -> full curves) ──
-        print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
-        analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
-
-        # ── STEP 8 — Transferability: which unit should lend to which? ──────
-        print("\n── Transferability: domain proximity vs rank transfer ──")
-        analysis_transferability(cc_test, all_codes)
+        # ── STEP 7-8 — curve prediction (+ OD maps) and transferability ──────
+        _run_steps_78(cc_train, cc_test, units, all_codes, dec_test)
 
 
 if __name__ == '__main__':
