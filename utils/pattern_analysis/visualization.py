@@ -2,8 +2,8 @@
 Visualisation helpers for pattern analysis.
 
 Most functions serve the production NMF pipeline (run_pattern_nmf.py).  The
-flow time-series section marked "only used by archive/..." in its header
-serves archive/run_pattern_temporal_decay.py (via utils.pattern_analysis
+flow time-series section marked in its header
+serves run_pattern_temporal_decay.py (via utils.pattern_analysis
 .temporal) and can be skipped by production readers.
 """
 import os
@@ -22,7 +22,7 @@ import matplotlib.ticker as ticker
 import seaborn as sns
 
 
-# ── Flow time-series (only used by archive/run_pattern_temporal_decay.py) ─────
+# ── Flow time-series (only used by run_pattern_temporal_decay.py) ─────────────
 
 def vis_line_total_flows(flow_list, output_dir='outputs', tag=''):
     """Line plot of a single flow time-series.

@@ -1,6 +1,6 @@
 """
 Time-series decomposition and disaster-impact modelling.
-Only RUN by archive/run_pattern_temporal_decay.py — but this module must stay
+Only RUN by run_pattern_temporal_decay.py — but this module must stay
 importable even if that script goes: the GRU pipeline unpickles StepWiseModel
 instances from outputs/archive/temporal_decay_results_br.pkl
 (run_prediction_training.py, temporal_physics mode), and unpickling resolves

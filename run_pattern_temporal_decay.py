@@ -13,14 +13,15 @@ Steps
 Run
 ---
     python run_pattern_temporal_decay.py
+
+Retired from the production line 2026-07-12 but KEPT at the repo root
+(2026-08-05): it is the sole producer of
+outputs/archive/temporal_decay_results_br.pkl, which the GRU pipeline's
+temporal_physics mode (run_prediction_training.py) unpickles.  Not part of
+run_pattern_nmf.py's orbit.
 """
 import os
 import pickle
-import sys
-
-# Archived under archive/: put the repo root on sys.path so config / utils_* resolve
-# when run as `python archive/run_pattern_temporal_decay.py` from the repo root.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     BR_GRAPH_PATH, OUTPUT_DIR,

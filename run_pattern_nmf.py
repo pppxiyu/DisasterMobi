@@ -125,7 +125,7 @@ STEP 7 — Cross-city curve prediction.
     UNGATED full fit (the model family's ceiling), and the pooled-train mean
     rate alone (the L = 1, zero-shrinkage special case).
 
-Output tree (outputs/nmf/)
+Output tree (outputs/)
 --------------------------
 Folder names carry a numeric prefix so a file browser lists them in pipeline
 order; the prefixes are part of the paths below and of the OUTPUT_* constants.
@@ -446,7 +446,7 @@ CITY_EVENTS = [
          first_day_normal='Monday', first_day_disaster='Friday'),
 ]
 
-OUTPUT_PLOTS = os.path.join(OUTPUT_DIR, 'nmf')
+OUTPUT_PLOTS = OUTPUT_DIR    # flat since 2026-08-05 (was outputs/nmf/)
 
 # Per-city block-group space-function data (EPA Smart Location Database).
 SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')

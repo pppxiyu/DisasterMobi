@@ -1,5 +1,5 @@
 # .gitignore
-# Tracks only source: config.py, run_*.py, tune_*.py, utils/, README.md.
+# Tracks only source: config.py, run_*.py, utils/, README.md.
 # Everything below is ignored. NOTE: comments must be on their own line —
 # git treats a '#' that is not at line-start as part of the pattern.
 
@@ -24,8 +24,6 @@ outputs/
 docs/*
 !docs/technical_notes/
 notebook_drafts/
-# Retired exploration scripts (see archive/README.md) — kept on disk, not tracked.
-archive/
 
 # ── Tuning / verification scratch logs (the tuner SCRIPTS are kept; the study
 #    dbs live under .cache/optuna/, already ignored above) ──────────────────────

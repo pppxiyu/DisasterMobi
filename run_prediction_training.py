@@ -52,7 +52,7 @@ K_HOPS          = 2
 
 MODEL_NAME = 'temporal_physics'   # 'basic' | 'temporal_physics'
 
-# Path to temporal decay results (produced by archive/run_pattern_temporal_decay.py)
+# Path to temporal decay results (produced by run_pattern_temporal_decay.py)
 DECAY_RESULTS_PATH = os.path.join(OUTPUT_DIR, 'archive', 'temporal_decay_results_br.pkl')
 
 
@@ -76,7 +76,7 @@ def main():
         decay_model = decay_results.get('recovery_model',
                                         decay_results.get('gamma_model'))
 
-        n_days_back = 10   # must match what was used in archive/run_pattern_temporal_decay.py
+        n_days_back = 10   # must match what was used in run_pattern_temporal_decay.py
         start_orig  = get_original_index(
             meta['impact_period']['start_index'], len(graphs), n_days_back, SLOT_PER_DAY,
         )
@@ -148,7 +148,7 @@ def main():
         if decay_model is None:
             raise RuntimeError(
                 "temporal_physics model requires decay results. "
-                "Run archive/run_pattern_temporal_decay.py first."
+                "Run run_pattern_temporal_decay.py first."
             )
         ds = predictor.train_dataset.dataset
         model_kwargs = {

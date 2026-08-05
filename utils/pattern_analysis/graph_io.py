@@ -95,7 +95,7 @@ def periodic_trim(data, cycle_len, trim_start, trim_end):
 
 def calculate_total_flows(graphs):
     """Returns total edge flow for each graph in the list.
-    Only used by archive/run_pattern_temporal_decay.py."""
+    Only used by run_pattern_temporal_decay.py."""
     return [sum(d.get('flow', 0) for _, _, d in G.edges(data=True)) for G in graphs]
 
 
