@@ -25,6 +25,7 @@ from utils.neural_network.preprocessing import (
     transform_to_line_graph_data, set_graph_targets,
     get_original_index, add_disaster_time_feature,
 )
+from utils.neural_network.temporal_decay import DECAY_RESULTS_PATH
 from utils.neural_network.trainer import GraphTemporalPred, GraphTemporalTuner
 from utils.neural_network.visualization import plot_test_results
 
@@ -52,8 +53,9 @@ K_HOPS          = 2
 
 MODEL_NAME = 'temporal_physics'   # 'basic' | 'temporal_physics'
 
-# Path to temporal decay results (produced by run_pattern_temporal_decay.py)
-DECAY_RESULTS_PATH = os.path.join(OUTPUT_DIR, 'archive', 'temporal_decay_results_br.pkl')
+# Where the temporal-decay physics prior lives.  The path is imported from its
+# producer (utils.neural_network.temporal_decay) so the two cannot drift; build
+# it with:  python -m utils.neural_network.temporal_decay
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -76,7 +78,13 @@ def main():
         decay_model = decay_results.get('recovery_model',
                                         decay_results.get('gamma_model'))
 
-        n_days_back = 10   # must match what was used in run_pattern_temporal_decay.py
+        # MISMATCH, unresolved 2026-08-05: the producer
+        # (utils.neural_network.temporal_decay) fits with N_DAYS_BACK = 23 since
+        # the BR file was extended to 2021-09-16; this 10 is the pre-extension
+        # value and was never updated, so the impact window is mapped back onto
+        # the full series with the wrong split offset.  NOT changed here because
+        # either fix moves GRU results — owner decision pending.
+        n_days_back = 10
         start_orig  = get_original_index(
             meta['impact_period']['start_index'], len(graphs), n_days_back, SLOT_PER_DAY,
         )
@@ -148,7 +156,7 @@ def main():
         if decay_model is None:
             raise RuntimeError(
                 "temporal_physics model requires decay results. "
-                "Run run_pattern_temporal_decay.py first."
+                "Run: python -m utils.neural_network.temporal_decay"
             )
         ds = predictor.train_dataset.dataset
         model_kwargs = {
