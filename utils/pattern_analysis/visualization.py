@@ -16,6 +16,7 @@ import matplotlib
 # plt.subplots and can die on a Windows access violation inside Qt.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle as _Rectangle
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.ticker as ticker
@@ -1851,6 +1852,582 @@ def vis_nmf_rank_cv(curves, table, band='k_2se', save_path=None, ncols=5):
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
+    return fig
+
+
+def vis_city_mobility_curves(curves, save_path=None, ncols=3, title=None):
+    """Every unit's CITY-LEVEL mobility curve on one page, x aligned on landfall.
+
+    `curves` is {code -> dict(rel, day0, d_nor, i_min)} where `rel` is the
+    day-type-normalized daily activity (1.0 = a normal day of the same type),
+    `day0` the landfall day index, `d_nor` the index where the normal period
+    ends, `i_min` the index of the lowest day of the buffer+disaster stretch.
+
+    Per panel: the curve, a reference line at 1.0, a dashed line at landfall, a
+    dotted line where the normal period ends, and a marker plus label on the
+    minimum.  The y axis is SHARED across panels, which is the point of the
+    figure — the units are directly comparable once each is divided by its own
+    baseline.  Read it for the SHAPE of the recovery, not the depth: the depth
+    is what every exposure measure already captures.
+    """
+    import math
+    codes = list(curves)
+    nrows = math.ceil(len(codes) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 3.0 * nrows),
+                             squeeze=False, sharey=True)
+    for i, code in enumerate(codes):
+        ax = axes[i // ncols][i % ncols]
+        c = curves[code]
+        rel = np.asarray(c['rel'], dtype=float)
+        x = np.arange(len(rel)) - c['day0']
+        ax.axhline(1.0, color='#CCCCCC', lw=0.8)
+        ax.plot(x, rel, color='#0F4D92', lw=1.3, marker='o', ms=2.2)
+        ax.axvline(0, color='#B64342', lw=1.1, ls='--')
+        ax.axvline(c['d_nor'] - c['day0'], color='#B0B0B0', lw=0.8, ls=':')
+        im = int(c['i_min'])
+        ax.plot(x[im], rel[im], marker='v', ms=9, color='#111111', zorder=5)
+        ax.annotate(f'min: day {x[im]:+d}\n({rel[im]:.2f})', (x[im], rel[im]),
+                    xytext=(6, -2), textcoords='offset points', fontsize=7,
+                    color='#111111')
+        ax.annotate('landfall', (0, 1.0), xycoords=('data', 'axes fraction'),
+                    xytext=(2, -8), textcoords='offset points', fontsize=6.5,
+                    color='#B64342', rotation=90, va='top')
+        ax.set_title(code, fontsize=9.5)
+        ax.tick_params(labelsize=7)
+        if i % ncols == 0:
+            ax.set_ylabel('daily activity / normal baseline', fontsize=8)
+        if i >= len(codes) - ncols:
+            ax.set_xlabel('days relative to landfall', fontsize=8)
+    for j in range(len(codes), nrows * ncols):
+        axes[j // ncols][j % ncols].axis('off')
+    if title:
+        fig.suptitle(title, fontsize=11, y=1.001)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=165, bbox_inches='tight')
+        plt.close(fig)
+    return fig
+
+
+def vis_msa_cluster_map(points, cl_color, storm_mark, save_path=None,
+                        title=None):
+    """One labelled point per city-event over a basemap: colour = its value in
+    `points['cluster']`, marker shape = `points['storm']`.
+
+    `points` is a DataFrame with columns label, storm, cluster, x, y (x/y in
+    web-mercator, EPSG:3857).  Same-coordinate repeats should be nudged apart by
+    the caller so both labels read.  One legend box carries both encodings.
+    Requires contextily + a network basemap; on failure the points are drawn on
+    a plain background so the figure still renders."""
+    from matplotlib.lines import Line2D
+    fig, ax = plt.subplots(figsize=(9.5, 9.5))
+    for _, r in points.iterrows():
+        ax.scatter(r['x'], r['y'], s=185, marker=storm_mark[r['storm']],
+                   color=cl_color[r['cluster']], edgecolor='white',
+                   linewidth=1.2, zorder=5)
+        ax.annotate(f"{r['label']} · {r['storm']}", (r['x'], r['y']),
+                    xytext=(9, 4), textcoords='offset points', fontsize=8.5,
+                    color='#222222', zorder=6)
+    try:
+        import contextily as cx
+        cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, attribution='')
+    except Exception as e:                       # offline / tile error
+        print(f"    [msa map] basemap unavailable ({e}); plain background")
+        ax.set_aspect('equal')
+    ax.set_axis_off()
+    handles = ([Line2D([0], [0], marker='o', ls='', mfc=cl_color[k],
+                       mec='white', ms=12, label=f'Cluster {k}')
+                for k in sorted(cl_color)]
+               + [Line2D([0], [0], marker='none', ls='', label='')]
+               + [Line2D([0], [0], marker=m, ls='', mfc='#666666', mec='white',
+                         ms=11, label=s) for s, m in storm_mark.items()])
+    ax.legend(handles=handles, loc='lower left', fontsize=9,
+              title='colour = transfer cluster   ·   shape = storm',
+              title_fontsize=9, framealpha=0.92, borderpad=1.0,
+              labelspacing=0.7)
+    if title:
+        ax.set_title(title, fontsize=12)
+    fig.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=175, bbox_inches='tight')
+        plt.close(fig)
+    return fig
+
+
+def vis_cluster_mapping_pca(points, arrows, cl_color, cl_cmap, evr,
+                            save_path=None, title=None):
+    """One panel per transfer cluster over a SHARED PCA frame (the PCA is fit
+    once, on every component's within-city rank-z features, so directions are
+    comparable across panels).
+
+    `points`: one row per component — cluster, shade (colormap fraction;
+    light = lower cum_loss rank within its own city), pc1, pc2.  The other
+    clusters' components stay in each panel as grey context.  Every city's
+    cloud is centred on the origin by construction: the rank-z input removes
+    each city's mean, so the panels carry direction information only.
+
+    `arrows`: kind ('city' | 'pooled'), name, cluster, dx, dy (unit in-plane
+    direction).  City arrows draw dashed and labelled; the cluster's pooled
+    arrow draws solid, same colour, unlabelled.  All arrows are drawn at one
+    fixed length — the projection loses the out-of-plane magnitude, so a drawn
+    length would not be meaningful."""
+    from matplotlib.lines import Line2D
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 13}
+    clusters = sorted(cl_color)
+    rad = 0.42 * float(np.abs(points[['pc1', 'pc2']].to_numpy()).max())
+    lim = 1.08 * float(np.abs(points[['pc1', 'pc2']].to_numpy()).max())
+
+    with matplotlib.rc_context(rc):
+        fig, axes = plt.subplots(1, len(clusters),
+                                 figsize=(6.5 * len(clusters), 7.2),
+                                 sharex=True, sharey=True)
+        for ax, k in zip(np.atleast_1d(axes), clusters):
+            ax.axhline(0, color='#DDDDDD', lw=0.8, zorder=1)
+            ax.axvline(0, color='#DDDDDD', lw=0.8, zorder=1)
+            mine = points['cluster'] == k
+            ax.scatter(points.loc[~mine, 'pc1'], points.loc[~mine, 'pc2'],
+                       s=60, color='#D9D9D9', edgecolor='none', zorder=2)
+            cmap = matplotlib.colormaps[cl_cmap[k]]
+            for _, r in points[mine].iterrows():
+                ax.scatter(r['pc1'], r['pc2'], s=130, color=cmap(r['shade']),
+                           edgecolor='#444444', linewidth=0.6, zorder=4)
+            # Arrows first (no labels): many cities in a cluster point the
+            # same way, so their tip labels collide.
+            for _, a in arrows[arrows['cluster'] == k].iterrows():
+                solid = a['kind'] == 'pooled'
+                ax.annotate('', xy=(a['dx'] * rad, a['dy'] * rad),
+                            xytext=(0, 0), zorder=7 if solid else 6,
+                            arrowprops=dict(arrowstyle='-|>', lw=2.2,
+                                            color=cl_color[k],
+                                            linestyle='-' if solid else '--'))
+            # City labels: push each anchor out along its arrow direction near
+            # the panel edge (which amplifies the small angular gaps between
+            # arrows), declutter the anchors, and tie each back to its tip with
+            # a hairline leader.
+            cd = arrows[(arrows['cluster'] == k) & (arrows['kind'] == 'city')]
+            if len(cd):
+                tip = cd[['dx', 'dy']].to_numpy(float) * rad
+                unit = tip / np.linalg.norm(tip, axis=1, keepdims=True)
+                anc = _declutter_points(unit * (lim * 0.74), 0.62)
+                for nm, tp, an in zip(cd['name'], tip, anc):
+                    ax.plot([tp[0], an[0]], [tp[1], an[1]], color=cl_color[k],
+                            lw=0.7, alpha=0.6, zorder=6)
+                    ax.annotate(nm, an, fontsize=13, ha='center', va='center',
+                                color=cl_color[k], zorder=8)
+            ax.set_xlim(-lim, lim)
+            ax.set_ylim(-lim, lim)
+            ax.set_title(f"Cluster {k}  —  "
+                         f"{points.loc[mine, 'code'].nunique()} cities, "
+                         f"{int(mine.sum())} components",
+                         fontsize=18, color=cl_color[k], pad=8)
+            ax.set_xlabel(f'PC1 of within-city rank-z features  '
+                          f'({evr[0]:.0%})', fontsize=15)
+            ax.tick_params(labelsize=13)
+        ax0 = np.atleast_1d(axes)[0]
+        ax0.set_ylabel(f'PC2  ({evr[1]:.0%})', fontsize=15)
+        leg = [Line2D([0], [0], marker='o', ls='', mfc='#999999',
+                      mec='#444444', ms=11,
+                      label='component (light = lower cum_loss rank in its '
+                            'city)'),
+               Line2D([0], [0], marker='o', ls='', mfc='#D9D9D9', mec='none',
+                      ms=10,
+                      label='components of the other clusters (context)'),
+               Line2D([0], [0], color='#666666', lw=2.2, ls='--',
+                      label='dashed = one city\'s mapping direction'),
+               Line2D([0], [0], color='#666666', lw=2.2,
+                      label='solid = cluster pooled mapping direction')]
+        ax0.legend(handles=leg, loc='lower left', fontsize=12, framealpha=0.9)
+        if title:
+            fig.suptitle(title, fontsize=15, y=1.00)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_cluster_function_graph(panels, save_path=None, pos_color='#B64342',
+                               neg_color='#0F4D92', node_color='#272727',
+                               fdr_q=0.05):
+    """Function co-riding as a DISTANCE layout, one panel per group.
+
+    `panels` is a list of dicts with keys: title (two lines), labels (the
+    function names, already display-ready), pos (n x 2 coordinates), corr
+    (n x n correlation matrix) and qval (n x n FDR q).  Coordinates are
+    supplied by the caller because every panel must share one frame: the
+    per-group layouts are solved from the pooled one and rigidly aligned back
+    onto it, which is a fitting decision, not a drawing decision.
+
+    Encoding is deliberately orthogonal: distance carries |rho| (short = high
+    correlation, since the caller embeds d = 1 - rho), edge COLOUR carries the
+    sign, and edge STYLE carries the FDR verdict.  Edge width is constant so
+    that magnitude is read once, from the geometry, and not twice.
+
+    Publication typography (Arial-first stack, editable vector text) is set
+    locally rather than globally so the rest of the pipeline's figures keep
+    their own defaults.  Fixed margins replace a tight bbox: tight cropping
+    keys off the drawn content, which sits asymmetrically in the shared
+    window, and would pull the figure-centred legend off-centre."""
+    from matplotlib.lines import Line2D
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 12}
+    with matplotlib.rc_context(rc):
+        allpos = np.vstack([p['pos'] for p in panels])
+        x0, x1 = allpos[:, 0].min() - 0.75, allpos[:, 0].max() + 0.75
+        y0, y1 = allpos[:, 1].min() - 0.45, allpos[:, 1].max() + 0.60
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 5.0),
+                                 squeeze=False, gridspec_kw={'wspace': 0.02})
+        for ax, p in zip(axes[0], panels):
+            C, Q, labels = p['corr'], p['qval'], p['labels']
+            # A near-perfect correlation puts two nodes on top of each other
+            # (rho = +0.89 -> d = 0.11, smaller than the marker).  Separate
+            # them by one marker width so both stay readable; display-only.
+            pos = _declutter_points(p['pos'], 0.14)
+            n = len(labels)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    r = C[i, j]
+                    if not np.isfinite(r):
+                        # Undefined correlation (a constant function column in
+                        # this selection).  Drawn neutral: colouring it would
+                        # present "no data" as a measured relationship.
+                        ax.plot([pos[i, 0], pos[j, 0]],
+                                [pos[i, 1], pos[j, 1]], color='#CCCCCC',
+                                ls=(0, (1, 2)), lw=1.2, alpha=0.6, zorder=1)
+                        continue
+                    sig = np.isfinite(Q[i, j]) and Q[i, j] < fdr_q
+                    ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                            color=pos_color if r > 0 else neg_color,
+                            ls='-' if sig else (0, (2.6, 2.2)), lw=1.7,
+                            alpha=0.92 if sig else 0.45,
+                            zorder=2 if sig else 1)
+            ax.scatter(pos[:, 0], pos[:, 1], s=210, color='white',
+                       edgecolor=node_color, linewidth=2.4, zorder=4)
+            tips = _place_labels(pos, 0.34)
+            for i, lab in enumerate(labels):
+                d = tips[i] - pos[i]
+                d = d / (np.linalg.norm(d) + 1e-12)
+                ax.plot([pos[i, 0], tips[i, 0]], [pos[i, 1], tips[i, 1]],
+                        color='#9A9A9A', lw=0.7, alpha=0.8, zorder=5)
+                ax.annotate(lab, tips[i],
+                            xytext=(5 * np.sign(d[0]), 5 * np.sign(d[1])),
+                            textcoords='offset points',
+                            ha='left' if d[0] > 0.15 else
+                               'right' if d[0] < -0.15 else 'center',
+                            va='bottom' if d[1] > 0.15 else
+                               'top' if d[1] < -0.15 else 'center',
+                            fontsize=12, color=node_color, zorder=6)
+            ax.set_title(p['title'], fontsize=14, linespacing=1.5, pad=10)
+            ax.set_xlim(x0, x1)
+            ax.set_ylim(y0, y1)
+            ax.set_aspect('equal')
+            ax.set_axis_off()
+
+        fig.legend(handles=[
+            Line2D([0], [0], color=pos_color, lw=2.2, label='Positive ρ'),
+            Line2D([0], [0], color=neg_color, lw=2.2, label='Negative ρ'),
+            Line2D([0], [0], color='#767676', lw=2.2,
+                   label=f'Significant (q < {fdr_q})'),
+            Line2D([0], [0], color='#767676', lw=2.2, ls=(0, (2.6, 2.2)),
+                   label='Not Significant')],
+            loc='lower center', ncol=2, fontsize=13, frameon=False,
+            handlelength=2.6, columnspacing=3.0, handletextpad=0.8,
+            labelspacing=0.7, bbox_to_anchor=(0.5, 0.015))
+        fig.subplots_adjust(left=0.008, right=0.992, top=0.86, bottom=0.15)
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=200)
+            plt.close(fig)
+    return fig
+
+
+def _declutter_points(pts, min_sep, rounds=60):
+    """Push coincident points apart by the smallest amount that makes them
+    separately visible.  Two city-events can land on identical coordinates (a
+    5-component correlation matrix has few attainable values) and a hidden
+    point reads as a missing city.  Deterministic: pairs resolve in index
+    order, exact ties break along +x, so reruns give the same picture."""
+    P = np.asarray(pts, float).copy()
+    for _ in range(rounds):
+        moved = False
+        for a in range(len(P)):
+            for b in range(a + 1, len(P)):
+                d = P[b] - P[a]
+                r = float(np.hypot(*d))
+                if r >= min_sep:
+                    continue
+                if r < 1e-9:                      # exactly coincident
+                    u, r = np.array([1.0, 0.0]), 0.0   # fixed tie-break axis
+                else:
+                    u = d / r
+                shift = (min_sep - r) / 2.0 * u
+                if not np.any(shift):
+                    continue                      # already apart: don't spin
+                P[a] -= shift
+                P[b] += shift
+                moved = True
+        if not moved:
+            break
+    return P
+
+
+def _place_labels(pos, offset, avoid=None, n_dir=24):
+    """Least-crowded label direction per node.  A node near the layout
+    centroid has no meaningful radial direction and a purely radial rule
+    would fling its label across the graph, so candidate tips are scored by
+    proximity to the other nodes, to any `avoid` points (the overlay clouds —
+    in that figure THEY are the crowded region, so omitting them would let a
+    label be placed into the densest part of the panel) and to already-placed
+    labels; outermost node first, mild outward preference."""
+    cen = pos.mean(axis=0)
+    angles = np.linspace(0, 2 * np.pi, n_dir, endpoint=False)
+    other = np.vstack([pos] + ([avoid] if avoid is not None and len(avoid)
+                               else []))
+    placed, tips = [], np.zeros_like(pos)
+    for i in np.argsort(-np.linalg.norm(pos - cen, axis=1)):
+        best, best_score = None, np.inf
+        out = pos[i] - cen
+        out = out / (np.linalg.norm(out) + 1e-12)
+        for a in angles:
+            u = np.array([np.cos(a), np.sin(a)])
+            tip = pos[i] + offset * u
+            dist = np.hypot(*(other - tip).T)
+            dist[i] = np.inf                       # its own node
+            score = float(np.sum(1.0 / (dist + 0.05)))
+            score += sum(1.6 / (np.hypot(*(tip - t)) + 0.05) for t in placed)
+            score -= 0.6 * float(out @ u)
+            if score < best_score:
+                best, best_score = tip, score
+        tips[i] = best
+        placed.append(best)
+    return tips
+
+
+def vis_cluster_function_overlay(panels, func_color, save_path=None,
+                                 label_offset=0.30, min_sep=0.07):
+    """The group layouts as a GREY BASE MAP with individual city-events drawn
+    on top — the spread version of vis_cluster_function_graph.
+
+    `panels` is a list of dicts with keys title, cats (function keys, for the
+    colours), labels (display names), pos (the group layout) and members (a
+    list of (code, per-city layout) pairs already aligned onto `pos`).
+
+    The base map is stripped of sign and significance — solid, uniform, grey —
+    because here it is scenery: what the reader is asked to judge is how far
+    each city-event sits from it.  Colour therefore encodes the FUNCTION, so
+    one function's colour cloud shows how much cities disagree about where it
+    belongs, and the labels carry the same colours and serve as the key."""
+    from matplotlib.lines import Line2D
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 12}
+    base_grey, node_grey, edge_grey = '#B8B8B8', '#8A8A8A', '#D0D0D0'
+    with matplotlib.rc_context(rc):
+        allpos = np.vstack([p['pos'] for p in panels]
+                           + [q for p in panels for _c, q in p['members']])
+        x0, x1 = allpos[:, 0].min() - 0.72, allpos[:, 0].max() + 0.72
+        y0, y1 = allpos[:, 1].min() - 0.38, allpos[:, 1].max() + 0.62
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 5.0),
+                                 squeeze=False, gridspec_kw={'wspace': 0.02})
+        for ax, p in zip(axes[0], panels):
+            pos, cats, labels = p['pos'], p['cats'], p['labels']
+            n = len(cats)
+            for i in range(n):
+                for j in range(i + 1, n):
+                    ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                            color=base_grey, ls='-', lw=1.6, alpha=0.9,
+                            zorder=1)
+            ax.scatter(pos[:, 0], pos[:, 1], s=210, color='white',
+                       edgecolor=node_grey, linewidth=2.2, zorder=3)
+            # Declutter across the whole panel at once, then redraw each
+            # city's edges from the nudged coordinates so its graph stays
+            # internally consistent.
+            cloud = None
+            if p['members']:
+                stack = np.vstack([q for _c, q in p['members']])
+                nudged = _declutter_points(stack, min_sep).reshape(
+                    len(p['members']), n, 2)
+                cloud = nudged.reshape(-1, 2)
+                for q in nudged:
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            ax.plot([q[i, 0], q[j, 0]], [q[i, 1], q[j, 1]],
+                                    color=edge_grey, ls='-', lw=0.6,
+                                    alpha=0.55, zorder=4)
+                    ax.scatter(q[:, 0], q[:, 1], s=34,
+                               color=[func_color[c] for c in cats],
+                               alpha=0.85, edgecolor='none', zorder=5)
+            tips = _place_labels(pos, label_offset, avoid=cloud)
+            for i, lab in enumerate(labels):
+                d = tips[i] - pos[i]
+                d = d / (np.linalg.norm(d) + 1e-12)
+                ax.plot([pos[i, 0], tips[i, 0]], [pos[i, 1], tips[i, 1]],
+                        color='#9A9A9A', lw=0.7, alpha=0.8, zorder=6)
+                ax.annotate(lab, tips[i],
+                            xytext=(5 * np.sign(d[0]), 5 * np.sign(d[1])),
+                            textcoords='offset points',
+                            ha='left' if d[0] > 0.15 else
+                               'right' if d[0] < -0.15 else 'center',
+                            va='bottom' if d[1] > 0.15 else
+                               'top' if d[1] < -0.15 else 'center',
+                            fontsize=12, color=func_color[cats[i]], zorder=7)
+            ax.set_title(p['title'], fontsize=14, linespacing=1.5, pad=10)
+            ax.set_xlim(x0, x1)
+            ax.set_ylim(y0, y1)
+            ax.set_aspect('equal')
+            ax.set_axis_off()
+
+        fig.legend(handles=[
+            Line2D([0], [0], color=base_grey, lw=1.8,
+                   label='Group Layout (Base Map)'),
+            Line2D([0], [0], color=edge_grey, lw=1.0,
+                   label='One City-Event Layout'),
+            Line2D([0], [0], marker='o', ls='', mfc='#767676', mec='none',
+                   ms=7,
+                   label="Node = That City-Event's Position (Colour = Function)")],
+            loc='lower center', ncol=3, fontsize=13, frameon=False,
+            handlelength=2.6, columnspacing=3.0, handletextpad=0.8,
+            bbox_to_anchor=(0.5, 0.015))
+        fig.subplots_adjust(left=0.008, right=0.992, top=0.86, bottom=0.15)
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=200)
+            plt.close(fig)
+    return fig
+
+
+def vis_cluster_restricted_rank(df, save_path=None):
+    """Dumbbell of the rank-prediction score per held-out city under two
+    training regimes: ALL (pooled reference cities) vs EST (only cities in the
+    held-out unit's ESTIMATED cluster).
+
+    `df`: one row per city with code, cluster, rho_all, rho_est, correct
+    (whether the held-out city's cluster was estimated correctly).  Rows are
+    drawn sorted by rho_all.  The connecting line is red when EST beats ALL,
+    blue when it loses, and DOTTED when the city's cluster was misassigned —
+    those are the deployable failure cases, so they read differently from the
+    genuine gains/losses.  Two dashed medians make the distribution shift
+    legible without a table."""
+    from matplotlib.lines import Line2D
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 13}
+    s = df.sort_values('rho_all').reset_index(drop=True)
+    y = np.arange(len(s))
+    with matplotlib.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(9.2, 6.4))
+        for i, r in s.iterrows():
+            d = r['rho_est'] - r['rho_all']
+            c = '#B64342' if d > 0.02 else ('#0F4D92' if d < -0.02 else '#9A9A9A')
+            ax.plot([r['rho_all'], r['rho_est']], [i, i], color=c, lw=2.2,
+                    alpha=0.75, ls=':' if not r['correct'] else '-', zorder=2)
+        ax.scatter(s['rho_all'], y, s=95, color='#B8B8B8', edgecolor='#666',
+                   zorder=3)
+        ax.scatter(s['rho_est'], y, s=95, color='#1A1A1A', zorder=4)
+        ax.axvline(s['rho_all'].median(), color='#B8B8B8', ls='--', lw=1.4,
+                   zorder=1)
+        ax.axvline(s['rho_est'].median(), color='#1A1A1A', ls='--', lw=1.4,
+                   zorder=1)
+        ax.set_yticks(y)
+        ax.set_yticklabels([f"{r['code']} (C{int(r['cluster'])})"
+                            for _, r in s.iterrows()], fontsize=11)
+        ax.set_xlabel('Within-City Spearman ρ (Predicted vs Actual cum_loss '
+                      'Rank)', fontsize=12)
+        ax.set_xlim(-0.5, 1.12)
+        ax.set_ylim(-0.8, len(s) - 0.2)
+        ax.grid(False)
+        leg = [Line2D([0], [0], marker='o', ls='', mfc='#B8B8B8', mec='#666',
+                      ms=10, label='ALL (Pooled Reference Cities)'),
+               Line2D([0], [0], marker='o', ls='', mfc='#1A1A1A', mec='none',
+                      ms=10, label='EST (Estimated Cluster Only)'),
+               Line2D([0], [0], color='#B64342', lw=2.2, label='EST Better'),
+               Line2D([0], [0], color='#0F4D92', lw=2.2, label='EST Worse'),
+               Line2D([0], [0], color='#777777', lw=2.2, ls=':',
+                      label='City Cluster Misassigned'),
+               Line2D([0], [0], color='#666666', lw=1.4, ls='--',
+                      label='Median')]
+        ax.legend(handles=leg, loc='upper left', fontsize=10.5, frameon=False,
+                  bbox_to_anchor=(0.005, 0.99))
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_cluster_function_heatmap(panels, save_path=None, vmax=1.0):
+    """The co-riding structure as HEATMAPS: the pooled average and each
+    cluster, all in ABSOLUTE (CLR) Spearman rho on one shared scale.
+
+    `panels` is a list of dicts with title, labels (already in this panel's
+    display order), mat (the 6x6 correlation matrix, same order) and blocks
+    (the Louvain function communities as (start, size, id) triples).
+
+    Every panel is ordered by ITS OWN Louvain communities: a cluster whose
+    functions group differently should show that in its row order, and
+    forcing one shared order would hide exactly the difference the figure is
+    about.  The price is that cells are not vertically aligned between
+    panels; the numbers are printed in each cell for that reason.  The
+    diagonal is masked — a self-correlation is 1 by definition."""
+    cats_n = len(panels[0]['labels'])
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 12}
+    with matplotlib.rc_context(rc):
+        cmap = matplotlib.colormaps['RdBu_r'].copy()
+        cmap.set_bad('#ECECEC')
+        fig, axes = plt.subplots(1, len(panels),
+                                 figsize=(5.3 * len(panels), 6.1),
+                                 squeeze=False,
+                                 gridspec_kw={'wspace': 0.42})
+        im = None
+        for ax, p in zip(axes[0], panels):
+            M, labels = np.asarray(p['mat'], float), p['labels']
+            Mm = M.copy()
+            np.fill_diagonal(Mm, np.nan)
+            im = ax.imshow(Mm, cmap=cmap, vmin=-vmax, vmax=vmax)
+            ax.set_xticks(range(cats_n))
+            ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=12)
+            ax.set_yticks(range(cats_n))
+            ax.set_yticklabels(labels, fontsize=12)
+            for i in range(cats_n):
+                for j in range(cats_n):
+                    if i == j or not np.isfinite(M[i, j]):
+                        continue
+                    ax.text(j, i, f'{M[i, j]:+.2f}', ha='center', va='center',
+                            fontsize=11,
+                            color='white' if abs(M[i, j]) > 0.58 * vmax
+                                  else '#222222')
+            for start, size, _cid in p.get('blocks', []):
+                ax.add_patch(_Rectangle((start - 0.5, start - 0.5), size, size,
+                                        fill=False, edgecolor='#1A1A1A',
+                                        lw=2.6))
+            ax.set_title(p['title'], fontsize=15, linespacing=1.5, pad=10)
+        # pad clears the 45-degree tick labels below each panel; without it the
+        # colour bar rides up over the 'Commercial'/'Residential' ticks.
+        cb = fig.colorbar(im, ax=list(axes[0]), location='bottom',
+                          shrink=0.35, pad=0.30, aspect=40)
+        cb.set_label('Spearman ρ between function shares (pooled, CLR)',
+                     fontsize=12)
+        cb.ax.tick_params(labelsize=11)
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
     return fig
 
 
