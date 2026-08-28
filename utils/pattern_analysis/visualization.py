@@ -8,7 +8,7 @@ serves utils/neural_network/temporal_decay.py (via utils.pattern_analysis
 """
 import os
 import numpy as np
-from scipy.stats import rankdata, spearmanr, pearsonr
+from scipy.stats import rankdata, spearmanr, pearsonr, skewnorm
 import pandas as pd
 import matplotlib
 # Headless-safe: every figure here is written to disk, never shown.  Without
@@ -16,10 +16,11 @@ import matplotlib
 # plt.subplots and can die on a Windows access violation inside Qt.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle as _Rectangle
+from matplotlib.patches import Rectangle as _Rectangle, FancyArrowPatch
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.ticker as ticker
+import matplotlib.patheffects as pe
 import seaborn as sns
 
 
@@ -328,8 +329,8 @@ def vis_line_nmf_component_timeline(
 
 # ── Origin × Destination functional heatmaps (paper Fig. 9) ───────────────────
 
-def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
-                            title=None, save_path=None, cmap='YlGnBu'):
+def vis_heatmap_od_function(M, categories, ncols=None,
+                            save_path=None, cmap='YlGnBu'):
     """
     Grid of per-component origin×destination functional heatmaps (paper Fig. 9).
 
@@ -338,10 +339,8 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     M          : ndarray [k × C × C]  per-component proportions (rows = origin
                  function, cols = destination function).
     categories : list[str]            axis labels (length C).
-    weights    : ndarray [k] | None   component importances; if given, panels are
-                 ordered by descending weight and the weight is shown per panel.
-    ncols      : int                  panels per row in the grid.
-    title      : str | None           figure suptitle.
+    ncols      : int | None           panels per row; None picks a WIDE grid
+                 (at most two rows) so the panel strip fits a slide.
     save_path  : str | None           PNG path; created if its directory is absent.
 
     Returns the Matplotlib Figure.
@@ -349,50 +348,61 @@ def vis_heatmap_od_function(M, categories, weights=None, ncols=3,
     import math
     M = np.asarray(M, dtype=float)
     k, C = M.shape[0], len(categories)
-    ncols = max(1, min(ncols, k))
-    nrows = math.ceil(k / ncols)
-    order = list(range(k))   # Panel layout follows the component index
+    # WIDE by default: cap the grid at two rows and balance the columns, so 12
+    # components read as 6x2 rather than the old portrait 3x4.  A slide is
+    # wider than it is tall, and a square panel strip wastes its width.
+    if ncols is None:
+        nrows = 1 if k <= 6 else 2
+        ncols = math.ceil(k / nrows)
+    else:
+        ncols = max(1, min(ncols, k))
+        nrows = math.ceil(k / ncols)
     vmax = M.max() if M.size and M.max() > 0 else 1.0
 
-    # Font sizes.
-    FS_ANNOT, FS_TICK, FS_AXLABEL, FS_TITLE, FS_CBAR = 11, 12, 13, 15, 12
+    # Slide-size type throughout; the cell values stay because a heat map's
+    # numbers are its readout, not a callout, and the wide grid leaves each
+    # cell roughly 0.6 in -- room enough for them at this size.
+    FS_ANNOT, FS_TICK, FS_AXLABEL, FS_TITLE, FS_CBAR = 14, 16, 20, 21, 16
 
-    # constrained_layout guarantees panels / rotated tick labels / colorbar never
-    # overlap; tightened pads below keep the grid compact.
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.0 * ncols, 5.0 * nrows),
-                             squeeze=False, constrained_layout=True)
-    try:
-        fig.get_layout_engine().set(w_pad=0.02, h_pad=0.03, wspace=0.02, hspace=0.04)
-    except Exception:
-        pass
+    fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                             figsize=(3.9 * ncols + 1.7, 4.5 * nrows + 0.9),
+                             constrained_layout=True)
 
     im = None
-    for pos, comp in enumerate(order):
-        ax = axes[pos // ncols][pos % ncols]
-        im = ax.imshow(M[comp], cmap=cmap, vmin=0, vmax=vmax, aspect='equal')
+    for pos in range(k):
+        r, c = pos // ncols, pos % ncols
+        ax = axes[r][c]
+        im = ax.imshow(M[pos], cmap=cmap, vmin=0, vmax=vmax, aspect='equal')
         for a in range(C):
             for b in range(C):
-                v = M[comp, a, b]
+                v = M[pos, a, b]
                 if v > 0:
-                    ax.text(b, a, f'{v:.2f}', ha='center', va='center', fontsize=FS_ANNOT,
+                    ax.text(b, a, f'{v:.2f}', ha='center', va='center',
+                            fontsize=FS_ANNOT,
                             color='white' if v > 0.6 * vmax else 'black')
-        ax.set_xticks(range(C)); ax.set_yticks(range(C))
-        ax.set_xticklabels(categories, rotation=45, ha='right', fontsize=FS_TICK)
-        ax.set_yticklabels(categories, fontsize=FS_TICK)
-        ax.set_xlabel('destination', fontsize=FS_AXLABEL)
-        ax.set_ylabel('origin', fontsize=FS_AXLABEL)
-        ttl = f'Component {comp}'
-        if weights is not None:
-            ttl += f'  (w={weights[comp]:.0f})'
-        ax.set_title(ttl, fontsize=FS_TITLE)
+        ax.set_xticks(range(C))
+        ax.set_yticks(range(C))
+        # Tick labels only on the OUTER edge: the six categories repeat in every
+        # panel, so naming them once per row/column is the same information at a
+        # fraction of the ink.
+        last_row = (r == nrows - 1) or (pos + ncols >= k)
+        if last_row:
+            ax.set_xticklabels(categories, rotation=45, ha='right',
+                               fontsize=FS_TICK)
+        else:
+            ax.set_xticklabels([])
+        ax.set_yticklabels(categories if c == 0 else [], fontsize=FS_TICK)
+        ax.set_title(f'Component {pos}', fontsize=FS_TITLE, pad=8)
 
     for pos in range(k, nrows * ncols):                  # hide unused panels
         axes[pos // ncols][pos % ncols].axis('off')
 
-    if title:
-        fig.suptitle(title, fontsize=FS_TITLE + 2)
+    # The axis names belong to the whole grid, so they are written once.
+    fig.supxlabel('destination', fontsize=FS_AXLABEL)
+    fig.supylabel('origin', fontsize=FS_AXLABEL)
     if im is not None:
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6)
+        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.75,
+                            pad=0.015)
         cbar.set_label('within-component flow proportion', fontsize=FS_AXLABEL)
         cbar.ax.tick_params(labelsize=FS_CBAR)
     if save_path:
@@ -896,7 +906,8 @@ def vis_bar_curve_mae(df, save_path=None, title=None, colors=None,
 
 
 def vis_curves_city_pred(days, gt, method_curves, save_path=None, title=None,
-                         ylabel='daily mobility (flow volume per day)'):
+                         ylabel='daily mobility (flow volume per day)',
+                         slide=False):
     """Publication-style overlay of ONE city-event's mobility curve over the
     disaster window: the ground-truth curve (solid dark) plus one line per
     prediction method.  `days` is the x vector (days since landfall), `gt` the
@@ -908,27 +919,48 @@ def vis_curves_city_pred(days, gt, method_curves, save_path=None, title=None,
     nature_rc = {
         'font.family': 'sans-serif',
         'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-        'font.size': 8, 'axes.spines.right': False, 'axes.spines.top': False,
-        'axes.linewidth': 0.8, 'legend.frameon': False,
+        'font.size': 20 if slide else 8,
+        'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 1.3 if slide else 0.8, 'legend.frameon': False,
         'svg.fonttype': 'none', 'pdf.fonttype': 42,
     }
+    lw_gt, lw_m, ms_gt, ms_m = ((3.0, 2.4, 7, 6) if slide
+                                else (1.8, 1.2, 3, 2.5))
+    # slide mode reads the shared per-method style map; legacy keeps its
+    # original position-cycled palette so the archived copies do not change.
     gt = np.asarray(gt, dtype=float)
     with plt.rc_context(nature_rc):
-        fig, ax = plt.subplots(figsize=(6.0, 3.6))
-        ax.plot(days, gt, color='#3a3a3a', lw=1.8, marker='o', ms=3,
-                label='Ground truth', zorder=5)
+        fig, ax = plt.subplots(figsize=(11.0, 6.0) if slide else (6.0, 3.6))
+        ax.plot(days, gt, color='#3a3a3a', lw=lw_gt, marker='o', ms=ms_gt,
+                label='ground truth', zorder=5)
         for i, (lab, vals) in enumerate(method_curves.items()):
             vals = np.asarray(vals, dtype=float)
             mae = np.nanmean(np.abs(vals - gt))
-            ax.plot(days, vals, color=_COLORS[i % len(_COLORS)], lw=1.2,
-                    ls='--', marker='.', ms=2.5,
-                    label=f'{lab}  (MAE {mae:.3g})')
-        ax.set_xlabel('days since landfall')
-        ax.set_ylabel(ylabel)
+            col, dsh = (_curve_style(lab, i) if slide
+                        else (_COLORS[i % len(_COLORS)], '--'))
+            ax.plot(days, vals, color=col, lw=lw_m, ls=dsh,
+                    marker='.', ms=ms_m, label=f'{lab}  (MAE {mae:.3g})')
+        ax.set_xlabel('days since landfall', fontsize=24 if slide else 8)
+        # rotated, the label is bounded by the AXES HEIGHT, not the width;
+        # size it to fit rather than letting it run off the canvas
+        fs_y = 24
+        if slide:
+            h_in = ax.get_position().height * fig.get_figheight()
+            fs_y = float(np.clip(0.92 * h_in * 72 / (0.58 * len(ylabel)),
+                                 14.0, 24.0))
+        ax.set_ylabel(ylabel, fontsize=fs_y if slide else 8)
         ax.margins(y=0.08)
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.18),
-                  ncol=2, fontsize=7, columnspacing=1.6, handlelength=1.6)
-        if title:
+        if slide:
+            # inside the axes: the curves rise to the right, so the lower right
+            # is the one corner they leave free
+            ax.legend(loc='lower right', fontsize=18, handlelength=1.8,
+                      borderaxespad=0.8, labelspacing=0.4)
+        else:
+            ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.16),
+                      ncol=2, fontsize=7, columnspacing=1.6, handlelength=1.8)
+        # `slide` deliberately ignores `title`: the file name carries the
+        # city-event, and a single-panel title reads as a figure title.
+        if title and not slide:
             ax.set_title(title, fontsize=8.5)
         fig.tight_layout()
         if save_path:
@@ -939,7 +971,7 @@ def vis_curves_city_pred(days, gt, method_curves, save_path=None, title=None,
 
 
 def vis_component_curves_grid(curves_obs, method_curves, save_path=None,
-                              title=None, ncols=4, weights=None):
+                              title=None, ncols=3, weights=None):
     """Per-component curve grid for ONE city-event: each panel shows a
     component's OBSERVED relative curve (solid dark) and one dashed line per
     method in `method_curves` (dict label -> DataFrame [days × k] aligned with
@@ -947,43 +979,37 @@ def vis_component_curves_grid(curves_obs, method_curves, save_path=None,
     (optional, length k, positionally aligned with `curves_obs.columns`) is the
     city-aggregation weight; when given it is appended to each panel title."""
     _COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7', '#E28E2C', '#B0413E']
-    nature_rc = {
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
-        'axes.linewidth': 0.7, 'legend.frameon': False,
-        'svg.fonttype': 'none', 'pdf.fonttype': 42,
-    }
     import math
     k = curves_obs.shape[1]
     days = curves_obs.index.to_numpy()
     nrows = math.ceil(k / ncols)
-    with plt.rc_context(nature_rc):
+    with plt.rc_context(_SLIDE_RC):
         fig, axes = plt.subplots(nrows, ncols,
-                                 figsize=(2.4 * ncols, 1.9 * nrows),
+                                 figsize=(4.4 * ncols, 3.5 * nrows),
                                  squeeze=False, sharex=True)
         for j in range(nrows * ncols):
             ax = axes[j // ncols][j % ncols]
             if j >= k:
                 ax.axis('off')
                 continue
-            ax.axhline(1.0, color='#BBBBBB', lw=0.7, zorder=1)
-            ax.plot(days, curves_obs.iloc[:, j], color='#3a3a3a', lw=1.3,
+            ax.axhline(1.0, color='#BBBBBB', lw=1.4, zorder=1)
+            ax.plot(days, curves_obs.iloc[:, j], color='#3a3a3a', lw=2.6,
                     zorder=5, label='observed')
             for i, (lab, dfm) in enumerate(method_curves.items()):
-                ax.plot(days, dfm.iloc[:, j], color=_COLORS[i % len(_COLORS)],
-                        lw=1.0, ls='--', label=lab)
+                col, dsh = _curve_style(lab, i)
+                ax.plot(days, dfm.iloc[:, j], color=col, lw=2.2, ls=dsh,
+                        label=lab)
             ttl = f'component {curves_obs.columns[j]}'
             if weights is not None:
                 ttl += f'  ($w$ = {weights[j]:.2f})'
-            ax.set_title(ttl, fontsize=7)
+            ax.set_title(ttl)
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, loc='lower center',
-                   ncol=min(4, 1 + len(method_curves)), fontsize=7,
-                   bbox_to_anchor=(0.5, -0.01))
-        if title:
-            fig.suptitle(title, fontsize=9)
-        fig.tight_layout(rect=(0, 0.04, 1, 0.97))
+                   ncol=min(4, 1 + len(method_curves)), fontsize=19,
+                   bbox_to_anchor=(0.5, -0.012))
+        # `title` is accepted for call compatibility but not drawn: the file
+        # name carries the city-event and a suptitle is not wanted.
+        fig.tight_layout(rect=(0, 0.05, 1, 1.0))
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
             fig.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -1191,16 +1217,35 @@ def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
     return fig
 
 
-def vis_heatmap_pair_transfer(mat, title=None, save_path=None, vmax=1.0,
+def deck_diverging_cmap():
+    """The deck's diverging ramp for a signed correlation on [-1, 1]:
+    AMBER for negative, white at zero, NYU PURPLE for positive.
+
+    Shared by every Spearman-rho heat map so one quantity keeps one palette,
+    and colour-blind legible in a way the red-green ramp it replaced was not.
+    A fresh copy each call -- callers set_bad() on it."""
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list('deck_diverging', [
+        (0.00, '#7A3B06'), (0.24, '#E28E2C'), (0.44, '#F7E3C6'),
+        (0.50, '#FFFFFF'),
+        (0.56, '#E4D8EF'), (0.76, '#9A6ABA'), (1.00, '#3F0068')])
+
+
+def vis_heatmap_pair_transfer(mat, save_path=None, vmax=1.0,
                               xlabel='test', ylabel='train', blocks=None,
-                              cbar_label='Spearman ρ'):
+                              cbar_label='Spearman ρ', names=None):
     """Square pairwise cross-city transfer heatmap: rows = train unit, cols =
     test unit, each cell = how well that (train, test) pair transfers.  The
     metric is the caller's — name it in `cbar_label` — and `vmax` must match its
     range: 1.0 leaves a correlation untouched, while an unbounded metric needs a
     smaller vmax and the colour then saturates.  Diverging colour centred at 0
-    (green = positive transfer, red = negative); each cell annotated (n/a if
+    in the deck's own two hues — PURPLE for positive transfer, AMBER for
+    negative — which also happens to be legible to red-green colour blindness,
+    unlike the red-green ramp this replaced.  Each cell annotated (n/a if
     undefined).
+
+    `names` (optional) maps code -> the full city-event title used on the
+    ticks; codes are kept when it is absent.
 
     The DIAGONAL is excluded — a cell where train and test are the same unit is
     that unit's own leave-one-component-out, not a transfer between units, and
@@ -1224,9 +1269,16 @@ def vis_heatmap_pair_transfer(mat, title=None, save_path=None, vmax=1.0,
                 diag[i, j] = True
     V[diag] = np.nan
 
-    fig, ax = plt.subplots(figsize=(1.15 * n_c + 2.6, 1.0 * n_r + 2.0))
-    cmap = plt.get_cmap('RdYlGn').copy()
-    cmap.set_bad('#d9d9d9')                      # excluded diagonal / undefined
+    names = names or {}
+    # Point size alone does not decide legibility here: the grid is metres
+    # wide on paper and gets scaled DOWN to slide width, so a 16 pt tick
+    # projects at about 7 pt.  The figure is kept compact and the type set
+    # large against it, which is what survives the projection.
+    FS_ANNOT, FS_TICK, FS_AXLABEL, FS_CBAR = 17, 25, 31, 23
+
+    fig, ax = plt.subplots(figsize=(0.80 * n_c + 4.4, 0.72 * n_r + 3.0))
+    cmap = deck_diverging_cmap()
+    cmap.set_bad('#DEDEDE')                      # excluded diagonal / undefined
     im = ax.imshow(np.ma.masked_invalid(np.clip(V, -vmax, vmax)), cmap=cmap,
                    vmin=-vmax, vmax=vmax, aspect='auto')
     for i in range(n_r):
@@ -1234,23 +1286,32 @@ def vis_heatmap_pair_transfer(mat, title=None, save_path=None, vmax=1.0,
             if diag[i, j]:
                 continue                          # excluded: no number at all
             v = V[i, j]
+            # both ends of the ramp go dark, so the number flips to white
+            # rather than sitting unreadable on deep purple or deep amber
+            col = ('#333333' if (np.isnan(v) or abs(v) < 0.58 * vmax)
+                   else '#FFFFFF')
             ax.text(j, i, 'n/a' if np.isnan(v) else f'{v:+.2f}',
-                    ha='center', va='center', fontsize=10, color='black')
+                    ha='center', va='center', fontsize=FS_ANNOT, color=col)
     for start, size, cid in (blocks or ()):
         ax.add_patch(Rectangle((start - 0.5, start - 0.5), size, size,
-                               fill=False, edgecolor='#111111', linewidth=2.5,
+                               fill=False, edgecolor='#111111', linewidth=7.0,
                                zorder=5))
-        ax.text(start - 0.42, start - 0.42, f'C{cid}', fontsize=9,
-                fontweight='bold', color='#111111', ha='left', va='top',
+        # The block's top-left cell is always ON the diagonal, which is masked
+        # and unannotated, so the community label can be set large there
+        # without covering a single number.
+        ax.text(start, start, f'C{cid}', fontsize=FS_TICK + 8,
+                fontweight='bold', color='#111111', ha='center', va='center',
                 zorder=6)
     ax.set_xticks(range(n_c))
-    ax.set_xticklabels(cols, rotation=30, ha='right', fontsize=9)
+    ax.set_xticklabels([names.get(c, c) for c in cols], rotation=35,
+                       ha='right', fontsize=FS_TICK)
     ax.set_yticks(range(n_r))
-    ax.set_yticklabels(rows, fontsize=9)
-    ax.set_xlabel(xlabel, fontsize=10)
-    ax.set_ylabel(ylabel, fontsize=10)
-    ax.set_title(title or 'Pairwise cross-city transfer', fontsize=12)
-    fig.colorbar(im, ax=ax, pad=0.02, shrink=0.8).set_label(cbar_label, fontsize=9)
+    ax.set_yticklabels([names.get(r, r) for r in rows], fontsize=FS_TICK)
+    ax.set_xlabel(xlabel, fontsize=FS_AXLABEL)
+    ax.set_ylabel(ylabel, fontsize=FS_AXLABEL)
+    cb = fig.colorbar(im, ax=ax, pad=0.02, shrink=0.85)
+    cb.set_label(cbar_label, fontsize=FS_AXLABEL)
+    cb.ax.tick_params(labelsize=FS_CBAR)
     fig.tight_layout()
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
@@ -1855,104 +1916,75 @@ def vis_nmf_rank_cv(curves, table, band='k_2se', save_path=None, ncols=5):
     return fig
 
 
-def vis_city_mobility_curves(curves, save_path=None, ncols=3, title=None):
+def vis_city_mobility_curves(curves, save_path=None, ncols=5, names=None):
     """Every unit's CITY-LEVEL mobility curve on one page, x aligned on landfall.
 
     `curves` is {code -> dict(rel, day0, d_nor, i_min)} where `rel` is the
     day-type-normalized daily activity (1.0 = a normal day of the same type),
     `day0` the landfall day index, `d_nor` the index where the normal period
     ends, `i_min` the index of the lowest day of the buffer+disaster stretch.
+    `names` maps code -> the full title shown on the panel (defaults to code).
 
     Per panel: the curve, a reference line at 1.0, a dashed line at landfall, a
-    dotted line where the normal period ends, and a marker plus label on the
-    minimum.  The y axis is SHARED across panels, which is the point of the
-    figure — the units are directly comparable once each is divided by its own
-    baseline.  Read it for the SHAPE of the recovery, not the depth: the depth
-    is what every exposure measure already captures.
+    dotted line where the normal period ends, and a marker on the minimum.  Both
+    axes are SHARED across panels, so they are labelled ONCE for the whole figure
+    (one x label under the grid, one y label on its left) rather than per panel.
+    A single figure-level legend explains the marks.  Read it for the SHAPE of
+    the recovery, not the depth.  Slide-oriented: wide (5-column) layout, large
+    fonts, no figure title, no per-panel text annotations.
     """
     import math
     codes = list(curves)
+    names = names or {}
     nrows = math.ceil(len(codes) / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 3.0 * nrows),
-                             squeeze=False, sharey=True)
-    for i, code in enumerate(codes):
-        ax = axes[i // ncols][i % ncols]
-        c = curves[code]
-        rel = np.asarray(c['rel'], dtype=float)
-        x = np.arange(len(rel)) - c['day0']
-        ax.axhline(1.0, color='#CCCCCC', lw=0.8)
-        ax.plot(x, rel, color='#0F4D92', lw=1.3, marker='o', ms=2.2)
-        ax.axvline(0, color='#B64342', lw=1.1, ls='--')
-        ax.axvline(c['d_nor'] - c['day0'], color='#B0B0B0', lw=0.8, ls=':')
-        im = int(c['i_min'])
-        ax.plot(x[im], rel[im], marker='v', ms=9, color='#111111', zorder=5)
-        ax.annotate(f'min: day {x[im]:+d}\n({rel[im]:.2f})', (x[im], rel[im]),
-                    xytext=(6, -2), textcoords='offset points', fontsize=7,
-                    color='#111111')
-        ax.annotate('landfall', (0, 1.0), xycoords=('data', 'axes fraction'),
-                    xytext=(2, -8), textcoords='offset points', fontsize=6.5,
-                    color='#B64342', rotation=90, va='top')
-        ax.set_title(code, fontsize=9.5)
-        ax.tick_params(labelsize=7)
-        if i % ncols == 0:
-            ax.set_ylabel('daily activity / normal baseline', fontsize=8)
-        if i >= len(codes) - ncols:
-            ax.set_xlabel('days relative to landfall', fontsize=8)
-    for j in range(len(codes), nrows * ncols):
-        axes[j // ncols][j % ncols].axis('off')
-    if title:
-        fig.suptitle(title, fontsize=11, y=1.001)
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=165, bbox_inches='tight')
-        plt.close(fig)
-    return fig
-
-
-def vis_msa_cluster_map(points, cl_color, storm_mark, save_path=None,
-                        title=None):
-    """One labelled point per city-event over a basemap: colour = its value in
-    `points['cluster']`, marker shape = `points['storm']`.
-
-    `points` is a DataFrame with columns label, storm, cluster, x, y (x/y in
-    web-mercator, EPSG:3857).  Same-coordinate repeats should be nudged apart by
-    the caller so both labels read.  One legend box carries both encodings.
-    Requires contextily + a network basemap; on failure the points are drawn on
-    a plain background so the figure still renders."""
-    from matplotlib.lines import Line2D
-    fig, ax = plt.subplots(figsize=(9.5, 9.5))
-    for _, r in points.iterrows():
-        ax.scatter(r['x'], r['y'], s=185, marker=storm_mark[r['storm']],
-                   color=cl_color[r['cluster']], edgecolor='white',
-                   linewidth=1.2, zorder=5)
-        ax.annotate(f"{r['label']} · {r['storm']}", (r['x'], r['y']),
-                    xytext=(9, 4), textcoords='offset points', fontsize=8.5,
-                    color='#222222', zorder=6)
-    try:
-        import contextily as cx
-        cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, attribution='')
-    except Exception as e:                       # offline / tile error
-        print(f"    [msa map] basemap unavailable ({e}); plain background")
-        ax.set_aspect('equal')
-    ax.set_axis_off()
-    handles = ([Line2D([0], [0], marker='o', ls='', mfc=cl_color[k],
-                       mec='white', ms=12, label=f'Cluster {k}')
-                for k in sorted(cl_color)]
-               + [Line2D([0], [0], marker='none', ls='', label='')]
-               + [Line2D([0], [0], marker=m, ls='', mfc='#666666', mec='white',
-                         ms=11, label=s) for s, m in storm_mark.items()])
-    ax.legend(handles=handles, loc='lower left', fontsize=9,
-              title='colour = transfer cluster   ·   shape = storm',
-              title_fontsize=9, framealpha=0.92, borderpad=1.0,
-              labelspacing=0.7)
-    if title:
-        ax.set_title(title, fontsize=12)
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=175, bbox_inches='tight')
-        plt.close(fig)
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42,
+          'font.size': 26, 'axes.titlesize': 29, 'axes.labelsize': 28,
+          'xtick.labelsize': 22, 'ytick.labelsize': 22,
+          'axes.spines.right': False, 'axes.spines.top': False,
+          'axes.linewidth': 1.3}
+    with plt.rc_context(rc):
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4.9 * ncols, 3.7 * nrows),
+                                 squeeze=False, sharex=True, sharey=True)
+        handles = None
+        for i, code in enumerate(codes):
+            ax = axes[i // ncols][i % ncols]
+            c = curves[code]
+            rel = np.asarray(c['rel'], dtype=float)
+            x = np.arange(len(rel)) - c['day0']
+            h_base = ax.axhline(1.0, color='#CCCCCC', lw=1.1,
+                                label='normal baseline (1.0)')
+            h_lf = ax.axvline(0, color='#B64342', lw=1.8, ls='--',
+                              label='landfall')
+            h_ne = ax.axvline(c['d_nor'] - c['day0'], color='#B0B0B0', lw=1.1,
+                              ls=':', label='normal period ends')
+            h_cur, = ax.plot(x, rel, color='#0F4D92', lw=2.4, marker='o',
+                             ms=4.0, label='city mobility')
+            im = int(c['i_min'])
+            h_min, = ax.plot(x[im], rel[im], marker='v', ms=15, color='#111111',
+                             zorder=5, ls='', label='minimum')
+            ax.set_title(names.get(code, code))
+            if handles is None:
+                handles = [h_cur, h_min, h_lf, h_ne, h_base]
+        for j in range(len(codes), nrows * ncols):
+            axes[j // ncols][j % ncols].axis('off')
+        # ONE shared axis label for the whole grid, not one per panel.
+        fig.supxlabel('days relative to landfall', fontsize=28)
+        fig.supylabel('daily activity / normal baseline', fontsize=28)
+        # Figure-level legend in the free corner (bottom-right of the last row).
+        legax = axes[nrows - 1][ncols - 1]
+        if len(codes) < nrows * ncols:
+            legax.legend(handles=handles, loc='center', frameon=False,
+                         fontsize=25, handlelength=2.4, labelspacing=1.0)
+        else:
+            fig.legend(handles=handles, loc='lower center', ncol=len(handles),
+                       frameon=False, fontsize=25, bbox_to_anchor=(0.5, -0.02))
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
     return fig
 
 
@@ -2052,102 +2084,54 @@ def vis_cluster_mapping_pca(points, arrows, cl_color, cl_cmap, evr,
     return fig
 
 
-def vis_cluster_function_graph(panels, save_path=None, pos_color='#B64342',
-                               neg_color='#0F4D92', node_color='#272727',
-                               fdr_q=0.05):
-    """Function co-riding as a DISTANCE layout, one panel per group.
+def _cf_graph_panel(ax, p, pos_color, neg_color, node_color, fdr_q,
+                    fs_label):
+    """One significance-graph panel: distance carries |rho|, edge COLOUR the
+    sign, edge STYLE the FDR verdict.  Edge width is constant so magnitude is
+    read once, from the geometry, and not twice."""
+    C, Q, labels = p['corr'], p['qval'], p['labels']
+    # A near-perfect correlation puts two nodes on top of each other
+    # (rho = +0.89 -> d = 0.11, smaller than the marker).  Separate them by
+    # one marker width so both stay readable; display-only.
+    pos = _declutter_points(p['pos'], 0.14)
+    n = len(labels)
+    for i in range(n):
+        for j in range(i + 1, n):
+            r = C[i, j]
+            if not np.isfinite(r):
+                # Undefined correlation (a constant function column in this
+                # selection).  Drawn neutral: colouring it would present
+                # "no data" as a measured relationship.
+                ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                        color='#CCCCCC', ls=(0, (1, 2)), lw=1.4, alpha=0.6,
+                        zorder=1)
+                continue
+            sig = np.isfinite(Q[i, j]) and Q[i, j] < fdr_q
+            ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                    color=pos_color if r > 0 else neg_color,
+                    ls='-' if sig else (0, (2.6, 2.2)), lw=2.2,
+                    alpha=0.92 if sig else 0.45, zorder=2 if sig else 1)
+    ax.scatter(pos[:, 0], pos[:, 1], s=260, color='white',
+               edgecolor=node_color, linewidth=2.8, zorder=4)
+    _cf_labels(ax, pos, _place_labels(pos, 0.34), labels,
+               [node_color] * n, fs_label, zorder=5)
 
-    `panels` is a list of dicts with keys: title (two lines), labels (the
-    function names, already display-ready), pos (n x 2 coordinates), corr
-    (n x n correlation matrix) and qval (n x n FDR q).  Coordinates are
-    supplied by the caller because every panel must share one frame: the
-    per-group layouts are solved from the pooled one and rigidly aligned back
-    onto it, which is a fitting decision, not a drawing decision.
 
-    Encoding is deliberately orthogonal: distance carries |rho| (short = high
-    correlation, since the caller embeds d = 1 - rho), edge COLOUR carries the
-    sign, and edge STYLE carries the FDR verdict.  Edge width is constant so
-    that magnitude is read once, from the geometry, and not twice.
-
-    Publication typography (Arial-first stack, editable vector text) is set
-    locally rather than globally so the rest of the pipeline's figures keep
-    their own defaults.  Fixed margins replace a tight bbox: tight cropping
-    keys off the drawn content, which sits asymmetrically in the shared
-    window, and would pull the figure-centred legend off-centre."""
-    from matplotlib.lines import Line2D
-    rc = {'font.family': 'sans-serif',
-          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 12}
-    with matplotlib.rc_context(rc):
-        allpos = np.vstack([p['pos'] for p in panels])
-        x0, x1 = allpos[:, 0].min() - 0.75, allpos[:, 0].max() + 0.75
-        y0, y1 = allpos[:, 1].min() - 0.45, allpos[:, 1].max() + 0.60
-
-        fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 5.0),
-                                 squeeze=False, gridspec_kw={'wspace': 0.02})
-        for ax, p in zip(axes[0], panels):
-            C, Q, labels = p['corr'], p['qval'], p['labels']
-            # A near-perfect correlation puts two nodes on top of each other
-            # (rho = +0.89 -> d = 0.11, smaller than the marker).  Separate
-            # them by one marker width so both stay readable; display-only.
-            pos = _declutter_points(p['pos'], 0.14)
-            n = len(labels)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    r = C[i, j]
-                    if not np.isfinite(r):
-                        # Undefined correlation (a constant function column in
-                        # this selection).  Drawn neutral: colouring it would
-                        # present "no data" as a measured relationship.
-                        ax.plot([pos[i, 0], pos[j, 0]],
-                                [pos[i, 1], pos[j, 1]], color='#CCCCCC',
-                                ls=(0, (1, 2)), lw=1.2, alpha=0.6, zorder=1)
-                        continue
-                    sig = np.isfinite(Q[i, j]) and Q[i, j] < fdr_q
-                    ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
-                            color=pos_color if r > 0 else neg_color,
-                            ls='-' if sig else (0, (2.6, 2.2)), lw=1.7,
-                            alpha=0.92 if sig else 0.45,
-                            zorder=2 if sig else 1)
-            ax.scatter(pos[:, 0], pos[:, 1], s=210, color='white',
-                       edgecolor=node_color, linewidth=2.4, zorder=4)
-            tips = _place_labels(pos, 0.34)
-            for i, lab in enumerate(labels):
-                d = tips[i] - pos[i]
-                d = d / (np.linalg.norm(d) + 1e-12)
-                ax.plot([pos[i, 0], tips[i, 0]], [pos[i, 1], tips[i, 1]],
-                        color='#9A9A9A', lw=0.7, alpha=0.8, zorder=5)
-                ax.annotate(lab, tips[i],
-                            xytext=(5 * np.sign(d[0]), 5 * np.sign(d[1])),
-                            textcoords='offset points',
-                            ha='left' if d[0] > 0.15 else
-                               'right' if d[0] < -0.15 else 'center',
-                            va='bottom' if d[1] > 0.15 else
-                               'top' if d[1] < -0.15 else 'center',
-                            fontsize=12, color=node_color, zorder=6)
-            ax.set_title(p['title'], fontsize=14, linespacing=1.5, pad=10)
-            ax.set_xlim(x0, x1)
-            ax.set_ylim(y0, y1)
-            ax.set_aspect('equal')
-            ax.set_axis_off()
-
-        fig.legend(handles=[
-            Line2D([0], [0], color=pos_color, lw=2.2, label='Positive ρ'),
-            Line2D([0], [0], color=neg_color, lw=2.2, label='Negative ρ'),
-            Line2D([0], [0], color='#767676', lw=2.2,
-                   label=f'Significant (q < {fdr_q})'),
-            Line2D([0], [0], color='#767676', lw=2.2, ls=(0, (2.6, 2.2)),
-                   label='Not Significant')],
-            loc='lower center', ncol=2, fontsize=13, frameon=False,
-            handlelength=2.6, columnspacing=3.0, handletextpad=0.8,
-            labelspacing=0.7, bbox_to_anchor=(0.5, 0.015))
-        fig.subplots_adjust(left=0.008, right=0.992, top=0.86, bottom=0.15)
-        if save_path:
-            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
-                        exist_ok=True)
-            fig.savefig(save_path, dpi=200)
-            plt.close(fig)
-    return fig
+def _cf_labels(ax, pos, tips, labels, colors, fs_label, zorder):
+    """Leader line plus label for every node, one shared implementation."""
+    for i, lab in enumerate(labels):
+        v = tips[i] - pos[i]
+        v = v / (np.linalg.norm(v) + 1e-12)
+        ax.plot([pos[i, 0], tips[i, 0]], [pos[i, 1], tips[i, 1]],
+                color='#9A9A9A', lw=0.8, alpha=0.8, zorder=zorder)
+        ax.annotate(lab, tips[i],
+                    xytext=(5 * np.sign(v[0]), 5 * np.sign(v[1])),
+                    textcoords='offset points',
+                    ha='left' if v[0] > 0.15 else
+                       'right' if v[0] < -0.15 else 'center',
+                    va='bottom' if v[1] > 0.15 else
+                       'top' if v[1] < -0.15 else 'center',
+                    fontsize=fs_label, color=colors[i], zorder=zorder + 1)
 
 
 def _declutter_points(pts, min_sep, rounds=60):
@@ -2212,93 +2196,123 @@ def _place_labels(pos, offset, avoid=None, n_dir=24):
     return tips
 
 
-def vis_cluster_function_overlay(panels, func_color, save_path=None,
-                                 label_offset=0.30, min_sep=0.07):
-    """The group layouts as a GREY BASE MAP with individual city-events drawn
-    on top — the spread version of vis_cluster_function_graph.
-
-    `panels` is a list of dicts with keys title, cats (function keys, for the
-    colours), labels (display names), pos (the group layout) and members (a
-    list of (code, per-city layout) pairs already aligned onto `pos`).
-
-    The base map is stripped of sign and significance — solid, uniform, grey —
-    because here it is scenery: what the reader is asked to judge is how far
-    each city-event sits from it.  Colour therefore encodes the FUNCTION, so
-    one function's colour cloud shows how much cities disagree about where it
-    belongs, and the labels carry the same colours and serve as the key."""
-    from matplotlib.lines import Line2D
-    rc = {'font.family': 'sans-serif',
-          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 12}
-    base_grey, node_grey, edge_grey = '#B8B8B8', '#8A8A8A', '#D0D0D0'
-    with matplotlib.rc_context(rc):
-        allpos = np.vstack([p['pos'] for p in panels]
-                           + [q for p in panels for _c, q in p['members']])
-        x0, x1 = allpos[:, 0].min() - 0.72, allpos[:, 0].max() + 0.72
-        y0, y1 = allpos[:, 1].min() - 0.38, allpos[:, 1].max() + 0.62
-
-        fig, axes = plt.subplots(1, len(panels), figsize=(4.0 * len(panels), 5.0),
-                                 squeeze=False, gridspec_kw={'wspace': 0.02})
-        for ax, p in zip(axes[0], panels):
-            pos, cats, labels = p['pos'], p['cats'], p['labels']
-            n = len(cats)
+def _cf_overlay_panel(ax, p, func_color, label_offset, min_sep, fs_label,
+                      base_grey, node_grey, edge_grey):
+    """One overlay panel: the group layout as a grey base map with every
+    city-event's own layout drawn over it.  The base map carries neither sign
+    nor significance -- here it is scenery, and what the reader judges is how
+    far each city-event sits from it."""
+    pos, cats, labels = p['pos'], p['cats'], p['labels']
+    n = len(cats)
+    for i in range(n):
+        for j in range(i + 1, n):
+            ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
+                    color=base_grey, ls='-', lw=1.8, alpha=0.9, zorder=1)
+    ax.scatter(pos[:, 0], pos[:, 1], s=260, color='white',
+               edgecolor=node_grey, linewidth=2.6, zorder=3)
+    # Declutter across the whole panel at once, then redraw each city's edges
+    # from the nudged coordinates so its graph stays internally consistent.
+    cloud = None
+    if p['members']:
+        stack = np.vstack([q for _c, q in p['members']])
+        nudged = _declutter_points(stack, min_sep).reshape(
+            len(p['members']), n, 2)
+        cloud = nudged.reshape(-1, 2)
+        for q in nudged:
             for i in range(n):
                 for j in range(i + 1, n):
-                    ax.plot([pos[i, 0], pos[j, 0]], [pos[i, 1], pos[j, 1]],
-                            color=base_grey, ls='-', lw=1.6, alpha=0.9,
-                            zorder=1)
-            ax.scatter(pos[:, 0], pos[:, 1], s=210, color='white',
-                       edgecolor=node_grey, linewidth=2.2, zorder=3)
-            # Declutter across the whole panel at once, then redraw each
-            # city's edges from the nudged coordinates so its graph stays
-            # internally consistent.
-            cloud = None
-            if p['members']:
-                stack = np.vstack([q for _c, q in p['members']])
-                nudged = _declutter_points(stack, min_sep).reshape(
-                    len(p['members']), n, 2)
-                cloud = nudged.reshape(-1, 2)
-                for q in nudged:
-                    for i in range(n):
-                        for j in range(i + 1, n):
-                            ax.plot([q[i, 0], q[j, 0]], [q[i, 1], q[j, 1]],
-                                    color=edge_grey, ls='-', lw=0.6,
-                                    alpha=0.55, zorder=4)
-                    ax.scatter(q[:, 0], q[:, 1], s=34,
-                               color=[func_color[c] for c in cats],
-                               alpha=0.85, edgecolor='none', zorder=5)
-            tips = _place_labels(pos, label_offset, avoid=cloud)
-            for i, lab in enumerate(labels):
-                d = tips[i] - pos[i]
-                d = d / (np.linalg.norm(d) + 1e-12)
-                ax.plot([pos[i, 0], tips[i, 0]], [pos[i, 1], tips[i, 1]],
-                        color='#9A9A9A', lw=0.7, alpha=0.8, zorder=6)
-                ax.annotate(lab, tips[i],
-                            xytext=(5 * np.sign(d[0]), 5 * np.sign(d[1])),
-                            textcoords='offset points',
-                            ha='left' if d[0] > 0.15 else
-                               'right' if d[0] < -0.15 else 'center',
-                            va='bottom' if d[1] > 0.15 else
-                               'top' if d[1] < -0.15 else 'center',
-                            fontsize=12, color=func_color[cats[i]], zorder=7)
-            ax.set_title(p['title'], fontsize=14, linespacing=1.5, pad=10)
-            ax.set_xlim(x0, x1)
-            ax.set_ylim(y0, y1)
-            ax.set_aspect('equal')
-            ax.set_axis_off()
+                    ax.plot([q[i, 0], q[j, 0]], [q[i, 1], q[j, 1]],
+                            color=edge_grey, ls='-', lw=0.7, alpha=0.55,
+                            zorder=4)
+            ax.scatter(q[:, 0], q[:, 1], s=42,
+                       color=[func_color[c] for c in cats], alpha=0.85,
+                       edgecolor='none', zorder=5)
+    _cf_labels(ax, pos, _place_labels(pos, label_offset, avoid=cloud), labels,
+               [func_color[c] for c in cats], fs_label, zorder=6)
+
+
+def vis_cluster_function_graph(panels, over_panels, func_color,
+                               save_path=None, pos_color='#B64342',
+                               neg_color='#0F4D92', node_color='#272727',
+                               fdr_q=0.05, label_offset=0.30, min_sep=0.07):
+    """Function co-riding as a distance layout, TWO ROWS per group.
+
+    Top row    the significance graph: distance carries |rho|, edge colour the
+               sign, edge style the FDR verdict.
+    Bottom row the same layout as a grey base map with every city-event's own
+               layout over it, coloured by FUNCTION -- how much the cities in
+               that group disagree about where each function belongs.
+
+    `panels` and `over_panels` are the two panel lists the separate figures
+    used, in the SAME group order; column i is one group in both rows, which
+    is the whole point of stacking them.  Group titles are therefore written
+    ONCE, on the top row, and one legend at the foot carries both rows'
+    encodings.
+
+    Coordinates are supplied by the caller because every panel must share one
+    frame: the per-group layouts are solved from the pooled one and rigidly
+    aligned back onto it, which is a fitting decision, not a drawing decision.
+
+    Publication typography (Arial-first stack, editable vector text) is set
+    locally rather than globally so the rest of the pipeline's figures keep
+    their own defaults.  Fixed margins replace a tight bbox: tight cropping
+    keys off the drawn content, which sits asymmetrically in the shared
+    window, and would pull the figure-centred legend off-centre."""
+    from matplotlib.lines import Line2D
+    FS_LABEL, FS_TITLE, FS_LEGEND = 17, 23, 18
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans',
+                              'sans-serif'],
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': FS_LABEL}
+    base_grey, node_grey, edge_grey = '#B8B8B8', '#8A8A8A', '#D0D0D0'
+    with matplotlib.rc_context(rc):
+        # ONE window for both rows, so a node that moved between the two
+        # readings moved on the page too.
+        allpos = np.vstack([p['pos'] for p in panels]
+                           + [p['pos'] for p in over_panels]
+                           + [q for p in over_panels
+                              for _c, q in p['members']])
+        x0, x1 = allpos[:, 0].min() - 0.75, allpos[:, 0].max() + 0.75
+        y0, y1 = allpos[:, 1].min() - 0.45, allpos[:, 1].max() + 0.60
+
+        n = len(panels)
+        fig, axes = plt.subplots(2, n, figsize=(4.7 * n, 10.6), squeeze=False,
+                                 gridspec_kw={'wspace': 0.02, 'hspace': 0.04})
+        for k in range(n):
+            _cf_graph_panel(axes[0][k], panels[k], pos_color, neg_color,
+                            node_color, fdr_q, FS_LABEL)
+            _cf_overlay_panel(axes[1][k], over_panels[k], func_color,
+                              label_offset, min_sep, FS_LABEL, base_grey,
+                              node_grey, edge_grey)
+            # The group title belongs to the COLUMN, not to either panel, so
+            # it is written once above the pair.
+            axes[0][k].set_title(panels[k]['title'], fontsize=FS_TITLE,
+                                 linespacing=1.45, pad=12)
+            for r in (0, 1):
+                axes[r][k].set_xlim(x0, x1)
+                axes[r][k].set_ylim(y0, y1)
+                axes[r][k].set_aspect('equal')
+                axes[r][k].set_axis_off()
 
         fig.legend(handles=[
-            Line2D([0], [0], color=base_grey, lw=1.8,
+            Line2D([0], [0], color=pos_color, lw=2.6, label='Positive ρ'),
+            Line2D([0], [0], color=neg_color, lw=2.6, label='Negative ρ'),
+            Line2D([0], [0], color='#767676', lw=2.6,
+                   label=f'Significant (q < {fdr_q})'),
+            Line2D([0], [0], color='#767676', lw=2.6, ls=(0, (2.6, 2.2)),
+                   label='Not Significant'),
+            Line2D([0], [0], color=base_grey, lw=2.2,
                    label='Group Layout (Base Map)'),
-            Line2D([0], [0], color=edge_grey, lw=1.0,
+            Line2D([0], [0], color=edge_grey, lw=1.4,
                    label='One City-Event Layout'),
             Line2D([0], [0], marker='o', ls='', mfc='#767676', mec='none',
-                   ms=7,
-                   label="Node = That City-Event's Position (Colour = Function)")],
-            loc='lower center', ncol=3, fontsize=13, frameon=False,
-            handlelength=2.6, columnspacing=3.0, handletextpad=0.8,
-            bbox_to_anchor=(0.5, 0.015))
-        fig.subplots_adjust(left=0.008, right=0.992, top=0.86, bottom=0.15)
+                   ms=9,
+                   label="Node = That City-Event's Position "
+                         "(Colour = Function)")],
+            loc='lower center', ncol=4, fontsize=FS_LEGEND, frameon=False,
+            handlelength=2.6, columnspacing=2.6, handletextpad=0.8,
+            labelspacing=0.7, bbox_to_anchor=(0.5, 0.008))
+        fig.subplots_adjust(left=0.008, right=0.992, top=0.93, bottom=0.10)
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)),
                         exist_ok=True)
@@ -2376,6 +2390,10 @@ def vis_cluster_function_heatmap(panels, save_path=None, vmax=1.0):
     display order), mat (the 6x6 correlation matrix, same order) and blocks
     (the Louvain function communities as (start, size, id) triples).
 
+    The pooled average sits ALONE on the first row and the clusters share the
+    second: the average is the reference the clusters are read against, not a
+    fourth peer, and one row of four hid that.
+
     Every panel is ordered by ITS OWN Louvain communities: a cluster whose
     functions group differently should show that in its row order, and
     forcing one shared order would hide exactly the difference the figure is
@@ -2383,46 +2401,62 @@ def vis_cluster_function_heatmap(panels, save_path=None, vmax=1.0):
     panels; the numbers are printed in each cell for that reason.  The
     diagonal is masked — a self-correlation is 1 by definition."""
     cats_n = len(panels[0]['labels'])
+    FS_ANNOT, FS_TICK, FS_TITLE, FS_CBAR = 13, 16, 20, 16
     rc = {'font.family': 'sans-serif',
           'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 12}
+          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': FS_TICK}
     with matplotlib.rc_context(rc):
-        cmap = matplotlib.colormaps['RdBu_r'].copy()
+        cmap = deck_diverging_cmap()
         cmap.set_bad('#ECECEC')
-        fig, axes = plt.subplots(1, len(panels),
-                                 figsize=(5.3 * len(panels), 6.1),
-                                 squeeze=False,
-                                 gridspec_kw={'wspace': 0.42})
+        # Two rows on a 2*n_cl column grid: one panel is two columns wide, so
+        # the average lands centred on row 1 whatever the cluster count is.
+        n_cl = len(panels) - 1
+        # hspace has to clear the 45-degree tick labels hanging BELOW the top
+        # panel plus the two-line title sitting ABOVE the bottom row; at 0.42
+        # the average's ticks landed on the 'Cluster 2' title.
+        fig = plt.figure(figsize=(6.1 * n_cl + 1.2, 12.6))
+        # wspace clears each panel's y tick labels, which otherwise reach into
+        # the panel on its left; hspace clears the top panel's 45-degree x
+        # labels plus the two-line title under them.
+        gs = fig.add_gridspec(2, 2 * n_cl, wspace=1.15, hspace=0.50,
+                              bottom=0.15, top=0.95)
+        axes_all = [fig.add_subplot(gs[0, n_cl - 1:n_cl + 1])]
+        axes_all += [fig.add_subplot(gs[1, 2 * i:2 * i + 2])
+                     for i in range(n_cl)]
         im = None
-        for ax, p in zip(axes[0], panels):
+        for ax, p in zip(axes_all, panels):
             M, labels = np.asarray(p['mat'], float), p['labels']
             Mm = M.copy()
             np.fill_diagonal(Mm, np.nan)
             im = ax.imshow(Mm, cmap=cmap, vmin=-vmax, vmax=vmax)
             ax.set_xticks(range(cats_n))
-            ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=12)
+            ax.set_xticklabels(labels, rotation=45, ha='right',
+                               fontsize=FS_TICK)
             ax.set_yticks(range(cats_n))
-            ax.set_yticklabels(labels, fontsize=12)
+            ax.set_yticklabels(labels, fontsize=FS_TICK)
             for i in range(cats_n):
                 for j in range(cats_n):
                     if i == j or not np.isfinite(M[i, j]):
                         continue
                     ax.text(j, i, f'{M[i, j]:+.2f}', ha='center', va='center',
-                            fontsize=11,
+                            fontsize=FS_ANNOT,
                             color='white' if abs(M[i, j]) > 0.58 * vmax
                                   else '#222222')
             for start, size, _cid in p.get('blocks', []):
                 ax.add_patch(_Rectangle((start - 0.5, start - 0.5), size, size,
                                         fill=False, edgecolor='#1A1A1A',
                                         lw=2.6))
-            ax.set_title(p['title'], fontsize=15, linespacing=1.5, pad=10)
-        # pad clears the 45-degree tick labels below each panel; without it the
-        # colour bar rides up over the 'Commercial'/'Residential' ticks.
-        cb = fig.colorbar(im, ax=list(axes[0]), location='bottom',
-                          shrink=0.35, pad=0.30, aspect=40)
+            ax.set_title(p['title'], fontsize=FS_TITLE, linespacing=1.4,
+                         pad=12)
+        # pad clears the 45-degree tick labels below the bottom row; without it
+        # the colour bar rides up over the 'Commercial'/'Residential' ticks.
+        # Anchored to the figure, not to the axes: an axes-anchored bar rides
+        # up into the bottom row's tick labels once the panels are square.
+        cax = fig.add_axes([0.32, 0.045, 0.36, 0.017])
+        cb = fig.colorbar(im, cax=cax, orientation='horizontal')
         cb.set_label('Spearman ρ between function shares (pooled, CLR)',
-                     fontsize=12)
-        cb.ax.tick_params(labelsize=11)
+                     fontsize=19)
+        cb.ax.tick_params(labelsize=FS_CBAR)
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)),
                         exist_ok=True)
@@ -2446,6 +2480,43 @@ _PUB_RC = {
 }
 _PUB_BLUE, _PUB_DARK, _PUB_GREY = '#0F4D92', '#3a3a3a', '#BBBBBB'
 
+# Slide-oriented twin of _PUB_RC: the publication sizes (7 pt) are unreadable
+# once a 13-panel grid is projected, so the deck figures use these instead.
+# One style per METHOD, keyed by the label the pipeline prints, so a method
+# looks identical in the component grid and on the city page.  Hue and stroke
+# both separate the lines, so neither has to carry it alone, and the forecast
+# (blue) never sits next to a similar green baseline again.
+_CURVE_STYLE = {
+    'ground truth':               ('#3a3a3a', '-'),
+    'observed':                   ('#3a3a3a', '-'),
+    'component-based prediction': ('#E28E2C', '--'),
+    'train-mean':                 ('#0F4D92', (0, (1, 1.6))),
+    'oracle':                     ('#7B5EA7', '-'),
+    'city-wise prediction (kNN)': ('#4C9F70', (0, (5, 1.5, 1, 1.5))),
+}
+_STYLE_FALLBACK = [('#B0413E', '--'), ('#4C9F70', '-.'), ('#7B5EA7', ':')]
+
+# Reading order for the per-panel MAE stack: baselines above the model, so the
+# number to beat sits on top.  Unlisted labels fall in after these, in the
+# order they were plotted.
+_MAE_TEXT_ORDER = ['train-mean', 'city-wise prediction (kNN)',
+                   'component-based prediction', 'oracle']
+
+
+def _mae_text_row(label):
+    return (_MAE_TEXT_ORDER.index(label) if label in _MAE_TEXT_ORDER
+            else len(_MAE_TEXT_ORDER))
+
+
+def _curve_style(label, i):
+    return _CURVE_STYLE.get(label, _STYLE_FALLBACK[i % len(_STYLE_FALLBACK)])
+
+
+_SLIDE_RC = dict(_PUB_RC, **{
+    'font.size': 20, 'axes.titlesize': 22, 'axes.labelsize': 24,
+    'xtick.labelsize': 17, 'ytick.labelsize': 17, 'axes.linewidth': 1.3,
+})
+
 
 def _pub_grid(n, ncols):
     nrow = int(np.ceil(n / ncols))
@@ -2461,7 +2532,7 @@ def _pub_save(fig, save_path):
         plt.close(fig)
 
 
-def vis_rank_pred_vs_true(params, save_path=None, ncols=5):
+def vis_rank_pred_vs_true(params, save_path=None, ncols=5, names=None):
     """Predicted vs observed cum_loss RANK, one panel per city-event.
 
     The rank channel is the only part of the curve forecast that transfers, so
@@ -2471,8 +2542,11 @@ def vis_rank_pred_vs_true(params, save_path=None, ncols=5):
     cum_loss_fit).
     """
     codes = list(params['code'].drop_duplicates())
-    with plt.rc_context(_PUB_RC):
-        fig, axes, nrow = _pub_grid(len(codes), ncols)
+    names = names or {}
+    with plt.rc_context(_SLIDE_RC):
+        nrow = int(np.ceil(len(codes) / ncols))
+        fig, axes = plt.subplots(nrow, ncols, figsize=(3.7 * ncols, 3.8 * nrow),
+                                 squeeze=False)
         for i, c in enumerate(codes):
             ax = axes[i // ncols][i % ncols]
             s = params[params.code == c].dropna(subset=['rank_score',
@@ -2482,25 +2556,24 @@ def vis_rank_pred_vs_true(params, save_path=None, ncols=5):
                 continue
             rt, rp = rankdata(s['cum_loss_fit']), rankdata(s['rank_score'])
             n = len(s)
-            ax.plot([0.5, n + 0.5], [0.5, n + 0.5], color=_PUB_GREY, lw=0.7,
+            ax.plot([0.5, n + 0.5], [0.5, n + 0.5], color=_PUB_GREY, lw=1.6,
                     zorder=1)
-            ax.scatter(rt, rp, s=13, color=_PUB_BLUE, alpha=0.85, zorder=3,
-                       edgecolor='white', linewidth=0.35)
-            ax.set_title(c, fontsize=6.5)
+            ax.scatter(rt, rp, s=150, color=_PUB_BLUE, alpha=0.9, zorder=3,
+                       edgecolor='white', linewidth=1.3)
+            ax.set_title(names.get(c, c))
             rho = spearmanr(rt, rp).statistic
-            ax.text(0.05, 0.93, '$\\rho_s$ = {:+.2f}'.format(rho),
-                    transform=ax.transAxes, fontsize=5.8, va='top')
+            ax.text(0.05, 0.95, '$\\rho_s$ = {:+.2f}'.format(rho),
+                    transform=ax.transAxes, fontsize=19, va='top')
             ticks = [t for t in (1, 5, 10, 15) if t <= n]
             ax.set_xticks(ticks)
             ax.set_yticks(ticks)
             ax.set_xlim(0.4, n + 0.6)
             ax.set_ylim(0.4, n + 0.6)
             ax.set_aspect('equal')
-            ax.tick_params(labelsize=5.5)
         for k in range(len(codes), nrow * ncols):
             axes[k // ncols][k % ncols].axis('off')
-        fig.supxlabel('observed cumulative-loss rank', fontsize=7)
-        fig.supylabel('predicted rank', fontsize=7)
+        fig.supxlabel('observed cumulative-loss rank', fontsize=26)
+        fig.supylabel('predicted rank', fontsize=26)
         fig.tight_layout()
         _pub_save(fig, save_path)
     return fig
@@ -2547,54 +2620,6 @@ def vis_rank_to_cumloss_qm(params, save_path=None, ncols=5):
         h, l = axes[0][0].get_legend_handles_labels()
         fig.legend(h, l, loc='lower center', ncol=2, fontsize=6.5,
                    bbox_to_anchor=(0.5, -0.02))
-        fig.tight_layout()
-        _pub_save(fig, save_path)
-    return fig
-
-
-def vis_alpha_level_relationship(params, save_path=None):
-    """The recovery rate / plateau trade-off over every component of every
-    city-event: log10 of the fitted rate against the fitted level L.
-
-    This relation is what makes the plateau inversion possible — rate and level
-    are not free of each other, so pinning one constrains the other.  Grey lines
-    are leave-one-city-out refits, showing the relation is not carried by any
-    single unit.  `params` needs the UNGATED full fits (alpha_fit_ungated,
-    level_fit_ungated) so the quality gate does not thin the cloud.
-    """
-    s = params.dropna(subset=['alpha_fit_ungated', 'level_fit_ungated'])
-    codes = list(s['code'].drop_duplicates())
-    la = np.log10(np.clip(s['alpha_fit_ungated'].to_numpy(float), 1e-3, None))
-    lv = s['level_fit_ungated'].to_numpy(float)
-    coef = np.polyfit(la, lv, 1)
-    r2 = 1.0 - (np.sum((lv - np.polyval(coef, la)) ** 2)
-                / np.sum((lv - lv.mean()) ** 2))
-    cmap = plt.get_cmap('tab20')
-    colors = {c: cmap(i % 20) for i, c in enumerate(codes)}
-    with plt.rc_context(_PUB_RC):
-        fig, ax = plt.subplots(figsize=(3.4, 2.8))
-        xs = np.linspace(la.min(), la.max(), 200)
-        for held in codes:
-            m = (s['code'] != held).to_numpy()
-            ax.plot(xs, np.polyval(np.polyfit(la[m], lv[m], 1), xs),
-                    color=_PUB_GREY, lw=0.6, alpha=0.8, zorder=2)
-        ax.plot(xs, np.polyval(coef, xs), color=_PUB_DARK, lw=1.4, zorder=3)
-        for c in codes:
-            m = (s['code'] == c).to_numpy()
-            ax.scatter(la[m], lv[m], s=16, color=colors[c], alpha=0.85,
-                       zorder=4, edgecolor='white', linewidth=0.3, label=c)
-        ax.set_xlabel(r"$\log_{10}\,\alpha$")
-        ax.set_ylabel(r"recovery level $L$")
-        ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01),
-                  ncol=min(5, max(3, (len(codes) + 3) // 4)),
-                  fontsize=5.2, handletextpad=0.2, columnspacing=0.8,
-                  labelspacing=0.3, borderaxespad=0.0)
-        stats = ('$L$ = {:.2f} $-$ {:.2f} $\\log_{{10}}\\alpha$\n'
-                 '$R^2$ = {:.2f}\n'
-                 'grey: leave-one-city-out fits').format(
-                     coef[1], abs(coef[0]), r2)
-        ax.text(0.98, 0.70, stats,
-                transform=ax.transAxes, fontsize=6, va='top', ha='right')
         fig.tight_layout()
         _pub_save(fig, save_path)
     return fig
@@ -2798,4 +2823,640 @@ def vis_exposure_vs_cumloss(df, panels, metric='cum_loss', group_col='code',
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
+    return fig
+
+
+def vis_centered_spectrum_loo(pred, metrics, save_path=None, names=None,
+                              ncol=5,
+                              xlabel='centred component cumulative loss'):
+    """Leave-one-out grid: does the predicted centred loss spectrum match the
+    held-out unit's own?
+
+    `pred` is {code: {'bary': the predicted spectrum as a dense sample, 'true':
+    the held unit's centred component cum_loss}} and `metrics` a frame indexed by
+    code with n / W1 / skill.  `names` maps code -> the full city-event title
+    (defaults to the code).  One panel per unit; both distributions are drawn as
+    CUMULATIVE curves because the area between two CDFs IS the 1-Wasserstein
+    distance, so the shaded region is the reported W1 rather than a decoration of
+    it.  Ticks mark the unit's actual components -- with n = 5..12 the truth is a
+    short staircase, and showing it as such keeps the reader from reading a smooth
+    fit into the data.  The n in each panel title is that COMPONENT COUNT, and W1
+    is in day-equivalents, the unit the shared x label carries.
+
+    Both axes are SHARED across panels, so they are labelled ONCE for the whole
+    figure rather than per panel; tick labels are restored on the lowest occupied
+    panel of every column, so a short last row never leaves a column reading
+    another column's ticks.  One palette across all panels (prediction / truth /
+    area), so a colour carries the same meaning everywhere.  Slide-oriented: wide
+    grid, large fonts, no figure suptitle."""
+    codes = list(pred)
+    names = names or {}
+    c_pred, c_true, c_area = '#0F4D92', '#B64342', '#C9A227'
+    lo = min(min(v['true'].min(), np.min(v['bary'])) for v in pred.values()) - 1
+    hi = max(max(v['true'].max(), np.max(v['bary'])) for v in pred.values()) + 1
+    xs = np.linspace(lo, hi, 900)
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 25, 'axes.labelsize': 30, 'axes.titlesize': 22,
+          'xtick.labelsize': 22, 'ytick.labelsize': 22, 'axes.linewidth': 1.3,
+          'axes.spines.top': False, 'axes.spines.right': False,
+          'svg.fonttype': 'none', 'pdf.fonttype': 42}
+    nrow = int(np.ceil(len(codes) / ncol))
+    with plt.rc_context(rc):
+        fig, axes2d = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 5.0 * nrow),
+                                   squeeze=False, sharex=True, sharey=True)
+        axes = axes2d.ravel()
+        for ax, code in zip(axes, codes):
+            d = pred[code]
+            b = np.sort(np.asarray(d['bary'], dtype=float))
+            t = np.sort(np.asarray(d['true'], dtype=float))
+            fp = np.searchsorted(b, xs, 'right') / len(b)
+            ft = np.searchsorted(t, xs, 'right') / len(t)
+            ax.fill_between(xs, fp, ft, color=c_area, alpha=0.42, zorder=1,
+                            label='area between = $W_1$')
+            ax.plot(xs, fp, color=c_pred, lw=2.8, zorder=3,
+                    label='predicted')
+            ax.step(np.concatenate([[lo], t, [hi]]),
+                    np.concatenate([[0.0], (np.arange(len(t)) + 1) / len(t), [1.0]]),
+                    where='post', color=c_true, lw=2.8, zorder=4,
+                    label='true')
+            ax.plot(t, np.zeros(len(t)), '|', color=c_true, ms=14, mew=2.0,
+                    zorder=5, label='its components')
+            ax.set_title(
+                '{}'.format(names.get(code, code)) + chr(10)
+                + '{} components'.format(int(metrics.loc[code, 'n'])) + chr(10)
+                + '$W_1$ {:.2f}   skill {:+.2f}'.format(
+                    metrics.loc[code, 'W1'], metrics.loc[code, 'skill']),
+                linespacing=1.35)
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(-0.03, 1.03)
+        for ax in axes[len(codes):]:
+            ax.axis('off')
+        # sharex hides tick labels above the bottom ROW; the last row is short,
+        # so give every column its ticks back on ITS lowest occupied panel.
+        for col in range(ncol):
+            occ = [r for r in range(nrow) if r * ncol + col < len(codes)]
+            if occ:
+                axes2d[occ[-1]][col].xaxis.set_tick_params(labelbottom=True)
+        h, l = axes[0].get_legend_handles_labels()
+        if len(axes) > len(codes):
+            axes[len(codes)].legend(h, l, loc='center', fontsize=24,
+                                    frameon=False, handlelength=1.6)
+        fig.supxlabel(xlabel, fontsize=30)
+        fig.supylabel('cumulative probability', fontsize=30)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_centered_distributions(cen, save_path=None, names=None, storms=None,
+                               ncol=5,
+                               xlabel='component cumulative loss centred on '
+                                      'its own city-event mean'):
+    """The OBSERVED centred loss spectra: what the STEP-7 shape channel has to
+    transfer, before any prediction enters.
+
+    `cen` is {code: centred component cum_loss array}, `names` maps code -> the
+    full city-event title, `storms` code -> a colour.  A pooled panel on top
+    (every component of every unit on one cumulative curve, each unit's own
+    curve behind it in grey) sets the reference; the grid below gives each unit
+    its own panel against that pooled reference as a dashed line, so a unit
+    reads as wider or narrower than the pool at a glance.
+
+    Cumulative curves, not histograms: with n = 5..12 components a unit's
+    spectrum is a short staircase, and the CDF shows every component as a step
+    instead of hiding them in bin edges.  The n in each panel title is that
+    COMPONENT COUNT.  Both axes are shared across the grid and therefore
+    labelled ONCE for the whole figure; tick labels are restored on the lowest
+    occupied panel of each column so a short last row leaves no column without
+    ticks.  Slide-oriented: wide grid, large fonts, no figure suptitle."""
+    codes = list(cen)
+    names = names or {}
+    storms = storms or {}
+    pooled = np.sort(np.concatenate([np.asarray(cen[c], dtype=float)
+                                     for c in codes]))
+    lo = float(pooled.min()) - 1.5
+    hi = float(pooled.max()) + 1.5
+    xs = np.linspace(lo, hi, 900)
+    f_pool = np.searchsorted(pooled, xs, 'right') / len(pooled)
+    nrow = int(np.ceil(len(codes) / ncol))
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 31, 'axes.labelsize': 37, 'axes.titlesize': 29,
+          'xtick.labelsize': 27, 'ytick.labelsize': 27, 'axes.linewidth': 1.5,
+          'axes.spines.top': False, 'axes.spines.right': False,
+          'svg.fonttype': 'none', 'pdf.fonttype': 42}
+    with plt.rc_context(rc):
+        fig = plt.figure(figsize=(5.0 * ncol, 4.6 * (nrow + 1)))
+        gs = fig.add_gridspec(nrow + 1, ncol, height_ratios=[1.2] + [1] * nrow,
+                              hspace=0.52, wspace=0.16,
+                              left=0.075, right=0.995,
+                              top=0.985, bottom=0.095)
+        # pooled reference panel
+        axp = fig.add_subplot(gs[0, :])
+        for c in codes:
+            v = np.sort(np.asarray(cen[c], dtype=float))
+            axp.step(np.concatenate([[lo], v, [hi]]),
+                     np.concatenate([[0.0], (np.arange(len(v)) + 1) / len(v),
+                                     [1.0]]),
+                     where='post', color='#BBBBBB', lw=1.4, zorder=2,
+                     label='each city-event on its own' if c == codes[0] else None)
+        axp.plot(xs, f_pool, color='#111111', lw=3.2, zorder=3,
+                 label='pooled, all {} city-events (n = {})'.format(
+                     len(codes), len(pooled)))
+        axp.plot(pooled, np.zeros(len(pooled)), '|', color='#555555', ms=13,
+                 mew=1.6, zorder=4, label='the {} components'.format(len(pooled)))
+        axp.axvline(0, color='#DDDDDD', lw=1.2, zorder=0)
+        axp.set_xlim(lo, hi)
+        axp.set_ylim(-0.03, 1.03)
+        axp.legend(loc='upper left', fontsize=29, frameon=False,
+                   handlelength=1.6)
+
+        axes = []
+        for i, code in enumerate(codes):
+            ax = fig.add_subplot(gs[1 + i // ncol, i % ncol],
+                                 sharex=axes[0] if axes else None,
+                                 sharey=axes[0] if axes else None)
+            axes.append(ax)
+            v = np.sort(np.asarray(cen[code], dtype=float))
+            ax.plot(xs, f_pool, color='#AAAAAA', lw=2.0, ls='--', zorder=2,
+                    label='pooled reference')
+            ax.step(np.concatenate([[lo], v, [hi]]),
+                    np.concatenate([[0.0], (np.arange(len(v)) + 1) / len(v),
+                                    [1.0]]),
+                    where='post', color=storms.get(code, '#0F4D92'), lw=3.0,
+                    zorder=3, label='this city-event')
+            ax.plot(v, np.zeros(len(v)), '|', color=storms.get(code, '#0F4D92'),
+                    ms=14, mew=2.0, zorder=4, label='its components')
+            ax.axvline(0, color='#DDDDDD', lw=1.2, zorder=0)
+            ax.set_title('{}'.format(names.get(code, code)) + chr(10)
+                         + '{} components'.format(len(v)), linespacing=1.35)
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(-0.03, 1.03)
+            if i % ncol:
+                for lab in ax.get_yticklabels():
+                    lab.set_visible(False)
+        # every column keeps ticks on ITS lowest occupied panel
+        for col in range(ncol):
+            occ = [r for r in range(nrow) if r * ncol + col < len(codes)]
+            if occ:
+                keep = occ[-1] * ncol + col
+                for i, ax in enumerate(axes):
+                    if i % ncol == col and i != keep:
+                        for lab in ax.get_xticklabels():
+                            lab.set_visible(False)
+        free = len(codes) % ncol
+        if free:
+            axl = fig.add_subplot(gs[nrow, free:])
+            axl.axis('off')
+            h, l = axes[0].get_legend_handles_labels()
+            axl.legend(h, l, loc='center', fontsize=30, frameon=False,
+                       handlelength=1.6)
+        # Anchor the two shared labels to the AXES block: supxlabel/supylabel
+        # centre on the whole figure, which drifts once the last row is short
+        # and a legend slot sits beside it.
+        boxes = [a.get_position() for a in [axp] + axes]
+        x_lo, x_hi = min(b.x0 for b in boxes), max(b.x1 for b in boxes)
+        y_lo, y_hi = min(b.y0 for b in boxes), max(b.y1 for b in boxes)
+        fig.text(0.5 * (x_lo + x_hi), y_lo - 0.046, xlabel,
+                 ha='center', va='top', fontsize=37)
+        fig.text(x_lo - 0.048, 0.5 * (y_lo + y_hi), 'cumulative probability',
+                 rotation=90, ha='right', va='center', fontsize=37)
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_spread_vs_predictors(target, predictors, save_path=None, storms=None,
+                             ncol=5, dim_r2=0.15, gap_after=None,
+                             title_fontsize=None,
+                             xlabel='candidate predictor',
+                             ylabel='within-city loss SD'):
+    """Does any candidate predictor track the WIDTH the spread model has to
+    predict?  One panel per candidate, all sharing the same y.
+
+    `target` is {code: within-city SD of the centred component cumulative loss}
+    -- the quantity ML-B2inc predicts as sigma, and the RESPONSE, so it takes
+    the y axis.  `predictors` is an ordered {panel title: {code: value}} and
+    supplies x, one candidate per panel, filled row-major; `xlabel` names what
+    those candidates have in common, since the panel title already names the
+    individual one.
+
+    `gap_after` inserts a narrow blank column after that logical column, so one
+    group of candidates can be set apart from the rest without needing a second
+    figure or a box drawn around them.
+
+    Each panel carries the least-squares line and its Pearson r with R^2,
+    because the question is whether the cloud has usable slope at n = 13.
+    Panels at or below `dim_r2` are kept -- a null result is evidence, hiding it
+    would turn this into a highlight reel -- but their marks are drawn in grey so
+    the eye lands on the candidates that carry signal without reading every R^2
+    first.  The TITLE stays in normal ink either way: the dimming ranks the
+    evidence, and a reader still has to be able to read what the null result was
+    about.  `title_fontsize` overrides the rc size, for two-line titles.
+
+    y is the same in every panel and is therefore labelled ONCE for the whole
+    figure; x differs per panel in scale, so each panel keeps its own ticks
+    under one shared summary label.  Read these as DESCRIPTIVE: computed on all
+    units at once, they show association, not the held-out skill the LOO
+    figures report.  Slide-oriented: wide grid, large fonts, no suptitle."""
+    items = list(predictors.items())
+    codes = list(target)
+    nrow = int(np.ceil(len(items) / ncol))
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 30, 'axes.labelsize': 40, 'axes.titlesize': 32,
+          'xtick.labelsize': 26, 'ytick.labelsize': 26, 'axes.linewidth': 1.6,
+          'axes.spines.top': False, 'axes.spines.right': False,
+          'svg.fonttype': 'none', 'pdf.fonttype': 42}
+    with plt.rc_context(rc):
+        widths, col_map, g = [], {}, 0
+        for j in range(ncol):
+            widths.append(1.0)
+            col_map[j] = g
+            g += 1
+            if gap_after is not None and j == gap_after:
+                widths.append(0.20)          # blank spacer column
+                g += 1
+        fig = plt.figure(figsize=(5.4 * sum(widths), max(4.8 * nrow, 6.4)))
+        gs = fig.add_gridspec(nrow, len(widths), width_ratios=widths)
+        axes = []
+        for i, (title, vals) in enumerate(items):
+            rw, cl = divmod(i, ncol)
+            ax = fig.add_subplot(gs[rw, col_map[cl]],
+                                 sharey=axes[0] if axes else None)
+            axes.append(ax)
+            use = [k for k in codes
+                   if np.isfinite(target[k])
+                   and np.isfinite(vals.get(k, np.nan))]
+            x = np.array([vals[k] for k in use], dtype=float)
+            y = np.array([target[k] for k in use], dtype=float)
+            rr = np.nan
+            if len(use) >= 3 and x.std() > 1e-12 and y.std() > 1e-12:
+                rr = float(np.corrcoef(x, y)[0, 1])
+            dim = not np.isfinite(rr) or rr ** 2 <= dim_r2
+            ax.scatter(x, y, s=230, color='#C8C8C8' if dim else '#39557A',
+                       edgecolor='white', linewidth=1.5, zorder=3,
+                       alpha=0.85 if dim else 1.0)
+            if np.isfinite(rr):
+                b1, b0 = np.polyfit(x, y, 1)
+                xx = np.linspace(x.min(), x.max(), 50)
+                ax.plot(xx, b0 + b1 * xx, lw=2.6, zorder=2,
+                        color='#D9D9D9' if dim else '#B64342')
+                ax.text(0.035, 0.975, 'r {:+.2f}'.format(rr) + chr(10)
+                        + '$R^2$ {:.2f}'.format(rr ** 2),
+                        transform=ax.transAxes, ha='left', va='top',
+                        fontsize=27, linespacing=1.3, zorder=6,
+                        color='#A8A8A8' if dim else '#1A1A1A',
+                        bbox=dict(boxstyle='round,pad=0.22', fc='white',
+                                  ec='none', alpha=0.78))
+            ax.set_title(title, color='#1A1A1A', fontsize=title_fontsize)
+            if cl:
+                for lab in ax.get_yticklabels():
+                    lab.set_visible(False)
+            if dim:
+                ax.tick_params(colors='#A8A8A8')
+                for sp in ax.spines.values():
+                    sp.set_color('#D0D0D0')
+        fig.tight_layout()
+        # Size the two shared labels to the PANEL BLOCK and anchor them there:
+        # a one-row grid is only a few inches tall, so a fixed point size would
+        # be physically longer than the figure and force empty bands.
+        boxes = [a.get_position() for a in axes]
+        x_lo, x_hi = min(v.x0 for v in boxes), max(v.x1 for v in boxes)
+        y_lo, y_hi = min(v.y0 for v in boxes), max(v.y1 for v in boxes)
+        W, H = fig.get_figwidth(), fig.get_figheight()
+        span_x, span_y = (x_hi - x_lo) * W, (y_hi - y_lo) * H
+        fs = float(np.clip(0.92 * span_x * 72 / (0.58 * max(len(xlabel), 1)),
+                           24.0, 40.0))
+        # The y label stays on ONE line always; if the block is too short to
+        # carry it at the shared size it shrinks rather than wrapping.
+        fs_y = min(fs, 0.94 * span_y * 72 / (0.58 * max(len(ylabel), 1)))
+        fig.text(0.5 * (x_lo + x_hi), y_lo - 0.78 / H, xlabel,
+                 ha='center', va='top', fontsize=fs)
+        fig.text(x_lo - 0.98 / W, 0.5 * (y_lo + y_hi), ylabel,
+                 rotation=90, ha='right', va='center', fontsize=fs_y)
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_spread_concept(pooled, scale, save_path=None, units_per_inch=3.1,
+                       height=5.2, font_scale=1.0,
+                       xlabel='centred cumulative loss'):
+    """What the SPREAD channel does, as a picture: the pooled spectrum rescaled.
+
+    `pooled` is every unit's centred component cumulative loss in one array --
+    the curve the top panel of the centred-distribution figure draws, with the
+    per-unit background curves dropped.  Multiplying that sample by `scale`
+    leaves its SHAPE untouched and changes only its WIDTH: exactly the one
+    degree of freedom the model's sigma controls.
+
+    ONE curve per figure, and the figure's own horizontal length carries the
+    comparison.  `units_per_inch` is held FIXED across calls, so a widened
+    spectrum yields a physically wider figure and a narrowed one a physically
+    narrower figure; the pair read side by side shows the rescaling at true
+    relative size.  Drawing the unscaled spectrum alongside would either clip
+    it (the narrowed frame is too small to hold it) or force a common frame
+    that destroys exactly the width cue this figure exists to give, so it is
+    left out.  No legend.
+
+    `font_scale` multiplies every text size.  A wider figure needs larger
+    type to stay readable once it is scaled to fit a slide, so the caller
+    raises it in step with the width rather than leaving one file's labels
+    shrunk relative to the other's."""
+    v = np.sort(np.asarray(pooled, dtype=float) * scale)
+    lim = float(np.max(np.abs(v))) * 1.08
+    xs = np.linspace(-lim, lim, 1200)
+    f = np.searchsorted(v, xs, 'right') / len(v)
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 24 * font_scale, 'axes.labelsize': 25 * font_scale,
+          'xtick.labelsize': 21 * font_scale,
+          'ytick.labelsize': 21 * font_scale,
+          'axes.linewidth': 1.5 * min(font_scale, 2.0),
+          'axes.spines.top': False, 'axes.spines.right': False,
+          'svg.fonttype': 'none', 'pdf.fonttype': 42}
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(2 * lim / units_per_inch, height))
+        ax.plot(xs, f, color='#111111', lw=3.2 * min(font_scale, 2.0),
+                zorder=3)
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('cumulative probability')
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_mlb2_pca(block, feature_names, save_path=None, names=None, ncomp=2):
+    """The PCA step inside the spread model, opened up: what the components are
+    made of.
+
+    ML-B2inc does not use the 22 city-level features directly.  It z-scores them
+    across the training units and keeps the leading `ncomp` principal
+    components; only those enter the fitted increment as gamma'PC.  This figure
+    shows the LOADINGS -- each component's weight on every raw feature -- on a
+    symmetric diverging scale, so sign is readable and the components are
+    directly comparable.  Each column header carries the share of feature
+    variance that component accounts for.  Portrait layout: the 22 features
+    run down the panel so each keeps a full horizontal line for its name.
+
+    `block` is {code: the unit's raw feature vector} and `feature_names` labels
+    its entries; `names` is accepted so callers can pass city-event titles, but
+    the panel is about features, not units.
+
+    DESCRIPTIVE: fitted here on ALL units at once, whereas production refits the
+    PCA per fold on the training units, so the axes drift slightly from any
+    single fold's.  Sign is arbitrary in any PCA -- a component and its negation
+    are the same direction -- so read a column as a contrast pattern, not as
+    absolute polarity.  Wide, large type, no figure title."""
+    codes = list(block)
+    E = np.vstack([np.asarray(block[c], dtype=float) for c in codes])
+    mu, sd = E.mean(0), E.std(0)
+    sd[sd == 0] = 1.0
+    Z = (E - mu) / sd
+    Z = Z - Z.mean(0)
+    S, Vt = np.linalg.svd(Z, full_matrices=False)[1:]
+    evr = (S ** 2) / float(np.sum(S ** 2))
+    load = Vt[:ncomp]
+    vmax = float(np.max(np.abs(load)))
+
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 36, 'axes.labelsize': 40, 'axes.titlesize': 40,
+          'xtick.labelsize': 40, 'ytick.labelsize': 36, 'axes.linewidth': 1.5,
+          'svg.fonttype': 'none', 'pdf.fonttype': 42}
+    with plt.rc_context(rc):
+        # Portrait: the features run DOWN the panel and the components across,
+        # so each of the 22 names gets a full horizontal line to itself.
+        fig, ax = plt.subplots(
+            figsize=(4.4 * ncomp + 9.0, 0.86 * len(feature_names) + 2.4))
+        im = ax.imshow(load.T, cmap='RdBu_r', vmin=-vmax, vmax=vmax,
+                       aspect='auto')
+        ax.set_xticks(range(ncomp))
+        ax.set_xticklabels(['PC{}'.format(i + 1) + chr(10)
+                            + '({:.0%})'.format(evr[i]) for i in range(ncomp)])
+        ax.xaxis.set_ticks_position('top')
+        ax.set_yticks(range(len(feature_names)))
+        ax.set_yticklabels(feature_names)
+        ax.tick_params(length=0)
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+        cb = fig.colorbar(im, ax=ax, fraction=0.05, pad=0.03)
+        cb.set_label('loading', fontsize=38)
+        cb.ax.tick_params(labelsize=32)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_centered_spectrum_schematic(bary, true, save_path=None,
+                                    xlabel='centred cumulative loss'):
+    """One unlabelled panel of the leave-one-out comparison, as a schematic.
+
+    Same three marks as the full grid -- the predicted spectrum, the held-out
+    unit's true staircase, and the shaded area between the two cumulative
+    curves that IS the reported 1-Wasserstein distance -- but with every
+    unit-specific cue removed: no city-event name, no n, no W1 or skill.  It
+    exists to show WHAT the metric measures, so the caller supplies one fold's
+    arrays purely as an example and the panel must not invite reading anything
+    off that particular city.  Legend kept, since without it the three marks
+    are unidentifiable.  Small canvas, large type, no title."""
+    b = np.sort(np.asarray(bary, dtype=float))
+    t = np.sort(np.asarray(true, dtype=float))
+    lo = min(b.min(), t.min()) - 1.0
+    hi = max(b.max(), t.max()) + 1.0
+    xs = np.linspace(lo, hi, 900)
+    fp = np.searchsorted(b, xs, 'right') / len(b)
+    ft = np.searchsorted(t, xs, 'right') / len(t)
+    c_pred, c_true, c_area = '#0F4D92', '#B64342', '#C9A227'
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 22, 'axes.labelsize': 24,
+          'xtick.labelsize': 19, 'ytick.labelsize': 19, 'axes.linewidth': 1.4,
+          'axes.spines.top': False, 'axes.spines.right': False,
+          'svg.fonttype': 'none', 'pdf.fonttype': 42}
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(6.2, 6.6))
+        ax.fill_between(xs, fp, ft, color=c_area, alpha=0.42, zorder=1,
+                        label='area between = $W_1$')
+        ax.plot(xs, fp, color=c_pred, lw=3.0, zorder=3, label='predicted')
+        ax.step(np.concatenate([[lo], t, [hi]]),
+                np.concatenate([[0.0], (np.arange(len(t)) + 1) / len(t), [1.0]]),
+                where='post', color=c_true, lw=3.0, zorder=4, label='true')
+        ax.plot(t, np.zeros(len(t)), '|', color=c_true, ms=16, mew=2.2,
+                zorder=5, label='components')
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_xticks([])
+        ax.set_yticks([0, 0.5, 1])
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('cumulative probability')
+        ax.legend(loc='upper left', fontsize=19, frameon=False,
+                  handlelength=1.5, borderpad=0.2, labelspacing=0.35)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
+def vis_qm_pred_vs_obs(params, save_path=None, ncols=5, names=None):
+    """Quantile-mapped prediction against the observed loss, as a plain scatter.
+
+    The companion rank-ordered figure (vis_rank_to_cumloss_qm) puts the
+    predicted ORDER on x, which shows where the mapping over- or under-shoots
+    along the ordering but never lets a reader read the error off the diagonal.
+    This one does: one point per component, observed on x, predicted on y, the
+    identity line, and each panel's Pearson r together with a weighted mean
+    absolute error and the same error as a percentage of the unit's
+    whole-horizon cumulative loss.  `params` needs code, cum_loss_fit,
+    cum_loss_pred and weight_normal; `names` maps code -> the full city-event
+    title.  Axes are SHARED per panel (square, common limits) so a point's
+    distance from the diagonal is the error in day-equivalents."""
+    codes = list(params['code'].drop_duplicates())
+    names = names or {}
+    with plt.rc_context(_SLIDE_RC):
+        nrow = int(np.ceil(len(codes) / ncols))
+        fig, axes = plt.subplots(nrow, ncols, figsize=(3.7 * ncols, 3.8 * nrow),
+                                 squeeze=False)
+        for i, c in enumerate(codes):
+            ax = axes[i // ncols][i % ncols]
+            s = params[params.code == c].dropna(
+                subset=['cum_loss_fit', 'cum_loss_pred'])
+            if len(s) < 2:
+                ax.axis('off')
+                continue
+            x = s['cum_loss_fit'].to_numpy(dtype=float)
+            y = s['cum_loss_pred'].to_numpy(dtype=float)
+            lo = float(min(x.min(), y.min()))
+            hi = float(max(x.max(), y.max()))
+            pad = 0.10 * (hi - lo if hi > lo else 1.0)
+            lo, hi = lo - pad, hi + pad
+            ax.plot([lo, hi], [lo, hi], color=_PUB_GREY, lw=1.6, zorder=1)
+            ax.scatter(x, y, s=150, color=_PUB_BLUE, alpha=0.9, zorder=3,
+                       edgecolor='white', linewidth=1.3)
+            ax.set_title(names.get(c, c))
+            # R^2 against the IDENTITY line, not against a refitted slope:
+            # 1 - sum (y-x)^2 / sum (x - xbar)^2.  It therefore penalises the
+            # distance from the diagonal the panel actually draws, and goes
+            # NEGATIVE when the prediction is worse than this unit's own mean.
+            # Pearson r (co-variation, blind to shift and scale), then two
+            # error numbers that share ONE numerator, sum_j w_j |y_j - x_j|:
+            #   MAE   divides it by sum_j w_j  -> day-equivalents, same units
+            #         as both axes, so it reads as a distance from the diagonal;
+            #   MAPE  divides it by sum_j w_j |x_j| -> the same error as a share
+            #         of the unit's whole-horizon cumulative loss.
+            # Both are WEIGHTED by weight_normal, the city-aggregation weight
+            # the curve figures use, so a component that carries almost none of
+            # the city's flow cannot dominate either number.  Pooling the
+            # denominator over the horizon is also what makes the percentage
+            # usable at all: cum_loss is SIGNED and crosses zero, so the
+            # per-component form divided by quantities near zero -- one
+            # component at |observed| ~ 0.07 used to set the whole panel's MAPE
+            # while its absolute error was among the smallest.
+            wj = s['weight_normal'].to_numpy(dtype=float)
+            rp_ = pearsonr(x, y).statistic
+            num = float(np.sum(wj * np.abs(y - x)))
+            mae_ = num / float(np.sum(wj))
+            mape_ = 100.0 * num / float(np.sum(wj * np.abs(x)))
+            ax.text(0.965, 0.035,
+                    'r = {:+.2f}'.format(rp_) + chr(10)
+                    + 'MAE = {:.2f}'.format(mae_) + chr(10)
+                    + 'MAPE = {:.0f}%'.format(mape_),
+                    transform=ax.transAxes, fontsize=18, va='bottom',
+                    ha='right', linespacing=1.35, zorder=4,
+                    # lower right, the corner the diagonal point cloud leaves
+                    # most open; the white ground covers the units whose
+                    # scatter still reaches into it
+                    bbox=dict(facecolor='white', alpha=0.78, edgecolor='none',
+                              boxstyle='square,pad=0.18'))
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_aspect('equal')
+        for k in range(len(codes), nrow * ncols):
+            axes[k // ncols][k % ncols].axis('off')
+        fig.supxlabel('observed component cumulative loss', fontsize=26)
+        fig.supylabel('quantile-mapped prediction', fontsize=26)
+        fig.tight_layout()
+        _pub_save(fig, save_path)
+    return fig
+
+
+def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None):
+    """Every city-event's absolute mobility curve on ONE page.
+
+    `per_city` maps code -> (days, ground_truth, {label: values}); `names` maps
+    code -> the full city-event title.  Each panel keeps its OWN y scale: the
+    units differ by an order of magnitude in flow volume, so a shared y would
+    flatten the small cities into invisible lines.  x is shared and therefore
+    labelled once; the y label names the quantity once for the page.  A single
+    figure-level legend sits in the free grid slot -- with 13 panels on a 5-wide
+    grid there are two spare, and using one costs nothing.  Per-panel error
+    numbers are deliberately absent: bar_cross_city_curve_mae.png already
+    reports the MAE of every method for every unit."""
+    codes = list(per_city)
+    names = names or {}
+    nrow = int(np.ceil(len(codes) / ncols))
+
+    rc = dict(_SLIDE_RC, **{'font.size': 19, 'axes.titlesize': 21,
+                            'xtick.labelsize': 15, 'ytick.labelsize': 15})
+    with plt.rc_context(rc):
+        fig, axes2d = plt.subplots(nrow, ncols, figsize=(4.6 * ncols,
+                                                         3.6 * nrow),
+                                   squeeze=False, sharex=True)
+        axes = axes2d.ravel()
+        for ax, code in zip(axes, codes):
+            days, gt, lines = per_city[code]
+            ax.plot(days, gt, color='#3a3a3a', lw=2.6, marker='o', ms=5,
+                    label='ground truth', zorder=5)
+            gt = np.asarray(gt, dtype=float)
+            # The MAE stack is ordered by _MAE_TEXT_ORDER, NOT by plotting
+            # order: the baseline reads first, so every panel is scanned as
+            # "what the baseline costs, then what the model saves".
+            stack = sorted(lines, key=_mae_text_row)
+            for i, (lab, vals) in enumerate(lines.items()):
+                vals = np.asarray(vals, dtype=float)
+                col, dsh = _curve_style(lab, i)
+                ax.plot(days, vals, color=col, lw=2.2, ls=dsh, marker='.',
+                        ms=5, label=lab)
+                # each method's MAE, in its own colour, so the number needs no
+                # separate key; stacked from the top-left downwards
+                ax.text(0.03, 0.97 - 0.115 * stack.index(lab),
+                        'MAE {:.3g}'.format(np.nanmean(np.abs(vals - gt))),
+                        transform=ax.transAxes, color=col, fontsize=16,
+                        va='top', ha='left')
+            ax.set_title(names.get(code, code))
+            ax.margins(y=0.10)
+        h, l = axes[0].get_legend_handles_labels()
+        for ax in axes[len(codes):]:
+            ax.axis('off')
+        if len(axes) > len(codes):
+            axes[len(codes)].legend(h, l, loc='center', fontsize=20,
+                                    frameon=False, handlelength=1.9,
+                                    labelspacing=0.6)
+        fig.supxlabel('days since landfall', fontsize=26)
+        fig.supylabel('daily mobility magnitude', fontsize=26)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
     return fig

@@ -116,8 +116,9 @@ STEP 7 — Cross-city curve prediction.
     quantiles give the values their shape, a ratio of observable backbone-loss
     spreads rescales them to the held city's own dispersion, and an additive
     shift pins the weight_normal aggregate to the city total of STEP 6's
-    aggr_denorm strategy (pooled features + observed r0, ridge — the same
-    estimator the city_total/ headline figure reports; re-wired 2026-08-04).
+    aggr_denorm strategy — the component ridge's aggregate score s scored on
+    [s, r0_city, GDP] and variance-matched (the same estimator the city_total/
+    headline figure reports, shared through _city_total_from_scores).
     weight_normal aggregation turns the component curves into the city
     trajectory, compared against the observed curve alongside three reference
     lines: a city-wise forecast (one rate for the whole city, a single
@@ -176,15 +177,13 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                         no income predictor), one subfolder per predictor —
                         cos_KNN/ and ridge/ — each with its leave-one-out
                         scatters (Spearman ρ), the LOO R² matrix, the pairwise
-                        transfer heatmap (Spearman ρ), and raw_data/.
-                        ridge_cluster/ is the cluster-restricted variant
-                        (RANK_TRAIN_SCOPE='cluster', the default STEP-7 also
-                        uses): raw_data/loo_rank_rho.csv is each held-out
-                        city's rank ρ when trained only on its estimated
-                        cluster, with the ALL-vs-cluster comparison drawn in
-                        ridge/cluster_restricted_rank.png.  ridge/
-                        additionally carries the MSA cluster map
-                        (msa_cluster_map.png), the cluster-mechanism PCA
+                        transfer heatmap (Spearman ρ), and raw_data/.  ridge/
+                        additionally carries the cluster-restricted rank
+                        variant's ALL-vs-cluster comparison
+                        (cluster_restricted_rank.png + .csv: each held-out
+                        city's rank ρ trained on every other city vs on its
+                        estimated cluster only, the RANK_TRAIN_SCOPE='cluster'
+                        scope STEP 7 also uses), the cluster-mechanism PCA
                         (cluster_mapping_pca.png: per-cluster panels of every
                         component in within-city rank-z space, with each
                         city's and each cluster's pooled feature->loss
@@ -192,14 +191,13 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                         co-riding graph (cluster_function_graph.png: the
                         pooled average and each cluster as a distance layout
                         of the 6 functions, d = 1 - rho, edges gated by a
-                        within-city permutation test with BH correction) with
-                        its spread companion (cluster_function_overlay.png:
-                        the same layouts greyed out as a base map, every
-                        city-event's own layout drawn on top, colour = the
-                        function)
+                        within-city permutation test with BH correction;
+                        SECOND ROW = the same layouts greyed out as a base
+                        map with every city-event's own layout drawn on top,
+                        colour = the function)
     4-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
-        plus the three mechanism figures (rank_pred_vs_true, rank_to_cumloss_qm,
-        alphaL_relationship_softreg),
+        plus the mechanism figures (rank_pred_vs_true, rank_to_cumloss_qm,
+        rank_to_cumloss_scatter),
         (the city-level whole-curve error of each forecast line, per city-event),
         per-unit city_magnitude_curve_<code>.png and component_curves_<code>.png,
         curve_pred_metrics.csv, and raw_data/ (per-day city curves by method +
@@ -219,13 +217,15 @@ Run
 ---
     python run_pattern_nmf.py
 """
+import itertools
 import os
 import re
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import brentq, least_squares
+from scipy.optimize import brentq, least_squares, minimize
 from scipy.stats import rankdata, spearmanr
+from sklearn.linear_model import RidgeCV
 from sklearn.metrics import r2_score
 
 from config import (
@@ -241,8 +241,8 @@ from utils.pattern_analysis.nmf_pipeline import (
 )
 from utils.pattern_analysis.visualization import (
     vis_heatmap_temporal_signature, vis_nmf_quality, vis_nmf_quality_summary,
-    vis_city_mobility_curves, vis_msa_cluster_map, vis_cluster_mapping_pca,
-    vis_cluster_function_graph, vis_cluster_function_overlay,
+    vis_city_mobility_curves, vis_cluster_mapping_pca,
+    vis_cluster_function_graph,
     vis_cluster_restricted_rank,
     vis_cluster_function_heatmap,
     vis_nmf_rank_cv,
@@ -254,11 +254,13 @@ from utils.pattern_analysis.visualization import (
     vis_heatmap_pair_transfer, vis_scatter_intensity_resilience,
     vis_exposure_vs_cumloss,
     vis_bar_cross_city_resi_pred, vis_scatter_city_pred, vis_bar_curve_mae,
-    vis_curves_city_pred,
+    vis_curves_city_pred, vis_city_curves_grid,
     vis_component_curves_grid, vis_od_flow_slider_html, vis_w2_decomposition,
-    vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_func_vs_time_distribution,
-    vis_alpha_level_relationship,
-    vis_transferability_map,
+    vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_qm_pred_vs_obs, vis_func_vs_time_distribution,
+    vis_transferability_map, vis_centered_spectrum_loo,
+    vis_centered_distributions, vis_spread_vs_predictors,
+    vis_centered_spectrum_schematic,
+    vis_spread_concept, vis_mlb2_pca,
 )
 from utils.pattern_analysis.space_function import (
     share_lookup_from_landuse, build_od_function_matrix_soft,
@@ -530,29 +532,32 @@ def _with_merged_func(feats):
     return out
 
 
-# ── The CITY-TOTAL estimator's feature set, defined ONCE ─────────────────────
-# Two places estimate a city's total cum_loss from the component predictions:
-# STEP 6's aggr_denorm (the city_total/ headline figure) and STEP 7's
-# _city_score (the level the curve forecast is shifted onto).  They are meant
-# to be the SAME estimator — the quantile mapping shifts onto the number the
-# headline figure reports — and until 2026-08-12 that was maintained by hand,
-# which drifted the moment one side gained features.  Both now read the
-# constants below and build their tables with _with_city_total_feats, so the
-# two cannot disagree again.
+# ── The CITY-TOTAL estimator's COMPONENT (phi) feature set, defined ONCE ─────
+# The city-total estimator has two stages.  phi (the component ridge) predicts
+# each component's standardized cum_loss from the columns named below; its
+# weight_normal aggregate is the city score s.  rho (_city_total_from_scores)
+# then scores [s, r0_city, GDP] and variance-matches onto day-equivalents.  Two
+# places run this estimator: STEP 6's aggr_denorm (the city_total/ headline
+# figure) and STEP 7's _city_score/_city_total_prediction (the level the curve
+# forecast is shifted onto).  They must be the SAME estimator — the quantile
+# mapping shifts onto the number the headline figure reports — so both read the
+# constant below for phi AND call _city_total_from_scores for rho; neither the
+# feature set nor the rho math can drift between them.
 #
-# The set is the 2026-08-12 sandbox result: the 9 base predictors, the 15
+# phi's set is the 2026-08-12 sandbox result: the 9 base predictors, the 15
 # pairwise func-func products, and the CITY-level r0.
 #   interactions — which functions lose activity together is not the sum of the
 #     separate shares; adding the products moved the city LOO R2 from +0.17 to
 #     +0.41 and survived a permutation test on the shuffled component target
 #     (P = 0.003, 300 draws), so it is signal, not 24-features-on-13-cities.
-#   r0_city — 86% of the component r0's variance is WITHIN city, and this
-#     estimator aggregates the component predictions by weight_normal before
-#     scoring, so that within-city signal is averaged away before it reaches
-#     the city number; a city-constant r0 moves the whole city instead.  Nested
-#     LOO (variant chosen inside each fold, never seeing the held city) picks it
-#     in 10 of 13 folds and scores R2 +0.42 — the honest figure; the +0.47 the
-#     fixed choice reports carries the usual selection optimism.
+#   r0_city — 86% of the component r0's variance is WITHIN city, and phi
+#     aggregates the component predictions by weight_normal before scoring, so
+#     that within-city signal is averaged away before it reaches the city
+#     number; a city-constant r0 moves the whole city instead.  It enters BOTH
+#     phi (here) and rho (as the [s, r0_city, GDP] second term).  With rho a
+#     bare scalar-s variance match this scored honest LOO R2 +0.47; giving rho
+#     the [r0_city, GDP] terms lifts it to +0.58 (MAE 0.88, jackknife floor
+#     +0.50) — see _city_total_from_scores.
 FUNC_X_COLS = [f'func_{a}_X_{b}'
                for i, a in enumerate(SF_CATEGORIES)
                for b in SF_CATEGORIES[i + 1:]]
@@ -576,6 +581,80 @@ def _with_city_total_feats(feats):
     out['r0_city'] = (float(w @ out['r0'].to_numpy(dtype=float) / wsum)
                       if wsum > 0 else float(out['r0'].mean()))
     return out
+
+
+# ── The city-total ρ stage: a city-level covariate (metro GDP) and the estimator
+# The component ridge φ (on CITY_TOTAL_FEATURE_COLS) predicts each component's
+# standardized cum_loss; the weight_normal aggregate of those predictions is the
+# city score s.  The ρ stage below scores each unit on [s, r0_city, GDP] and
+# variance-matches onto day-equivalents (see _city_total_from_scores).
+#   GDP — the metro's 2019 real GDP in $thousands (BEA CAGDP2, LineCode 1 "All
+#     industry total", summed over the CBSA's counties).  A PRE-EVENT normal-
+#     period static (the hurricanes span 2019-2022), so no disaster information
+#     enters it; it is an exposure/size proxy — small metros sit fully inside the
+#     storm footprint, large ones mostly outside — and correlates negatively with
+#     cum_loss (metro size, not wealth: per-capita GDP is not significant).
+#     Frozen under data/msa_static/ (provenance: build_msa_features.py), gitignored
+#     runtime data like the graphs and ACS caches.
+MSA_STATIC_CSV = os.path.join('data', 'msa_static', 'msa_features.csv')
+CITY_TOTAL_RIDGE_ALPHAS = np.logspace(-3, 3, 25)
+_MSA_GDP = None
+
+
+def _msa_gdp_table():
+    """{code -> metro 2019 real GDP, $thousands}, read once from MSA_STATIC_CSV.
+    Lazy so importing the module never touches the (gitignored) data tree."""
+    global _MSA_GDP
+    if _MSA_GDP is None:
+        df = pd.read_csv(MSA_STATIC_CSV).set_index('code')
+        _MSA_GDP = {c: float(df.loc[c, 'gdp_2019_kusd']) for c in df.index}
+    return _MSA_GDP
+
+
+def _city_total_from_scores(s_held, x_held, s_train, x_train, gt_train):
+    """The ρ stage of the city-total estimator: map component-aggregate city
+    scores to a city cum_loss in day-equivalents.  Shared by STEP 6 (the
+    city_total/ headline figure) and STEP 7 (the level the curve forecast is
+    shifted onto), so the two cannot drift.
+
+    Inputs, for the held unit and every TRAINING unit: the weight_normal
+    aggregate `s` of that unit's STANDARDIZED component cum_loss predictions
+    (from the component ridge φ on CITY_TOTAL_FEATURE_COLS), the unit's city-level
+    r0 and metro GDP (x = [r0_city, GDP]), and — training only — the observed city
+    cum_loss.  The training `s` values come from an INNER leave-one-out so the
+    held unit never enters its own calibration.
+
+    Two steps:
+      DIRECTION  a ridge (alpha by inner GCV) of city cum_loss on the standardized
+                 [s, r0_city, GDP] gives the linear combination that tracks the
+                 city total; ridge, not OLS, so the three partly collinear
+                 predictors give a stable direction on 12 units.
+      SCALE      the fit is then variance-matched (de-shrunk): its fitted scores
+                 are rescaled so their spread equals the training cum_loss spread,
+                 c_hat = g_mean + (z_hat - z_mean) * sigma_g / sigma_z.  Ridge
+                 deliberately shrinks the fit toward the mean (sigma_z < sigma_g),
+                 which compresses exactly the extreme cities; the rescale removes
+                 that shrinkage while keeping ridge's direction.  With the single
+                 predictor [s] this is the reduced-major-axis (RMA / Model-II)
+                 slope sigma_g / sigma_s and reproduces the pre-2026-08-14 scalar-s
+                 estimator (honest LOO R2 +0.47); adding [r0_city, GDP] as city-
+                 level terms lifts it to +0.58 (MAE 0.88, jackknife floor +0.50).
+
+    Fewer than two usable training units -> NaN (the variance match is undefined;
+    cannot happen at 12 training units)."""
+    if len(s_train) < 2 or not np.isfinite(s_held):
+        return np.nan
+    X = np.column_stack([np.asarray(s_train, dtype=float),
+                         np.asarray(x_train, dtype=float)])
+    y = np.asarray(gt_train, dtype=float)
+    xh = np.concatenate([[float(s_held)], np.asarray(x_held, dtype=float)])
+    mu = X.mean(axis=0); sd = X.std(axis=0); sd[sd == 0] = 1.0
+    Xz = (X - mu) / sd; xhz = (xh - mu) / sd
+    m = RidgeCV(alphas=CITY_TOTAL_RIDGE_ALPHAS).fit(Xz, y)
+    zt = m.predict(Xz)
+    zh = float(m.predict(xhz.reshape(1, -1))[0])
+    sdz = float(zt.std()) or 1.0
+    return float(y.mean() + (zh - zt.mean()) * (float(y.std()) / sdz))
 
 # The resilience target.  cum_loss is computed from the relative-activity curve
 # r, where r(d) = the component's daily total on disaster day d divided by its
@@ -918,6 +997,14 @@ OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, '3-cross_city_resi_pred
 #                  an ordering), while loo_cross_city_r2_baseline.csv stays R²
 #                  as the pipeline-wide headline number.
 OUTPUT_CITY_TOTAL = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'city_total')
+#   centered_distribution/ the third sibling: the CENTRED loss spectrum (the
+#                  within-unit inequality of component cum_loss, level removed).
+#                  That spectrum is what STEP 7's quantile mapping transfers
+#                  across cities, so this folder measures that transfer on its
+#                  own, before the ordering and the city-total anchor are
+#                  applied.  raw/ holds its metrics table.
+OUTPUT_CENTERED_DIST = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED,
+                                    'centered_distribution')
 # Disaster (Saffir-Simpson arrival intensity) vs cum_loss scatter, all
 # city-events pooled (not split into train/test) — filed with the other
 # per-component characteristic lenses.  The x axis is a per-EVENT constant, so
@@ -1274,8 +1361,6 @@ def analysis_decomposition_quality(label, code, X_all, W, H, fit_time_cols):
 
 
 _MSA_CL_COLOR = {1: '#0F4D92', 2: '#4C9F70', 3: '#B64342'}
-_MSA_STORM_MARK = {'Ida': 'o', 'Ian': 's', 'Dorian': '^', 'Isaias': 'D',
-                   'Sally': 'P'}
 # Sequential colormap per cluster for the mapping-PCA points; the base colours
 # above stay on the arrows, so both figures read on one palette.
 _MAPPING_CL_CMAP = {1: 'Blues', 2: 'Greens', 3: 'Reds'}
@@ -1291,53 +1376,6 @@ CLUSTER_GRAPH_SEED = 0
 _FUNC_COLOR = {'residential': '#0F4D92', 'commercial': '#B64342',
                'leisure': '#4C9F70', 'industrial': '#E28E2C',
                'health': '#9A4D8E', 'public': '#42949E'}
-
-
-def analysis_msa_cluster_map(units):
-    """Map the retained units' MSAs, coloured by their RIDGE transfer cluster.
-
-    Filed under component_rank/ridge/ because the colours ARE that partition
-    (read back from cross_city_pair_clusters.csv, which the ridge pairwise
-    heatmap just wrote).  Skips with a note if that file is absent — the map is
-    a downstream overview, not a decomposition diagnostic, so it must never
-    block the pipeline.  Same-coordinate repeats (a city hit twice) are nudged
-    apart so both labels read."""
-    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank', 'ridge',
-                          'raw_data', 'cross_city_pair_clusters.csv')
-    if not os.path.exists(cl_csv):
-        print(f"  [msa map] {cl_csv} absent; skipping.")
-        return
-    cl = pd.read_csv(cl_csv, index_col=0)['cluster']
-
-    import geopandas as gpd
-    rows = []
-    for code, u in units.items():
-        g = u['gdf'].to_crs(4326)
-        c = g.geometry.union_all().centroid
-        rows.append(dict(code=code, label=u['label'],
-                         storm=code.split('_', 1)[1], cluster=int(cl[code]),
-                         lat=c.y, lon=c.x))
-    df = pd.DataFrame(rows)
-    m = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat),
-                         crs=4326).to_crs(3857)
-    df['x'] = m.geometry.x.to_numpy()
-    df['y'] = m.geometry.y.to_numpy()
-    seen = set()
-    for i in range(len(df)):
-        key = (round(df.at[i, 'x']), round(df.at[i, 'y']))
-        if key in seen:                          # a city hit by two storms
-            df.at[i, 'y'] += 45000; df.at[i, 'x'] += 20000
-        seen.add(key)
-
-    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank', 'ridge')
-    df.drop(columns='code').to_csv(
-        os.path.join(out_dir, 'raw_data', 'msa_cluster_map.csv'), index=False)
-    vis_msa_cluster_map(
-        df, _MSA_CL_COLOR, _MSA_STORM_MARK,
-        title='The retained city-events by geography, storm and transfer '
-              'cluster',
-        save_path=os.path.join(out_dir, 'msa_cluster_map.png'))
-    print(f"  [msa map] {len(df)} MSAs -> {out_dir}")
 
 
 def analysis_cluster_mapping_pca(feats_by_code):
@@ -1687,12 +1725,12 @@ def analysis_cluster_function_graph(feats_by_code):
                   for name, _ in groups for a, ax in ((0, 'x'), (1, 'y'))},
                  index=cats).to_csv(
         os.path.join(raw_dir, 'cluster_function_graph_layout.csv'))
+    # One figure, two rows: significance on top, city-event spread below, a
+    # column per group.  They were separate PNGs until 2026-08-21; stacked,
+    # the group title and half the legend are written once instead of twice.
     vis_cluster_function_graph(
-        panels, fdr_q=CLUSTER_GRAPH_FDR_Q,
+        panels, over_panels, _FUNC_COLOR, fdr_q=CLUSTER_GRAPH_FDR_Q,
         save_path=os.path.join(out_dir, 'cluster_function_graph.png'))
-    vis_cluster_function_overlay(
-        over_panels, _FUNC_COLOR,
-        save_path=os.path.join(out_dir, 'cluster_function_overlay.png'))
     # Heatmap companion: the pooled average and each cluster, all in
     # ABSOLUTE (CLR) Spearman rho — the same matrices the graph figure lays
     # out, read cell by cell instead of as a geometry.  Each panel is ordered
@@ -1718,6 +1756,19 @@ def analysis_cluster_function_graph(feats_by_code):
                               rho=float(shown[i, j])))
     pd.DataFrame(hrecs).to_csv(
         os.path.join(raw_dir, 'cluster_function_heatmap.csv'), index=False)
+    # The BOXES, which the rho table above cannot carry: each panel's Louvain
+    # community per function, in that panel's display order.  Without it a
+    # restyle of the heat map needed a whole pipeline run just to recover the
+    # partition it draws.
+    pd.DataFrame(
+        [{'panel': name, 'position': pos, 'func': ordered[pos],
+          'community': int(cid)}
+         for (name, _sel), hp in zip(groups, heat_panels)
+         for start, size, cid in hp['blocks']
+         for pos in range(start, start + size)
+         for ordered in [[lab.lower() for lab in hp['labels']]]]
+    ).to_csv(os.path.join(raw_dir, 'cluster_function_heatmap_blocks.csv'),
+             index=False)
     vis_cluster_function_heatmap(
         heat_panels,
         save_path=os.path.join(out_dir, 'cluster_function_heatmap.png'))
@@ -1855,15 +1906,6 @@ def analysis_cluster_restricted_rank(feats_by_code):
     R.to_csv(os.path.join(raw_dir, 'cluster_restricted_rank.csv'), index=False)
     vis_cluster_restricted_rank(
         R, save_path=os.path.join(out_dir, 'cluster_restricted_rank.png'))
-    # The ridge_cluster VARIANT's headline LOO record (the same rank channel
-    # STEP 7 now trains under RANK_TRAIN_SCOPE='cluster'): per held-out city,
-    # the within-city Spearman of the cluster-trained rank prediction, plus
-    # its estimated cluster.  Parallel to component_rank/ridge/raw_data/.
-    var_raw = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                           'ridge_cluster', 'raw_data')
-    os.makedirs(var_raw, exist_ok=True)
-    R.rename(columns={'rho_est': 'rho_cluster_trained'}).to_csv(
-        os.path.join(var_raw, 'loo_rank_rho.csv'), index=False)
     print(f"  [cluster-restricted rank] assignment {int(R['correct'].sum())}"
           f"/{len(R)}; median rho ALL {R['rho_all'].median():+.2f} -> EST "
           f"{R['rho_est'].median():+.2f} -> {out_dir}")
@@ -1917,11 +1959,11 @@ def analysis_city_mobility_curves(units):
     os.makedirs(raw, exist_ok=True)
     df = pd.DataFrame(rows).set_index('code')
     df.to_csv(os.path.join(raw, 'city_mobility_curves.csv'))
+    # Full "City (Storm)" titles; the two Wilmington events stay distinct.
+    names = {code: f"{u['label']} ({code.split('_', 1)[1]})"
+             for code, u in units.items()}
     vis_city_mobility_curves(
-        curves,
-        title='City-level mobility, day-type-normalized (1.0 = a normal day of '
-              'the same type): minimum (▼) and landfall (red dashed); dotted = '
-              'normal period ends',
+        curves, names=names,
         save_path=os.path.join(OUTPUT_DATA, 'city_mobility_curves.png'))
     late = df[df['min_day_rel_landfall'] != 0]
     note = (f"{len(late)} unit(s) bottom out AFTER landfall day: "
@@ -2059,7 +2101,7 @@ def analysis_od_function(label, tag, H, mapping, weights, landuse,
     print(f"  {label}: O×D flow with land-use data per component: "
           + ", ".join(f"[{i}]={r:.2f}" for i, r in enumerate(retained)))
     vis_heatmap_od_function(
-        M, SF_CATEGORIES, weights=weights, ncols=3,
+        M, SF_CATEGORIES,
         save_path=os.path.join(OUTPUT_FUNC, f'heatmap_od_functionality{tag}.png'),
     )
     # Per-component functional dimensions — the 12 from/to shares, one row per
@@ -2067,6 +2109,25 @@ def analysis_od_function(label, tag, H, mapping, weights, landuse,
     os.makedirs(OUTPUT_FUNC_HM_RAW, exist_ok=True)
     functional_features(M, SF_CATEGORIES).to_csv(
         os.path.join(OUTPUT_FUNC_HM_RAW, f'component_functionality{tag}.csv'))
+    # The heat map's OWN input, long-form: the file above holds only M's
+    # marginals, so the 36 cells per component had to be recomputed on every
+    # run.  With this the figure can be redrawn straight from disk.
+    pd.DataFrame(
+        [{'component': int(i), 'origin': SF_CATEGORIES[a],
+          'destination': SF_CATEGORIES[b], 'proportion': float(M[i, a, b])}
+         for i in range(M.shape[0])
+         for a in range(len(SF_CATEGORIES))
+         for b in range(len(SF_CATEGORIES))]
+    ).to_csv(os.path.join(OUTPUT_FUNC_HM_RAW,
+                          f'od_function_matrix{tag}.csv'), index=False)
+    # `retained` is printed above and was otherwise lost: the share of each
+    # component's flow whose CBGs carried land-use data, i.e. how much of the
+    # component the heat map actually represents.
+    pd.DataFrame({'component': range(len(retained)),
+                  'landuse_coverage': np.asarray(retained, dtype=float)}
+                 ).to_csv(os.path.join(OUTPUT_FUNC_HM_RAW,
+                                       f'landuse_coverage{tag}.csv'),
+                          index=False)
 
     # Functional-entropy distribution across components.  `entropy` is the
     # Shannon entropy of the MERGED exposure (outflow row sums + inflow column
@@ -2534,6 +2595,371 @@ def _city_poi_share(raw_csv, iwf):
     return pd.Series({c: float(out.iloc[0][f'share_{c}']) for c in SF_CATEGORIES})
 
 
+CENTERED_QUANTILE_GRID = np.linspace(0.0005, 0.9995, 2000)
+
+# One colour per hurricane, shared by the city-event map and the descriptive
+# centred-distribution panels so a storm reads the same across the outputs.
+STORM_COLOURS = {'Ida': '#0F4D92', 'Ian': '#B64342', 'Dorian': '#4C9F70',
+                 'Isaias': '#9A4D8E', 'Sally': '#E28E2C'}
+
+# ── ML-B2inc spread increment (adopted 2026-08-18) ───────────────────────────
+# The centred-spectrum SCALE prediction.  B2 — the zero-parameter backbone
+# ratio (spread scale in _quantile_mapped_chat) — is kept as the forced part,
+# and ONE fitted increment is layered on top:
+#     log σ_c = b0_B2 + 1·x_c + γ'PC_c ,   x_c = log s_bb,c
+# γ (K=2 numbers) is the only fitted quantity; γ = 0 reproduces B2 exactly, so
+# the increment is nested and L2-shrinks toward the current behaviour.  PC are
+# the leading PCs of a 21-feature block per city: the 15 pairwise Pearson
+# correlations of the six merged functional shares across the unit's
+# components, PLUS the 6 log-variances — the diagonal of the same 6×6
+# covariance matrix, which correlations normalise away — PLUS the
+# log-variance of the components' median income (adopted 2026-08-18:
+# repo-protocol LOO 1.486 -> 1.474, 8/13 units; flow-distance variance was
+# tested in the same slot and HURT, 1.494, so it stays out).  The 13-unit LOO
+# bake-off (2026-08): corr-only 1.402, corr+var 1.392, against B2 1.465 mean
+# W1; covariances (corr × scale entangled in one number) 1.645, significantly
+# WORSE than the ref (p = 0.017) — the diagonal helps only as separate columns
+# next to the correlations, never multiplied into them.  γ is fitted by
+# full-shape profile likelihood (residual density estimated by a Gaussian KDE
+# on the pooled standardized residuals, alternated with the scale fit), and
+# the two hyper-parameters — KDE bandwidth h and L2 strength λ — are chosen by
+# an inner LOO over the training units, so the held unit touches nothing.
+MLB2_FUNCS = ('residential', 'commercial', 'leisure', 'industrial',
+              'health', 'public')
+MLB2_K = 2
+MLB2_H_GRID = (0.25, 0.40)
+MLB2_LAM_GRID = (0.0, 1.0, 10.0, 100.0)
+
+
+def _backbone_spread(r0_vec, days, mu_a):
+    """Within-city sd of the BACKBONE-implied losses Σ_d (1 − logistic(d; r0_j,
+    mu_a)) over the components with a usable anchor — the observable spread
+    proxy (x = log of this) that both B2's ratio and the ML-B2inc fit rely on.
+    NaN when fewer than two components qualify."""
+    v = [float(np.sum(1.0 - 1.0 / (1.0 + (1.0 / r - 1.0)
+                                   * np.exp(-mu_a * days))))
+         for r in np.asarray(r0_vec, dtype=float)
+         if np.isfinite(r) and r > 1e-6]
+    return float(np.std(v)) if len(v) >= 2 else np.nan
+
+
+def _mlb2_feature_vec(f):
+    """A unit's 22-feature block: [15 pairwise correlations, 6 log-variances]
+    of the six merged (from+to) functional shares across its cum_loss-usable
+    components, plus the log-variance of the components' median income.
+    Correlations carry the pairing structure, log-variances the per-function
+    dispersion the correlations normalise away; they enter as separate columns
+    (the covariance packaging of the same information tested significantly
+    worse).  The income column earns its seat the same way: the income signal
+    is WITHIN-city component spread, and its dispersion adds to the block
+    (repo-protocol LOO 1.486 -> 1.474) where the flow-distance dispersion
+    subtracts (1.494) — tested one at a time, 2026-08-18.  None when the unit
+    has < 3 usable components or < 3 finite income values."""
+    ok = np.isfinite(f['cum_loss'].to_numpy(dtype=float))
+    if ok.sum() < 3:
+        return None
+    F = np.column_stack([(f[f'share_from_{k}'] + f[f'share_to_{k}'])
+                         .to_numpy(dtype=float) for k in MLB2_FUNCS])[ok]
+    sig = np.cov(F, rowvar=False, ddof=0)
+    corr = np.zeros(15)
+    for i, (a, b) in enumerate(itertools.combinations(range(6), 2)):
+        u, v = F[:, a], F[:, b]
+        if u.std() > 1e-12 and v.std() > 1e-12:
+            corr[i] = float(np.corrcoef(u, v)[0, 1])
+    if 'median_income_combined' not in f.columns:
+        return None
+    inc = f['median_income_combined'].to_numpy(dtype=float)[ok]
+    inc = inc[np.isfinite(inc)]
+    if len(inc) < 3:
+        return None
+    return np.concatenate([corr, np.log(np.diag(sig) + 1e-12),
+                           [np.log(np.var(inc) + 1e-12)]])
+
+
+def _mlb2_fit(train, cen_by, sbb_by, vec_by, h, lam, pg):
+    """Fit γ on `train` at one (h, λ).  Returns (γ, project, b0_B2, x̄, bary):
+    `project` maps a unit's 21-vector onto the K training-city PCs (z-scored,
+    train-only), b0_B2 is B2's own implied intercept — so γ = 0 reproduces the
+    plain backbone-ratio scaling exactly — and `bary` the training barycentre.
+    γ maximises the full-shape profile likelihood: residuals y/σ share one
+    density, estimated by a Gaussian KDE of bandwidth h on the standardized
+    pooled residuals, with an L2 penalty λ‖γ‖² shrinking toward B2."""
+    E = np.vstack([vec_by[c] for c in train])
+    mu, sd = E.mean(0), E.std(0)
+    sd[sd == 0] = 1.0
+    ctr = ((E - mu) / sd).mean(0)
+    P = np.linalg.svd((E - mu) / sd - ctr, full_matrices=False)[2][:MLB2_K]
+
+    def project(code):
+        return P @ ((vec_by[code] - mu) / sd - ctr)
+
+    bary = np.mean([np.quantile(cen_by[c], pg) for c in train], axis=0)
+    bary = bary - bary.mean()
+    xb = float(np.mean([np.log(sbb_by[c]) for c in train]))
+    b0 = xb - float(np.log(np.mean([sbb_by[c] for c in train]))) \
+        + float(np.log(bary.std()))
+    X = np.array([np.log(sbb_by[c]) - xb for c in train])
+    G = np.vstack([project(c) for c in train])
+    yv = np.concatenate([cen_by[c] for c in train])
+    rep = np.concatenate([np.full(len(cen_by[c]), i)
+                          for i, c in enumerate(train)]).astype(int)
+
+    def negll(g):
+        sig = np.exp(b0 + X + G @ g)
+        eps = yv / sig[rep]
+        centers = eps / eps.std()
+        d = eps[:, None] - centers[None, :]
+        dens = np.exp(-0.5 * (d / h) ** 2).sum(1) / (len(centers) * h
+                                                     * np.sqrt(2 * np.pi))
+        ll = -float(np.sum(np.log(sig[rep]))) \
+            + float(np.sum(np.log(np.maximum(dens, 1e-300))))
+        return -ll + lam * float(np.sum(g ** 2))
+
+    g0 = np.zeros(MLB2_K)
+    r = minimize(negll, g0, method='Nelder-Mead',
+                 options=dict(xatol=1e-4, fatol=1e-7, maxiter=1200))
+    g = r.x if r.fun <= negll(g0) else g0        # never worse than B2's γ = 0
+    return g, project, b0, xb, bary
+
+
+def _mlb2_spread_multiplier(held, rest, cen_by, sbb_by, vec_by,
+                            pg=CENTERED_QUANTILE_GRID):
+    """exp(γ'PC_held), the fitted correction ML-B2inc layers on B2's backbone-
+    ratio spread scale.  (h, λ) are chosen by an inner LOO over the training
+    units — each candidate is scored by the W1 between its scaled barycentre
+    and the left-out training unit's true centred spectrum, the same metric
+    the branch is judged by — then γ is refit on all training units at the
+    winning pair.  Falls back to 1.0 (= plain B2) when the held unit's feature
+    block or too many training ingredients are missing."""
+    train = [c for c in rest
+             if c in cen_by and c in vec_by
+             and np.isfinite(sbb_by.get(c, np.nan))]
+    if held not in vec_by or len(train) < 4:
+        return 1.0
+    best, cfg = None, None
+    for h in MLB2_H_GRID:
+        for lam in MLB2_LAM_GRID:
+            errs = []
+            for t in train:
+                tr = [c for c in train if c != t]
+                g, proj, b0, xb, bary = _mlb2_fit(tr, cen_by, sbb_by, vec_by,
+                                                  h, lam, pg)
+                sd_hat = float(np.exp(b0 + (np.log(sbb_by[t]) - xb)
+                                      + proj(t) @ g))
+                crv = bary * (sd_hat / bary.std())
+                crv = crv - crv.mean()
+                errs.append(float(np.abs(crv - np.quantile(cen_by[t], pg))
+                                  .mean()))
+            m = float(np.mean(errs))
+            if best is None or m < best:
+                best, cfg = m, (h, lam)
+    g, proj, _, _, _ = _mlb2_fit(train, cen_by, sbb_by, vec_by,
+                                 cfg[0], cfg[1], pg)
+    return float(np.exp(proj(held) @ g))
+
+
+def analysis_centered_spectrum(feats_test, codes):
+    """Score the CENTRED-SPECTRUM transfer on its own, leave-one-unit-out.
+
+    STEP 7's quantile mapping assembles a unit's component cum_loss from three
+    separable parts: an ORDERING (the rank channel), a LEVEL (the city-total
+    anchor) and, between them, the shape-and-width of the unit's CENTRED loss
+    spectrum -- how unequally its components fared once the unit's own mean is
+    removed.  Only that middle part is measured here, so a gain or loss in it is
+    not confounded with the other two.
+
+    Estimator, the same one _quantile_mapped_chat uses: the WASSERSTEIN
+    BARYCENTRE of the other units' centred spectra — their quantile functions
+    averaged, not their samples pooled (see the `shape` note in
+    _quantile_mapped_chat for why) — SCALED by the predicted spread: B2's
+    backbone ratio times the fitted ML-B2inc increment exp(γ'PC) (see the
+    MLB2_* block above).  Both spread ingredients are recomputed per fold from
+    the training units only, with the fold's backbone rate mu_a taken as the
+    pooled-train mean recovery_alpha — the same statistic STEP 7 uses — so the
+    scored estimator is the one production applies.
+
+    Metric W1, the 1-Wasserstein distance between the predicted and the true
+    centred spectrum, evaluated as the mean |difference| of their quantile
+    functions -- equivalently the area between their CDFs, which is what the
+    figure shades.  Day-equivalents, lower better.  W1 is not an arbitrary
+    choice: under the comonotone assignment the mapping performs, the
+    per-component error is exactly W1 plus what the ordering gets wrong, so W1
+    is precisely the part this transfer owns.
+
+    SKILL normalises W1 against the do-nothing predictor -- forecast NO
+    within-unit inequality at all, i.e. put every component at the unit mean, a
+    point mass at 0 on the centred scale.  Its W1 against the truth is
+    integral |Q_T(p)| dp, the average distance mass must travel from the unit
+    mean to where the components actually are, so
+    skill = 1 - W1 / W1_null:  1 perfect, 0 no better than predicting a flat
+    spectrum, negative worse than that.  Note Q_T is the LINEARLY INTERPOLATED
+    quantile function (np.quantile's default, the same representation the
+    prediction and _quantile_mapped_chat's template use, so the comparison is
+    like-for-like); that is NOT the same as the mean absolute centred loss the
+    n atoms would give -- interpolating between few order statistics fills the
+    gaps and pulls mass inward, e.g. CH_Dorian 1.123 against 1.434 over its 5
+    components.  Being a ratio, skill is comparable across units, but a unit
+    whose components genuinely all fared alike has a tiny denominator and can
+    post a large negative skill on a small absolute error (CH_Dorian: W1 2.67,
+    only the 12th largest of 13, but skill -1.38 because its W1_null is the
+    smallest at 1.12) -- read skill and W1 together, never skill alone.
+
+    Writes centered_spectrum_loo.png and raw/centered_spectrum_metrics.csv."""
+    cen = {}
+    for c in codes:
+        y = feats_test[c]['cum_loss'].dropna().to_numpy(dtype=float)
+        if len(y) >= 2:
+            cen[c] = y - y.mean()
+    usable = [c for c in codes if c in cen]
+    if len(usable) < 3:
+        print("  [centered_spectrum] fewer than 3 usable units; skipping.")
+        return
+    pg = CENTERED_QUANTILE_GRID
+    days = np.arange(15.0)                       # the shared disaster window
+    vec_by = {c: _mlb2_feature_vec(feats_test[c]) for c in usable}
+    vec_by = {c: v for c, v in vec_by.items() if v is not None}
+    rows, pred = [], {}
+    for held in usable:
+        rest = [c for c in usable if c != held]
+        bary = np.mean([np.quantile(cen[c], pg) for c in rest], axis=0)
+        # fold's backbone rate: pooled-train mean recovery_alpha (STEP 7's mu_a)
+        alph = [feats_test[c]['recovery_alpha'].dropna().to_numpy(dtype=float)
+                for c in rest]
+        alph = np.concatenate([a for a in alph if len(a)]) if alph else []
+        mu_a = float(np.mean(alph)) if len(alph) else np.nan
+        sbb = {c: _backbone_spread(feats_test[c]['r0'].to_numpy(dtype=float),
+                                   days, mu_a) for c in usable}
+        s_train = [sbb[c] for c in rest if np.isfinite(sbb[c]) and sbb[c] > 0]
+        scale = (sbb[held] / float(np.mean(s_train))
+                 if s_train and np.isfinite(sbb.get(held, np.nan)) else 1.0)
+        mult = _mlb2_spread_multiplier(held, rest, cen, sbb, vec_by, pg)
+        est = bary * (scale * mult)
+        est = est - est.mean()
+        qt = np.quantile(cen[held], pg)
+        w1 = float(np.abs(est - qt).mean())
+        null = float(np.abs(qt).mean())          # all mass at the unit mean
+        rows.append(dict(code=held, n=len(cen[held]), W1=w1, W1_null=null,
+                         skill=(1.0 - w1 / null) if null > 0 else np.nan,
+                         spread_scale=scale, mlb2_mult=mult))
+        pred[held] = dict(bary=est, true=cen[held])
+    M = pd.DataFrame(rows).set_index('code').reindex(usable)
+    raw_dir = os.path.join(OUTPUT_CENTERED_DIST, 'raw')
+    os.makedirs(raw_dir, exist_ok=True)
+    M.to_csv(os.path.join(raw_dir, 'centered_spectrum_metrics.csv'))
+    # Schematic twin of the LOO grid: ONE unlabelled panel showing what W1
+    # measures.  The fold shown is the MEDIAN-W1 one, chosen by rule rather
+    # than by eye so the illustration is not a flattering pick.
+    mid = M['W1'].sort_values().index[len(M) // 2]
+    vis_centered_spectrum_schematic(
+        pred[mid]['bary'], pred[mid]['true'],
+        save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                               'centered_spectrum_schematic.png'))
+    labels = {c['code']: c['label'] for c in CITY_EVENTS}
+    names = {code: f"{labels.get(code, code)} ({code.split('_', 1)[-1]})"
+             for code in usable}
+    # Descriptive companion: the OBSERVED centred spectra this branch transfers,
+    # pooled and per unit.  ONE colour for every unit: the comparison each panel
+    # asks for is unit against the pooled reference, and colouring by hurricane
+    # invites a between-storm reading the panels do not support.
+    storm_col = {code: '#0F4D92' for code in usable}
+    vis_centered_distributions(
+        {c: cen[c] for c in usable}, names=names, storms=storm_col,
+        save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                               'centered_distributions.png'))
+
+    # Spread-predictor diagnostics: what tracks the WIDTH the model must
+    # predict?  x is that width (the SD of the centred spectrum, i.e. the
+    # sigma of ML-B2inc); y is each candidate.  DESCRIPTIVE — computed on all
+    # units at once, so they show association, not held-out skill.  The model
+    # ingests the dispersion candidates as LOG-variances; SD is plotted because
+    # it shares the target's units, and log is monotone so the sign and the
+    # ordering of the association carry over unchanged.
+    mu_all = np.concatenate([feats_test[c]['recovery_alpha'].dropna()
+                             .to_numpy(dtype=float) for c in usable])
+    mu_all = float(np.mean(mu_all)) if len(mu_all) else np.nan
+    tgt = {c: float(np.std(cen[c])) for c in usable}
+    # Every DISPERSION candidate in one figure — the backbone spread, the six
+    # functional shares and income — since they answer the same question and
+    # only differ in which quantity is being dispersed.  Flow distance is not
+    # among them: it was tested in this slot and made the spread prediction
+    # worse (1.486 -> 1.494), so it is out of the block and out of the figure.
+    sdvar, fcorr = {}, {}
+
+    def sd_of(v):
+        v = v[np.isfinite(v)]
+        return float(np.std(v)) if v.size else np.nan
+
+    for c in usable:
+        f = feats_test[c]
+        ok = np.isfinite(f['cum_loss'].to_numpy(dtype=float))
+        F = np.column_stack([(f[f'share_from_{k}'] + f[f'share_to_{k}'])
+                             .to_numpy(dtype=float) for k in MLB2_FUNCS])[ok]
+        # Row-major order chosen so the two NON-functional candidates hold
+        # column 1 -- backbone on the top row, income directly below it -- and
+        # the six functional shares fill columns 2-4; gap_after=0 then sets
+        # that first column apart.
+        sdvar.setdefault('backbone spread from $r_0$', {})[c] = (
+            _backbone_spread(f['r0'].to_numpy(dtype=float), np.arange(15.0),
+                             mu_all))
+        for i in range(3):
+            sdvar.setdefault(f'SD of {MLB2_FUNCS[i]} share', {})[c] = (
+                sd_of(F[:, i]))
+        sdvar.setdefault('SD of median income', {})[c] = (
+            sd_of(f['median_income_combined'].to_numpy(dtype=float)[ok]))
+        for i in range(3, 6):
+            sdvar.setdefault(f'SD of {MLB2_FUNCS[i]} share', {})[c] = (
+                sd_of(F[:, i]))
+        for a, b in itertools.combinations(range(6), 2):
+            u, v = F[:, a], F[:, b]
+            key = f'corr {MLB2_FUNCS[a]} - {MLB2_FUNCS[b]}'
+            fcorr.setdefault(key, {})[c] = (
+                float(np.corrcoef(u, v)[0, 1])
+                if u.std() > 1e-12 and v.std() > 1e-12 else np.nan)
+    vis_spread_vs_predictors(
+        tgt, sdvar, storms=storm_col, ncol=4, gap_after=0,
+        xlabel='candidate predictor',
+        save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                               'spread_vs_predictors_sd.png'))
+    vis_spread_vs_predictors(
+        tgt, fcorr, storms=storm_col, ncol=5,
+        xlabel='within-city correlation between the paired functional shares',
+        save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                               'spread_vs_predictors_func_corr.png'))
+
+    # The PCA step itself: which raw features the two components are built
+    # from, and where each unit lands in the plane gamma operates on.
+    pca_block = {c: _mlb2_feature_vec(feats_test[c]) for c in usable}
+    pca_block = {c: v for c, v in pca_block.items() if v is not None}
+    if len(pca_block) >= 4:
+        fnames = ([f'corr {a} - {b}'
+                   for a, b in itertools.combinations(MLB2_FUNCS, 2)]
+                  + [f'log var {k}' for k in MLB2_FUNCS]
+                  + ['log var median income'])
+        vis_mlb2_pca(
+            pca_block, fnames, names=names,
+            save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                                   'spread_feature_pca.png'))
+
+    # Conceptual pair: the one degree of freedom the spread channel controls.
+    # units_per_inch is shared, so the two files' widths are to scale.
+    pooled_all = np.concatenate([cen[c] for c in usable])
+    for tag, sc in (('widened', 1.6), ('narrowed', 0.6)):
+        # Type and height grow with the frame, but SUBLINEARLY (exponent 0.45):
+        # matching the width ratio outright would leave the wide file with
+        # labels taller than its own plotting area.
+        g = (sc / 0.6) ** 0.45
+        vis_spread_concept(
+            pooled_all, sc, font_scale=g, height=5.2 * g,
+            save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                                   f'spread_concept_{tag}.png'))
+    vis_centered_spectrum_loo(
+        pred, M, names=names,
+        save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                               'centered_spectrum_loo.png'))
+    print(f"  [centered_spectrum] mean W1 {M.W1.mean():.3f} day-eq, mean skill "
+          f"{M.skill.mean():+.3f} over {len(M)} units -> {OUTPUT_CENTERED_DIST}")
+
+
 def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, global_iwf,
                                   method='pearson', target_std='pooled_train'):
     """Reconstruct a CITY-LEVEL cum_loss from the cross-city component predictions (pooled
@@ -2567,14 +2993,15 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     the honest nested-LOO figure).  cosine-kNN stays on the original 9 features.
 
     The headline predictions are the aggr_denorm strategy — keep the standardized
-    component predictions, AGGREGATE them to a city score, then DENORMALIZE to
-    day-equivalents with a 1-parameter city-scale VARIANCE MATCH learned NESTED-LOO on
-    the other training cities (never the held city); the name is those three steps in
-    order — run on the pooled features EXTENDED by r0 (the component's observed day-0
-    baseline-normalized activity), under BOTH predictors (cosine-kNN and RidgeCV), into
-    decomp_pred_aggr_denorm/<model>/: the 13-point LOO calibration scatter (predicted vs
-    actual city cum_loss, R² quantified) + raw_data/city_pred.csv.  (A denorm_aggr
-    sibling strategy was measured 2026-08-04 and removed — see the comment at _fold_ex.)
+    component predictions, AGGREGATE them to a city score s, then DENORMALIZE to
+    day-equivalents through the shared rho stage (_city_total_from_scores): a ridge
+    of city cum_loss on [s, r0_city, GDP] gives the direction, then a city-scale
+    VARIANCE MATCH (de-shrink) sets the level, both learned NESTED-LOO on the other
+    training cities (never the held city).  Run under BOTH predictors (cosine-kNN and
+    RidgeCV), into decomp_pred_aggr_denorm/<model>/: the 13-point LOO calibration
+    scatter (predicted vs actual city cum_loss, R² quantified) + raw_data/city_pred.csv.
+    (A denorm_aggr sibling strategy was measured 2026-08-04 and removed — see the
+    comment at _fold_ex.)
 
     Saves a two-panel figure (panel a: observed city cum_loss as bars with each
     prediction as a marker on an error stem, cities sorted by observed loss; panel b:
@@ -2597,6 +3024,11 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
 
     train_merged = {c: _merge(feats_by_city[c]) for c in codes}
     test_merged  = {c: _merge(feats_test[c]) for c in codes}
+
+    def _r0_city(c):
+        """The unit's city-level r0 (constant within the city), the second
+        predictor of the rho stage after the aggregate score s."""
+        return float(train_merged[c]['r0_city'].iloc[0])
 
     # ── Decomposition-FREE baseline inputs ──
     # Per city (no NMF): the city-level GROUND-TRUTH cum_loss (total activity curve)
@@ -2663,13 +3095,12 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         pcity = float((w * pred_raw).sum() / wsum) if wsum > 0 else float(pred_raw.mean())
         return dict(pcity=pcity)
 
-    # ── The aggr_denorm STRATEGY on features + r0, both predictors ──
-    # Same component-level transfer as _fold but with r0 (each component's
-    # observed day-0 baseline-normalized activity — leak-free initial condition,
-    # cross-city comparable, already a STEP-7 pooled predictor) appended to the
-    # pooled features, and the predictor selectable.  Returns scity, the
-    # weight_normal aggregate of the STANDARDIZED component predictions, which
-    # the caller rescales at CITY scale (nested-LOO variance match).
+    # ── The aggr_denorm STRATEGY, both predictors ──
+    # Same component-level transfer as _fold, predictor selectable.  Returns
+    # scity, the weight_normal aggregate of the STANDARDIZED component
+    # predictions (= the city score s), which the caller feeds — with the unit's
+    # r0_city and GDP — to the shared rho stage _city_total_from_scores (city-
+    # level ridge on [s, r0_city, GDP] then a nested-LOO variance match).
     # (A denorm_aggr sibling — invert each component with the pooled-train
     # (mu, sigma) BEFORE aggregating — was measured 2026-08-04 and removed: an
     # affine denorm commutes with the weighted average, so it only swaps the
@@ -2747,29 +3178,27 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
                'cum_loss_pred_knn': pred_knn, 'cum_loss_baseline': base}
 
         # The aggr_denorm strategy x the same two predictors as the rank
-        # channel, on features + r0: aggregate the standardized scores, then
-        # the nested-LOO city-scale variance match (the inner scitys must come
-        # from the SAME predictor and feature set, so the nested loop reruns
-        # _fold_ex per fold).  Fewer than 2 usable inner cities -> NaN (the
-        # variance match is undefined; cannot happen at 12 training units).
+        # channel: aggregate the standardized component scores into s, then the
+        # city-level rho stage (_city_total_from_scores) scores [s, r0_city, GDP]
+        # and variance-matches onto day-equivalents.  The inner s values must
+        # come from the SAME predictor and feature set, so the nested loop reruns
+        # _fold_ex per fold.  Both predictors go through the identical rho stage,
+        # so the figure stays a like-for-like comparison of the PREDICTOR.
         for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
             outer_ex = _fold_ex(held, rest, model_id)
             if outer_ex is None:
                 row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = np.nan
                 continue
-            s_in2, gt_in2 = [], []
+            s_in2, x_in2, gt_in2 = [], [], []
             for s2 in rest:
                 inn2 = _fold_ex(s2, [c for c in rest if c != s2], model_id)
                 if inn2 is not None:
-                    s_in2.append(inn2['scity']); gt_in2.append(gt[s2])
-            if len(s_in2) >= 2:
-                s_in2, gt_in2 = np.array(s_in2), np.array(gt_in2)
-                sd_s2 = s_in2.std()
-                row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = float(
-                    gt_in2.mean() + (outer_ex['scity'] - s_in2.mean())
-                    * (gt_in2.std() / (sd_s2 if sd_s2 > 0 else 1.0)))
-            else:
-                row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = np.nan
+                    s_in2.append(inn2['scity'])
+                    x_in2.append([_r0_city(s2), _msa_gdp_table()[s2]])
+                    gt_in2.append(gt[s2])
+            row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = _city_total_from_scores(
+                outer_ex['scity'], [_r0_city(held), _msa_gdp_table()[held]],
+                s_in2, x_in2, gt_in2)
 
         rows.append(row)
 
@@ -2836,6 +3265,37 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
                                     'bar_cross_city_resi_pred.png'),
         pred_cols=bar_pred_cols,
         baseline_label='City-similarity baseline (no decomposition)')
+    # Which CITY-level quantities track the city total at all?  Same renderer
+    # as the spread diagnostics, so the two figures read the same way.  These
+    # are the covariates the rho stage may draw on: GDP and the day-0 anchor
+    # are its actual predictors, the two event-level severity measures are the
+    # obvious candidates a reader will ask about.  DESCRIPTIVE -- computed on
+    # all units at once, so association, not held-out skill.
+    def _r0_city_of(c):
+        f = feats_test[c]
+        w = f['weight_normal'].to_numpy(dtype=float)
+        r = f['r0'].to_numpy(dtype=float)
+        return float(w @ r / w.sum()) if w.sum() > 0 else float(np.nanmean(r))
+
+    gdp = _msa_gdp_table()
+    nl = chr(10)
+    city_pred = {
+        'landfall day $r_0$':
+            {c: _r0_city_of(c) for c in codes},
+        'hurricane intensity' + nl + 'Saffir-Simpson at arrival':
+            {c: float(feats_test[c]['hurricane_intensity'].iloc[0])
+             for c in codes},
+        'evacuation order strength' + nl + 'population-weighted':
+            {c: float(feats_test[c]['evac_level'].iloc[0]) for c in codes},
+        'MSA real GDP, 2019':
+            {c: gdp[c] for c in codes},
+    }
+    vis_spread_vs_predictors(
+        {c: gt[c] for c in codes}, city_pred, ncol=4, title_fontsize=24,
+        xlabel='candidate predictor', ylabel='city total loss',
+        save_path=os.path.join(OUTPUT_CITY_TOTAL,
+                               'city_total_vs_predictors.png'))
+
     print(f"  [cross_city_resi_pred] -> {OUTPUT_CITY_TOTAL} "
           f"({len(res)} city-events)")
 
@@ -3009,12 +3469,13 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
     pd.Series(cl_labels, name='cluster').rename_axis('code').loc[ordered].to_csv(
         os.path.join(raw_dir, 'cross_city_pair_clusters.csv'))
     vis_heatmap_pair_transfer(
-        mat, title=f'Pairwise cross-city cum_loss rank transfer, Spearman ρ '
-                   f'(each unit at its own rank-CV k)\nLouvain transfer '
-                   f'communities boxed (γ={PAIR_LOUVAIN_RESOLUTION}); diagonal '
-                   f'(within-unit LOO) excluded',
-        xlabel='test city-event', ylabel='train city-event', blocks=blocks,
-        vmax=1.0, cbar_label='Spearman ρ',
+        mat, xlabel='test city-event', ylabel='train city-event',
+        blocks=blocks, vmax=1.0, cbar_label='Spearman ρ',
+        # Abbreviated ticks: 13 full city-event names on both axes crowd the
+        # grid and shrink the cells; the code already carries the storm, which
+        # is the part that has to stay (Wilmington appears under two storms).
+        names={c['code']: c['code'].replace('_', ' (') + ')'
+               for c in CITY_EVENTS},
         save_path=os.path.join(out_dir, 'cross_city_pair_heatmap.png'))
     print(f"  [pairwise] cum_loss Spearman ρ heatmap ({method}) -> "
           f"{os.path.join(out_dir, 'cross_city_pair_heatmap.png')}  "
@@ -3194,11 +3655,20 @@ def analysis_transferability(feats_test, codes):
 #           by weight_normal.
 # 'city'  — city-wise: ONE α for the whole city predicted from the OTHER
 #           cities' city-level features (decomposition-free analog of 'pred').
+# 'pred' carries NO model tag on purpose.  It used to read "(kNN)" from the
+# days when the component channel WAS a cosine-kNN; it is now a three-branch
+# composite -- ORDER from the ridge rank channel, SHAPE from the barycentre
+# scaled by the backbone ratio times the ML-B2inc increment, LEVEL from the
+# ridge-plus-de-shrink city total.  The cosine-kNN raw channel survives only as
+# a fallback for components without a usable rank score, and at the current
+# 81/81 coverage it contributes nothing, so naming the line after it was wrong.
+# 'city' DOES stay tagged kNN: that baseline really is a cosine-kNN over city
+# feature vectors predicting one city-level alpha.
 _CURVE_METHOD_LABELS = {
-    'pred':       'Component-wise pred (kNN)',
-    'city':       'City-wise pred (kNN)',
-    'oracle':     'Own-fit (oracle)',
-    'train_mean': 'Train-mean',
+    'pred':       'component-based prediction',
+    'city':       'city-wise prediction (kNN)',
+    'oracle':     'oracle',
+    'train_mean': 'train-mean',
 }
 
 # Which method lines appear in the CITY-LEVEL figures (the magnitude overlay and
@@ -3327,6 +3797,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
     train_merged = {c: _merge(feats_by_city[c]) for c in codes}
     test_merged = {c: _merge(feats_test[c]) for c in codes}
+
+    def _r0_city(c):
+        """The unit's city-level r0 (constant within the city), the rho stage's
+        second predictor after the aggregate score s."""
+        return float(train_merged[c]['r0_city'].iloc[0])
 
     # RANK_TRAIN_SCOPE='cluster': the rank channel below trains each held-out
     # city only on its ESTIMATED transfer cluster.  Clusters come from the
@@ -3550,64 +4025,70 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         return float((w * yp).sum() / w.sum()) if w.sum() > 0 else float(yp.mean())
 
     def _city_total_prediction(held, rest):
-        """Predicted CITY cum_loss in day-equivalents: map the held unit's
-        standardized city score onto the day-equivalent scale with a
-        one-parameter variance match, whose mean and scale come from a NESTED
-        leave-one-out over the training units only, so the held unit never
-        enters its own calibration.
+        """Predicted CITY cum_loss in day-equivalents: the rho stage of the
+        city-total estimator, shared verbatim with STEP 6 through
+        _city_total_from_scores, so the city total the quantile mapping shifts
+        onto and the city_total/ headline figure are the same estimator.
 
-        Since 2026-08-04 this matches STEP 6's surviving aggr_denorm strategy —
-        pooled features + observed r0, predictor CURVE_PRED_CITY_MODEL (ridge,
-        the only variant that calibrates at 13 units: LOO R² +0.17, MAE 1.26)
-        — so the city total the quantile mapping shifts onto and the city_total/
-        headline figure are the same estimator again.  (Until that date this
-        function kept the pre-r0 cosine-kNN recipe after STEP 6 dropped it.)
-
-        This is the location the quantile mapping shifts onto.  It replaces the
-        raw channel's weight_normal aggregate because the variance match uses
-        the SMALL city-to-city dispersion of cum_loss instead of the large
-        per-component one: measured on the five units, city-total MAE 0.270
-        against 0.785 day-equivalents.  NaN when the calibration cannot be
-        formed, and the caller then falls back to the raw aggregate."""
+        The held unit's aggregate score s and every training unit's inner-LOO s
+        (predictor CURVE_PRED_CITY_MODEL, the shared CITY_TOTAL_FEATURE_COLS) are
+        scored on [s, r0_city, GDP] by a ridge whose fit is then variance-matched
+        onto day-equivalents; the nested leave-one-out over the training units
+        keeps the held unit out of its own calibration.  The variance match uses
+        the SMALL city-to-city dispersion of cum_loss instead of the large per-
+        component one, which is what makes an absolute city total meaningful.
+        NaN when the calibration cannot be formed, and the caller then falls
+        back to the raw aggregate."""
         outer = _city_score(held, rest)
-        s_in, g_in = [], []
+        s_in, x_in, g_in = [], [], []
         for t in rest:
             v = _city_score(t, [c for c in rest if c != t])
             if np.isfinite(v):
-                s_in.append(v); g_in.append(gt_cum[t])
-        if not np.isfinite(outer) or len(s_in) < 2:
-            return np.nan
-        s_in, g_in = np.asarray(s_in), np.asarray(g_in)
-        sd_s = float(s_in.std())
-        return float(g_in.mean() + (outer - s_in.mean())
-                     * (float(g_in.std()) / (sd_s if sd_s > 0 else 1.0)))
+                s_in.append(v)
+                x_in.append([_r0_city(t), _msa_gdp_table()[t]])
+                g_in.append(gt_cum[t])
+        return _city_total_from_scores(
+            outer, [_r0_city(held), _msa_gdp_table()[held]], s_in, x_in, g_in)
 
-    def _cbase_spread(r0_vec, days, mu_a):
-        """Within-city standard deviation of the BACKBONE-implied losses, i.e.
-        of Σ_d (1 − logistic(d; r0_j, mu_a)) over the components with a usable
-        anchor.  Every input is observed (each component's r0) or already
-        pooled-train (the mean rate), so this quantity is available for the
-        held-out unit as well; it is the observable proxy the spread scaling
-        below relies on.  NaN when fewer than two components qualify."""
-        v = [float(np.sum(1.0 - 1.0 / (1.0 + (1.0 / r - 1.0)
-                                       * np.exp(-mu_a * days))))
-             for r in np.asarray(r0_vec, dtype=float)
-             if np.isfinite(r) and r > 1e-6]
-        return float(np.std(v)) if len(v) >= 2 else np.nan
-
-    def _quantile_mapped_chat(chat_raw, score, obs, wn, rest, mu_a, c_city):
+    def _quantile_mapped_chat(chat_raw, score, obs, wn, rest, mu_a, c_city,
+                              spread_mult=1.0):
         """Component cum_loss predictions assembled by QUANTILE MAPPING, the
         comonotone assignment, i.e. the optimal-transport map on the line.
         Four ingredients, each contributing what it transfers best:
 
           ordering  the rank-path score (who loses more, within the city);
-          shape     the pooled-TRAIN cum_loss distribution — components ranked
-                    k of n get its (k−0.5)/n quantiles.  This replaces the raw
-                    kNN values' spread, which a kernel smoother compresses
-                    toward the mean (it cannot extrapolate);
+          shape     the WASSERSTEIN BARYCENTRE of the training units' centred
+                    cum_loss spectra — each unit's own quantile function is
+                    evaluated at the (k−0.5)/n positions and those functions are
+                    AVERAGED; components ranked k of n get that average.  This
+                    replaces the raw kNN values' spread, which a kernel smoother
+                    compresses toward the mean (it cannot extrapolate).
+                    Averaging quantile functions, not pooling the samples, is
+                    what makes the template a spectrum a CITY could have.  A
+                    pooled sample is the marginal over components, and a mixture
+                    of differently-spread distributions is wider than any of its
+                    parts: pooling reports the ROOT-MEAN-SQUARE of the units'
+                    spreads where the barycentre reports their MEAN (5.46 vs
+                    5.11 over the 13 units; RMS >= mean by Jensen, with equality
+                    only if every unit were equally spread, and the units differ
+                    4.8-fold).  Pooling also weights a unit by its COMPONENT
+                    COUNT (12/81 against 5/81), i.e. by how finely the NMF rank
+                    happened to split it, whereas the barycentre weights the 13
+                    units equally, matching the level the estimand lives at.  And
+                    it is the mean under the very geometry this branch is judged
+                    and consumed in: the assignment below is the 1-D optimal-
+                    transport map and the error decomposition is W1, so the
+                    Frechet mean under W1 is the self-consistent average.  The
+                    barycentre is also invariant to the centring above (averaging
+                    quantile functions turns a per-unit mean into one constant,
+                    which the location ingredient absorbs), so the between-city
+                    level can no longer leak into the shape by construction;
+                    _centred is kept only so the template reads as centred.
           spread    those quantiles are SCALED by the ratio of the held unit's
                     backbone-loss spread to the training units' mean backbone-
-                    loss spread (_cbase_spread).  The true within-city cum_loss
+                    loss spread, _backbone_spread), then multiplied by the
+                    fitted ML-B2inc increment exp(γ'PC) (see the MLB2_* block;
+                    1.0 when its ingredients are missing).  The true within-city cum_loss
                     spread differs almost twofold across units and correlates
                     at rank 0.90 with this observable proxy, so a single pooled
                     spread over- or under-disperses most cities.  The RATIO
@@ -3631,26 +4112,35 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         predictions unchanged (the pre-QM production line).  Returns the
         predictions and the applied spread scale (NaN when none was applied)."""
         out = chat_raw.to_numpy(dtype=float).copy()
-        pool = np.concatenate(
-            [train_merged[c]['cum_loss'].dropna().to_numpy(dtype=float)
-             for c in rest] or [np.array([])])
+
+        def _centred(v):
+            """One training unit's component cum_loss on its own mean, so a
+            spectrum describes only WITHIN-city inequality (see `shape` above)."""
+            return v - v.mean() if len(v) else v
+
+        spectra = [_centred(train_merged[c]['cum_loss'].dropna().to_numpy(dtype=float))
+                   for c in rest]
+        spectra = [v for v in spectra if len(v)]
         r0 = np.array([obs.iloc[0, j] if np.isfinite(obs.iloc[:, j]).any()
                        else np.nan for j in range(obs.shape[1])], dtype=float)
         days = obs.index.to_numpy(dtype=float)
         scale = np.nan
-        if score is not None and len(pool):
+        if score is not None and spectra:
             sc = score.to_numpy(dtype=float)
             ok = np.isfinite(sc) & np.isfinite(r0) & (r0 > 1e-6)
             if ok.sum() >= 2:
-                s_test = _cbase_spread(r0, days, mu_a)
-                s_train = [_cbase_spread(train_merged[c]['r0'].to_numpy(dtype=float),
-                                         days, mu_a) for c in rest]
+                s_test = _backbone_spread(r0, days, mu_a)
+                s_train = [_backbone_spread(train_merged[c]['r0'].to_numpy(dtype=float),
+                                            days, mu_a) for c in rest]
                 s_train = [v for v in s_train if np.isfinite(v) and v > 0]
-                scale = (s_test / float(np.mean(s_train))
+                scale = (s_test / float(np.mean(s_train)) * spread_mult
                          if s_train and np.isfinite(s_test) else 1.0)
                 idx = np.where(ok)[0][np.argsort(sc[ok], kind='stable')]
                 pos = (np.arange(len(idx)) + 0.5) / len(idx)
-                out[idx] = scale * np.quantile(pool, pos)
+                # Wasserstein barycentre: average the training units' QUANTILE
+                # FUNCTIONS at the plotting positions, not their samples.
+                out[idx] = scale * np.mean(
+                    [np.quantile(v, pos) for v in spectra], axis=0)
                 if np.isfinite(out).all():
                     loc = (float(c_city) if np.isfinite(c_city)
                            else float(wn @ chat_raw.to_numpy(dtype=float)))
@@ -3825,6 +4315,8 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
     os.makedirs(os.path.join(OUTPUT_CURVE_PRED, 'raw_data'), exist_ok=True)
     metric_rows, par_rows, curve_rows = [], [], []
+    city_curve_page = {}          # code -> (days, gt, lines) for the one-page grid
+    comp_curve_rows = []          # long-form component curves -> raw_data/
     for held in codes:
         rest = [c for c in codes if c != held]
         alpha_hat, mu_a = _param_prediction(held, rest, 'recovery_alpha')
@@ -3864,8 +4356,25 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         wsum = w.sum()
         wn = w / wsum if wsum > 0 else np.full(len(w), 1.0 / len(w))
         city_total_hat = _city_total_prediction(held, rest)
+        # ML-B2inc spread increment, fitted on the training units only (see
+        # the MLB2_* block); falls back to 1.0 when ingredients are missing.
+        days_qm = obs.index.to_numpy(dtype=float)
+        cen_by = {}
+        for c in rest:
+            v = train_merged[c]['cum_loss'].dropna().to_numpy(dtype=float)
+            if len(v) >= 2:
+                cen_by[c] = v - v.mean()
+        sbb_by = {c: _backbone_spread(train_merged[c]['r0'].to_numpy(dtype=float),
+                                      days_qm, mu_a) for c in rest}
+        vec_by = {c: _mlb2_feature_vec(train_merged[c]) for c in rest}
+        vec_by = {c: v for c, v in vec_by.items() if v is not None}
+        vh = _mlb2_feature_vec(test_merged[held])
+        if vh is not None:
+            vec_by[held] = vh
+        spread_mult = _mlb2_spread_multiplier(held, rest, cen_by, sbb_by, vec_by)
         cum_hat, spread_scale = _quantile_mapped_chat(
-            cum_hat_raw, rank_score, obs, wn, rest, mu_a, city_total_hat)
+            cum_hat_raw, rank_score, obs, wn, rest, mu_a, city_total_hat,
+            spread_mult=spread_mult)
         if CURVE_PRED_SOLVER == 'joint_alphaL':
             line_a0, line_b = _alphaL_training_line(rest)
             pred_curves, L_solved, alpha_solved = _joint_alphaL_curves(
@@ -3977,14 +4486,39 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         # grid keeps observed / oracle / component-pred, because at component
         # level the oracle is the point of comparison; more lines per small
         # panel would be unreadable).
+        city_lines = {_CURVE_METHOD_LABELS[lab]: city_rel[lab] * base
+                      for lab in _CITY_FIGURE_METHODS if lab in city_rel}
+        # LEGACY copy: every forecast line, original small-format styling.
+        # Kept so the earlier figure stays reproducible, moved out of the way.
         vis_curves_city_pred(
-            days, gt_rel * base,
-            {_CURVE_METHOD_LABELS[lab]: city_rel[lab] * base
-             for lab in _CITY_FIGURE_METHODS if lab in city_rel},
+            days, gt_rel * base, city_lines,
             ylabel='daily mobility (flow volume per day)',
             title=f'{held}: city mobility over the disaster window',
             save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                   'city_magnitude_curve_legacy',
                                    f'city_magnitude_curve_{held}.png'))
+        # CURRENT figure: slide format, and the city-wise kNN line dropped --
+        # it is the weakest of the three and crowds the panel.
+        # No per-unit slide file any more: the combined page below carries all
+        # 13, so a separate copy per city was redundant.
+        slide_lines = {k: v for k, v in city_lines.items()
+                       if k != _CURVE_METHOD_LABELS['city']}
+        city_curve_page[held] = (days, gt_rel * base, slide_lines)
+        # Persist the component-level curves: the city ones were already in
+        # raw_data/, these were not, which forced a full pipeline run for any
+        # restyle of the component figure.
+        # Underscore-prefixed loop names on purpose: a bare `val` here shadows
+        # the enclosing `val` that the fold's summary line reads afterwards.
+        for _lab, _dfm in (('observed', obs), ('oracle', lines['oracle']),
+                           ('pred', lines['pred']),
+                           ('train_mean', lines['train_mean'])):
+            for _j, _comp in enumerate(obs.columns):
+                for _d, _v in zip(obs.index.to_numpy(),
+                                  np.asarray(_dfm.iloc[:, _j], dtype=float)):
+                    comp_curve_rows.append(
+                        {'code': held, 'component': _comp, 'day': _d,
+                         'method': _lab, 'value': _v,
+                         'weight_normal': float(wn[_j])})
         vis_component_curves_grid(
             obs, {_CURVE_METHOD_LABELS['oracle']: lines['oracle'],
                   _CURVE_METHOD_LABELS['pred']: lines['pred'],
@@ -4067,20 +4601,40 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     # that same table: the rank channel on its own, what the quantile mapping
     # makes of it, and the rate/level relation the plateau inversion exploits.
     if not par_df.empty:
+        labels = {c['code']: c['label'] for c in CITY_EVENTS}
+        cnames = {c: f"{labels.get(c, c)} ({c.split('_', 1)[-1]})"
+                  for c in par_df['code'].drop_duplicates()}
         vis_rank_pred_vs_true(
-            par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
-                                           'rank_pred_vs_true.png'))
+            par_df, names=cnames,
+            save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                   'rank_pred_vs_true.png'))
         vis_rank_to_cumloss_qm(
             par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
                                            'rank_to_cumloss_qm.png'))
-        vis_alpha_level_relationship(
-            par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
-                                           'alphaL_relationship_softreg.png'))
+        # Plain predicted-vs-observed scatter; the rank-ordered figure above is
+        # kept as it was, the two answer different questions.
+        vis_qm_pred_vs_obs(
+            par_df, names=cnames,
+            save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                   'rank_to_cumloss_scatter.png'))
     # Accuracy bar: per city-event, the CITY-LEVEL curve error of every method line,
     # so the four lines are compared on the quantity the analysis actually optimises
     # (the whole-curve MAE) rather than on any single fitted parameter.  Methods are
     # the forecast lines of _CITY_FIGURE_METHODS, in that order; a method missing for
     # a unit leaves a gap.  The oracle's own MAE stays in curve_pred_metrics.csv.
+    if comp_curve_rows:
+        pd.DataFrame(comp_curve_rows).to_csv(
+            os.path.join(raw_dir, 'component_curves_by_method.csv'),
+            index=False)
+    if city_curve_page:
+        labels = {c['code']: c['label'] for c in CITY_EVENTS}
+        vis_city_curves_grid(
+            city_curve_page,
+            names={c: f"{labels.get(c, c)} ({c.split('_', 1)[-1]})"
+                   for c in city_curve_page},
+            save_path=os.path.join(OUTPUT_CURVE_PRED,
+                                   'city_magnitude_curve_all.png'))
+
     mae_df = (pd.DataFrame(metric_rows)
               .pivot(index='code', columns='method', values='mae_city')
               .reindex(index=[c for c in codes if c in {r['code'] for r in metric_rows}],
@@ -4442,10 +4996,6 @@ def main():
                                       model=model_id,
                                       pooled_feature_cols=POOLED_FEATURE_COLS)
 
-        # Study-overview map: the units' MSAs coloured by the RIDGE transfer
-        # cluster (filed with that cluster's outputs, component_rank/ridge/).
-        analysis_msa_cluster_map(units)
-
         # Mechanism figures for that partition, both reading back the clusters
         # CSV the ridge pairwise heatmap just wrote: the per-cluster
         # mapping-direction PCA (what rule each city fits) and the function
@@ -4460,6 +5010,12 @@ def main():
         # truth (runs only for pearson + multi_city_std; guarded inside the function).
         print("\n── Cross-city city-level cum_loss: prediction vs ground truth ──")
         analysis_cross_city_resi_pred(cc_train, cc_test, units, all_codes, global_iwf)
+
+        # The same transfer's middle stage on its own: the centred loss spectrum
+        # STEP 7's quantile mapping carries across cities, scored before the
+        # ordering and the city-total anchor enter.
+        print("\n── Cross-city centred loss spectrum: barycentre transfer ──")
+        analysis_centered_spectrum(cc_test, all_codes)
 
         # ── STEP 7-8 — curve prediction (+ OD maps) and transferability ──────
         _run_steps_78(cc_train, cc_test, units, all_codes, dec_test)

@@ -309,6 +309,28 @@ showing all five, y in day-equivalents and each predictor's MAE annotated.
 > are LOO R² −0.46 (cosine-kNN) and +0.17 (ridge) against a baseline at −0.55.
 > NOTE this note still describes the five-city era throughout and needs a full pass.
 
+> **Upgraded 2026-08-14 — the city (ρ) stage is now a regression, not a scalar match.**
+> The estimator is explicitly two-stage. Stage φ is unchanged: the component ridge on
+> `CITY_TOTAL_FEATURE_COLS` predicts each component's standardized `cum_loss`, and the
+> `weight_normal` aggregate of those predictions is the city score s. Stage ρ used to be
+> the bare scalar variance match above (pred = mean(GT) + (s − mean(s))·σ_GT/σ_s). It is
+> now a ridge of city `cum_loss` on **[s, r0_city, GDP]** for DIRECTION, whose fit is then
+> variance-matched (de-shrunk) onto day-equivalents for SCALE — ĉ = mean(GT) + (ẑ − mean(ẑ))·σ_GT/σ_ẑ,
+> where ẑ is the ridge fit. The scalar match is the one-predictor special case (its slope
+> σ_GT/σ_s is the reduced-major-axis / Model-II slope), so ρ on [s] alone reproduces the
+> old number; adding the two city-level terms lifts honest nested-LOO R² from **+0.47 to
+> +0.58** (MAE 0.88, jackknife floor +0.50). `r0_city` is the `weight_normal`-mean day-0
+> activity (already a φ feature; it re-enters ρ as a city-constant term). **GDP** is the
+> metro's 2019 real GDP (BEA CAGDP2, LineCode 1, county-summed), a pre-event normal-period
+> static wired from `data/msa_static/msa_features.csv`; it is an exposure/size proxy (small
+> metros sit fully inside the storm footprint) and correlates negatively with `cum_loss`,
+> not a wealth effect (per-capita GDP is not significant). Both consumers — STEP 6's headline
+> and STEP 7's curve-shift target — now call one shared function `_city_total_from_scores`,
+> so the ρ math cannot drift between them. Ridge, not OLS, sets the direction: on three
+> partly collinear predictors over 12 units OLS is unstable, and OLS-direction + the same
+> de-shrink scores +0.54 (it equals the exact multivariate RMA / variance-constrained least
+> squares, kept as the clean single-model reference).
+
 ### 3 · Interpretation · why is weight_normal the right aggregation weight?
 
 The natural weight is not the NMF importance ‖W‖·‖H‖ but `weight_normal`. Because each relative curve r_i is normalized by its
