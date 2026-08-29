@@ -1154,69 +1154,6 @@ def vis_scatter_intensity_resilience(df, intensity_col, metric_cols, group_col=N
     return fig
 
 
-def vis_scatter_reg_pred(pred_data, summary, res_cols, title=None,
-                         save_path=None, ncols=3, stat_label='LOO R²',
-                         unit='rank within unit'):
-    """
-    Regression diagnostic scatter for ONE city: one panel per resilience metric,
-    each plotting the ACTUAL value (y, ground truth) against the leave-one-out
-    PREDICTED value (x) — one point per component (labelled with its index).
-    `unit` names the axis scale: the rank channel passes de-standardized values,
-    so both axes read as the within-unit rank (1..n, the prediction continuous
-    between them); 'std value' is the raw/Pearson channel's standardized scale.
-    The dashed y=x line is perfect prediction; the panel title carries
-    summary['stat'] under `stat_label` (Spearman ρ for the rank channel, R² for
-    the raw one) and PASS/FAIL.  An 'insufficient data' metric gets a blank
-    panel.
-    """
-    import math
-    metrics = list(res_cols)
-    ncols = min(ncols, max(1, len(metrics)))
-    n = len(metrics)
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.0 * ncols, 3.6 * nrows),
-                             squeeze=False)
-    for idx, m in enumerate(metrics):
-        ax = axes[idx // ncols][idx % ncols]
-        pd_m = pred_data.get(m)
-        s = summary.loc[m]
-        if pd_m is None:
-            ax.text(0.5, 0.5, f'{m}\n(insufficient data)', ha='center',
-                    va='center', transform=ax.transAxes, fontsize=10, color='grey')
-            ax.set_xticks([]); ax.set_yticks([])
-            continue
-        y_true, y_pred, comp_idx = pd_m
-        # Prediction on x, ground truth on y (observed-vs-predicted calibration).
-        ax.scatter(y_pred, y_true, s=32, color='#1976D2', alpha=0.85,
-                   edgecolor='white', linewidth=0.5)
-        for xp, yt, ci in zip(y_pred, y_true, comp_idx):
-            ax.annotate(str(int(ci)), (xp, yt), fontsize=6, color='grey',
-                        xytext=(2, 2), textcoords='offset points')
-        lo = float(min(np.min(y_true), np.min(y_pred)))
-        hi = float(max(np.max(y_true), np.max(y_pred)))
-        ax.plot([lo, hi], [lo, hi], '--', color='grey', lw=1)      # y = x
-        tag = ('PASS' if s['passed'] else 'FAIL') if s['status'] == 'ok' else 'n/a'
-        ax.set_title(f"{m}\n{stat_label}={s['stat']:+.2f} [{tag}]", fontsize=10)
-        ax.set_xlabel(f'predicted ({unit})', fontsize=8)
-        ax.set_ylabel(f'actual ({unit})', fontsize=8)
-        ax.tick_params(labelsize=7)
-    for idx in range(n, nrows * ncols):
-        axes[idx // ncols][idx % ncols].axis('off')
-    if title:
-        # The cross-city title names every training unit, which at 13 units is
-        # far wider than a one-panel figure; wrap it to the figure's own width
-        # (and save with a tight box) so it is never clipped.
-        import textwrap
-        per_line = max(40, int(11 * 4.0 * ncols))
-        fig.suptitle('\n'.join(textwrap.wrap(title, per_line)), fontsize=11)
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-    return fig
-
-
 def deck_diverging_cmap():
     """The deck's diverging ramp for a signed correlation on [-1, 1]:
     AMBER for negative, white at zero, NYU PURPLE for positive.
@@ -1512,337 +1449,6 @@ def vis_od_flow_slider_html(frames, day_labels, save_path, title, note=''):
 
 
 # ── Transferability: does domain proximity predict RANK transfer? ─────────────
-def vis_transferability_map(emb, centroids, W2, T, Tsym, labels, colors,
-                            var_ratio, rho, pval, save_path=None):
-    """Three panels answering ONE question: do city-events that sit close in
-    component-feature space also transfer their cum_loss ORDERING to each other?
-
-      A  map    — PCA of every unit's components, one convex hull per unit, the
-                  hulls' centroids joined by edges COLOURED BY the measured
-                  pairwise rank transfer.  Proximity is the claim; edge colour
-                  is the evidence, so the claim is checkable inside the panel.
-      B  proof  — the same two quantities as a scatter (one point per unordered
-                  pair) with the Mantel statistic, so the visual impression in A
-                  cannot be an artefact of the 2-D projection.
-      C  matrix — the raw directed transfer matrix; transfer is ASYMMETRIC and
-                  panel A can only draw the symmetrized value.
-
-    `emb` maps code -> [k × 2] PCA scores, `centroids` code -> [2], `W2` /`T` /
-    `Tsym` are [n × n] aligned with `labels` (codes in plotting order); `rho`
-    and `pval` are the Mantel statistic between W2 and Tsym."""
-    from scipy.spatial import ConvexHull
-    from matplotlib.colors import TwoSlopeNorm
-    codes = list(labels)
-    n = len(codes)
-    short = {c: labels[c] for c in codes}
-    nature_rc = {
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
-        'axes.linewidth': 0.7, 'legend.frameon': False,
-        'svg.fonttype': 'none', 'pdf.fonttype': 42,
-    }
-    iu = np.triu_indices(n, 1)
-    norm = TwoSlopeNorm(vmin=min(-0.7, float(np.nanmin(T))), vcenter=0.0,
-                        vmax=max(0.9, float(np.nanmax(T))))
-    cmap = plt.cm.RdBu
-    with plt.rc_context(nature_rc):
-        fig = plt.figure(figsize=(11.0, 3.6))
-        # Generous wspace: the panel-A colourbar is drawn inside the first
-        # cell and would otherwise sit on top of panel B's y-label.
-        gs = fig.add_gridspec(1, 3, width_ratios=[1.5, 1, 1], wspace=0.52)
-        # A — map
-        ax = fig.add_subplot(gs[0, 0])
-        for c in codes:
-            pts = np.asarray(emb[c], dtype=float)
-            ax.scatter(pts[:, 0], pts[:, 1], s=13, color=colors[c], alpha=.45,
-                       zorder=2, edgecolor='none')
-            if len(pts) >= 3:
-                h = ConvexHull(pts)
-                poly = np.vstack([pts[h.vertices], pts[h.vertices][:1]])
-                ax.fill(poly[:, 0], poly[:, 1], color=colors[c], alpha=.10,
-                        zorder=1)
-                ax.plot(poly[:, 0], poly[:, 1], color=colors[c], lw=.8,
-                        alpha=.55, zorder=1)
-        for i, a in enumerate(codes):
-            for j, b in enumerate(codes):
-                if i < j:
-                    v = float(Tsym[i, j])
-                    ax.plot([centroids[a][0], centroids[b][0]],
-                            [centroids[a][1], centroids[b][1]],
-                            color=cmap(norm(v)), lw=0.6 + 3.4 * abs(v),
-                            zorder=3, solid_capstyle='round', alpha=.92)
-        for c in codes:
-            ax.scatter(*centroids[c], s=110, color=colors[c], zorder=5,
-                       edgecolor='white', linewidth=1.3)
-            ax.annotate(short[c], centroids[c], fontsize=6.5, fontweight='bold',
-                        xytext=(0, -13), textcoords='offset points',
-                        ha='center', color=colors[c], zorder=6)
-        ax.set_xlabel(f'PC1 ({var_ratio[0]:.0%} var)')
-        ax.set_ylabel(f'PC2 ({var_ratio[1]:.0%} var)')
-        ax.set_title('A  hulls = each city-event\'s components;\n'
-                     'edge colour = measured pairwise RANK transfer', fontsize=8)
-        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
-        cb = fig.colorbar(sm, ax=ax, fraction=.042, pad=.02)
-        cb.set_label('rank transfer (spearman)', fontsize=6.5)
-        cb.ax.tick_params(labelsize=6)
-        # B — proof
-        ax = fig.add_subplot(gs[0, 1])
-        for i, a in enumerate(codes):
-            for j, b in enumerate(codes):
-                if i < j:
-                    ax.scatter(W2[i, j], Tsym[i, j], s=34,
-                               color=cmap(norm(float(Tsym[i, j]))), zorder=3,
-                               edgecolor='#555555', linewidth=.5)
-                    ax.annotate(f'{short[a][:3]}–{short[b][:3]}',
-                                (W2[i, j], Tsym[i, j]), fontsize=5,
-                                xytext=(0, 5), textcoords='offset points',
-                                ha='center', color='#555555')
-        z = np.polyfit(W2[iu], Tsym[iu], 1)
-        xs = np.linspace(W2[iu].min(), W2[iu].max(), 50)
-        ax.plot(xs, np.polyval(z, xs), color='#333333', lw=1.1, zorder=2)
-        ax.axhline(0, color='#CCCCCC', lw=.7, zorder=1)
-        ax.set_xlabel(r'domain distance  $W_2$ (Sinkhorn)')
-        ax.set_ylabel('rank transfer (symmetrized)')
-        ax.set_title('B  closer $\\Rightarrow$ better rank transfer\n'
-                     f'$\\rho_s$ = {rho:+.2f}  (Mantel $P$ = {pval:.3f}, '
-                     f'{len(iu[0])} pairs)', fontsize=8)
-        ax.margins(.18)
-        # C — asymmetry
-        ax = fig.add_subplot(gs[0, 2])
-        ax.imshow(np.where(np.eye(n, dtype=bool), np.nan, T), cmap=cmap,
-                  norm=norm)
-        for i in range(n):
-            for j in range(n):
-                if i != j and np.isfinite(T[i, j]):
-                    ax.text(j, i, f'{T[i, j]:.2f}', ha='center', va='center',
-                            fontsize=5.5,
-                            color='white' if abs(T[i, j]) > .55 else '#333333')
-        ax.set_xticks(range(n)); ax.set_yticks(range(n))
-        ax.set_xticklabels([short[c] for c in codes], fontsize=5.5, rotation=40,
-                           ha='right')
-        ax.set_yticklabels([short[c] for c in codes], fontsize=5.5)
-        ax.set_xlabel('test (target)', fontsize=6.5)
-        ax.set_ylabel('train (source)', fontsize=6.5)
-        ax.set_title('C  rank transfer is ASYMMETRIC\n'
-                     '(same city, different event ≠ close)', fontsize=8)
-        for s in ax.spines.values():
-            s.set_visible(False)
-        if save_path:
-            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
-                        exist_ok=True)
-            fig.savefig(save_path, dpi=450, bbox_inches='tight')
-            plt.close(fig)
-    return fig
-
-
-def vis_w2_decomposition(pairs, contrib, transfer, group_names, group_colors,
-                         save_path=None):
-    """What is the domain distance MADE OF, and which part of it explains the
-    measured transfer?  A squared-Euclidean cost is additive over dimensions,
-    so under one coupling the transported cost splits EXACTLY over feature
-    groups; both rows are that split, seen two ways.
-
-      row 1  one stacked bar per unordered pair, pairs ordered near -> far;
-             segment heights are the groups' exact contributions to that pair's
-             W2 and the number above the bar is the measured rank-prediction
-             performance between the two units.
-      row 2  one scatter per group: x is that group's contribution — the
-             ABSOLUTE segment height of row 1, not a share — and y the same
-             performance.  A group explains the distance/transfer relation only
-             if ITS panel slopes; a large but flat group is inert background,
-             which is why shares alone would be misleading here.
-
-    `pairs` are the pair labels in plotting order, `contrib` a DataFrame with
-    one column per group aligned to `pairs`, `transfer` the matching
-    symmetrized (A->B and B->A averaged) transfer values."""
-    from scipy.stats import spearmanr as _spearmanr
-    nature_rc = {
-        'font.family': 'sans-serif',
-        'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-        'font.size': 7, 'axes.spines.right': False, 'axes.spines.top': False,
-        'axes.linewidth': 0.7, 'legend.frameon': False,
-        'svg.fonttype': 'none', 'pdf.fonttype': 42,
-    }
-    gnames = list(group_names)
-    transfer = np.asarray(transfer, dtype=float)
-    total = contrib[gnames].sum(axis=1).to_numpy(dtype=float)
-    with plt.rc_context(nature_rc):
-        fig = plt.figure(figsize=(10.6, 5.6))
-        gs = fig.add_gridspec(2, len(gnames), height_ratios=[1.25, 1],
-                              hspace=0.5, wspace=0.30)
-        ax = fig.add_subplot(gs[0, :])
-        x = np.arange(len(pairs))
-        bottom = np.zeros(len(pairs))
-        for g in gnames:
-            v = contrib[g].to_numpy(dtype=float)
-            ax.bar(x, v, 0.62, bottom=bottom, color=group_colors[g], label=g)
-            bottom += v
-        for k in range(len(pairs)):
-            ax.text(x[k], total[k] + 0.5, f'{transfer[k]:+.2f}', ha='center',
-                    fontsize=6.2, fontweight='bold',
-                    color=plt.cm.RdBu(0.5 + 0.5 * np.clip(transfer[k] / 0.9,
-                                                          -1, 1)))
-        ax.text(0.01, 0.86, 'number above bar = rank-prediction performance',
-                transform=ax.transAxes, fontsize=6, color='#555555')
-        ax.set_xticks(x)
-        ax.set_xticklabels(pairs, fontsize=6.5)
-        ax.set_ylabel('$W_2$ contribution (additive, exact)')
-        ax.set_title('what pushes each pair apart — pairs ordered near '
-                     '$\\rightarrow$ far', fontsize=8)
-        ax.legend(ncol=len(gnames), fontsize=6.5, loc='upper left')
-        ax.margins(x=0.02)
-        axs2 = [fig.add_subplot(gs[1, k]) for k in range(len(gnames))]
-        for ax, g in zip(axs2, gnames):
-            xs = contrib[g].to_numpy(dtype=float)
-            ax.scatter(xs, transfer, s=30, color=group_colors[g], zorder=3,
-                       edgecolor='white', linewidth=0.5)
-            z = np.polyfit(xs, transfer, 1)
-            xr = np.linspace(xs.min(), xs.max(), 50)
-            ax.plot(xr, np.polyval(z, xr), color='#333333', lw=1.0, zorder=2)
-            ax.axhline(0, color='#CCCCCC', lw=0.7, zorder=1)
-            r = float(_spearmanr(xs, transfer).statistic)
-            ax.set_title(f'{g}   $\\rho_s$ = {r:+.2f}', fontsize=8,
-                         color=group_colors[g])
-            ax.set_xlabel(f'$W_2$ carried by {g}\n'
-                          '(= its segment height above, absolute)')
-            ax.margins(0.15)
-        axs2[0].set_ylabel('cum_loss rank-prediction performance\n'
-                           'between the pair (spearman,\n'
-                           'A$\\to$B and B$\\to$A averaged)')
-        for ax in axs2[1:]:
-            ax.set_yticklabels([])
-        lo = min(ax.get_ylim()[0] for ax in axs2)
-        hi = max(ax.get_ylim()[1] for ax in axs2)
-        for ax in axs2:
-            ax.set_ylim(lo, hi)
-        if save_path:
-            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
-                        exist_ok=True)
-            fig.savefig(save_path, dpi=450, bbox_inches='tight')
-            plt.close(fig)
-    return fig
-
-
-# == NMF decomposition-quality figures =========================================
-
-
-def vis_nmf_quality(q, title=None, save_path=None):
-    """
-    One city-event's decomposition-quality report, three panels from the
-    nmf_quality_metrics dict `q`.  Everything is FIT-window only (the rows the
-    basis was fit on); the disaster period is out of scope by design — the
-    figure describes the decomposition itself, not any predictive use of it.
-
-      A  per-slot distribution (KS) error across the fit window — localises
-         WHERE the reconstruction distorts the OD-flow shape (each slot's X
-         and WH are mean-normalised first, so a uniform over/under-estimate
-         does not register);
-      B  pooled CDF overlay of those per-slot-normalised values, ground truth
-         vs reconstruction (log x; positive entries) — the shape the KS
-         compares, seen directly;
-      C  component weights w_i = $\|W_i\|\,\|H_i\|$ as a fraction of the largest,
-         descending, with the min_comp_frac threshold line; components below
-         it are red (too-large-k symptom, the health rule requires none).
-
-    The fit-window relative Frobenius error is annotated in panel A.
-    """
-    fig, axes = plt.subplots(1, 3, figsize=(16.5, 4.6))
-    axA, axB, axC = axes
-
-    # A - per-slot KS timeline over the fit window
-    ks = np.asarray(q['dist_err_per_slot'], dtype=float)
-    axA.plot(np.arange(ks.size), ks, color='#1976D2', lw=1.0)
-    axA.axhline(q['dist_err_mean'], color='#D32F2F', linestyle='--', lw=1.2,
-                label=f"mean = {q['dist_err_mean']:.3f}")
-    axA.set_xlabel('fit-window time slot')
-    axA.set_ylabel('per-slot KS distance')
-    axA.set_title('A  distribution error over time', loc='left', fontsize=12)
-    axA.text(0.02, 0.02,
-             f"rel. reconstruction error = {q['rel_err']:.3f}",
-             transform=axA.transAxes, fontsize=9, va='bottom')
-    axA.legend(frameon=False, fontsize=9)
-
-    # B - pooled CDF overlay
-    for vals, color, lbl in ((q['gt_vals'], 'black', 'ground truth'),
-                             (q['rec_vals'], '#1976D2', 'reconstruction')):
-        v = np.sort(np.asarray(vals, dtype=float))
-        if v.size == 0:
-            continue
-        axB.plot(v, np.arange(1, v.size + 1) / v.size, color=color, lw=1.4,
-                 label=lbl, alpha=0.9)
-    axB.set_xscale('log')
-    axB.set_xlabel('OD flow / slot mean (positive entries, log scale)')
-    axB.set_ylabel('cumulative fraction')
-    axB.set_title('B  value-distribution shapes (pooled over slots)',
-                  loc='left', fontsize=12)
-    axB.legend(frameon=False, fontsize=9)
-
-    # C - component weight fractions
-    frac = np.asarray(q['comp_frac'], dtype=float)
-    thr = q['min_comp_frac']
-    colors = ['#D32F2F' if f < thr else '#1976D2' for f in frac]
-    axC.bar(np.arange(frac.size), frac, color=colors, edgecolor='white')
-    axC.axhline(thr, color='#D32F2F', linestyle='--', lw=1.2,
-                label=f'threshold = {thr:.0%} of max')
-    axC.set_yscale('log')
-    axC.set_xlabel('component (sorted by weight)')
-    axC.set_ylabel('$\|W_i\|\,\|H_i\|$ / max (log)')
-    axC.set_title(f"C  component weights - {q['n_below']} below threshold",
-                  loc='left', fontsize=12)
-    axC.legend(frameon=False, fontsize=9)
-
-    if title:
-        fig.suptitle(title, fontsize=14)
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
-def vis_nmf_quality_summary(df, min_comp_frac, save_path=None):
-    """
-    Cross-city error dashboard: one row per error family, city-events on x.
-    All metrics are FIT-window only (see vis_nmf_quality).
-
-      1  mean per-slot distribution (KS) error
-      2  relative reconstruction error
-
-    Component-count health is deliberately NOT shown here: it is a per-unit
-    pass/fail check, already drawn as panel C of each unit's own figure, and a
-    cross-city bar of it carries no comparison worth making.  `min_comp_frac`
-    is kept in the signature so callers need not know that.
-
-    `df` is indexed by city-event code with columns dist_err_mean, rel_err
-    and k (k annotates the bars).
-    """
-    codes = list(df.index)
-    x = np.arange(len(codes))
-    fig, axes = plt.subplots(2, 1, figsize=(max(10, 0.85 * len(codes)), 7),
-                             sharex=True)
-
-    axes[0].bar(x, df['dist_err_mean'], color='#1976D2', edgecolor='white')
-    axes[0].set_ylabel('mean per-slot\nKS distance')
-    axes[0].set_title('Distribution error', loc='left', fontsize=12)
-
-    axes[1].bar(x, df['rel_err'], color='#455A64', edgecolor='white')
-    for xi, (v, k) in enumerate(zip(df['rel_err'], df['k'])):
-        axes[1].text(xi, v, f'k={int(k)}', ha='center', va='bottom', fontsize=8)
-    axes[1].set_ylabel('relative\nreconstruction error')
-    axes[1].set_title('Absolute error', loc='left', fontsize=12)
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(codes, rotation=45, ha='right')
-
-    fig.tight_layout()
-    if save_path:
-        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
-        fig.savefig(save_path, dpi=150)
-        plt.close(fig)
-    return fig
-
-
 def vis_nmf_rank_cv(curves, table, band='k_2se', save_path=None, ncols=5):
     """
     Held-out-entry rank curves, one panel per city-event, each panel captioned
@@ -2532,14 +2138,20 @@ def _pub_save(fig, save_path):
         plt.close(fig)
 
 
-def vis_rank_pred_vs_true(params, save_path=None, ncols=5, names=None):
+def vis_rank_pred_vs_true(params, save_path=None, ncols=5, names=None,
+                          obs_col='cum_loss', footnote=None):
     """Predicted vs observed cum_loss RANK, one panel per city-event.
 
-    The rank channel is the only part of the curve forecast that transfers, so
-    this is the figure that shows whether it does: both axes are ranks WITHIN
-    the unit, the diagonal is a perfect ordering, and each panel carries its own
-    Spearman.  `params` is the STEP-7 component table (needs code, rank_score,
-    cum_loss_fit).
+    The rank channel is the only part of the forecast that transfers, so this
+    is the figure that shows whether it does: both axes are ranks WITHIN the
+    unit, the diagonal is a perfect ordering, and each panel carries its own
+    Spearman.  `params` needs code, rank_score and `obs_col` (the observed
+    quantity whose ordering is being predicted).
+
+    `footnote` (optional) is one line set below the shared x label -- the
+    sweep-level number no single panel can carry.  It goes BELOW the figure
+    rectangle, because the layout parks the shared x label at the bottom of
+    that rectangle and anything reserved inside it lands on top of the label.
     """
     codes = list(params['code'].drop_duplicates())
     names = names or {}
@@ -2549,12 +2161,11 @@ def vis_rank_pred_vs_true(params, save_path=None, ncols=5, names=None):
                                  squeeze=False)
         for i, c in enumerate(codes):
             ax = axes[i // ncols][i % ncols]
-            s = params[params.code == c].dropna(subset=['rank_score',
-                                                        'cum_loss_fit'])
+            s = params[params.code == c].dropna(subset=['rank_score', obs_col])
             if len(s) < 2:
                 ax.axis('off')
                 continue
-            rt, rp = rankdata(s['cum_loss_fit']), rankdata(s['rank_score'])
+            rt, rp = rankdata(s[obs_col]), rankdata(s['rank_score'])
             n = len(s)
             ax.plot([0.5, n + 0.5], [0.5, n + 0.5], color=_PUB_GREY, lw=1.6,
                     zorder=1)
@@ -2575,6 +2186,9 @@ def vis_rank_pred_vs_true(params, save_path=None, ncols=5, names=None):
         fig.supxlabel('observed cumulative-loss rank', fontsize=26)
         fig.supylabel('predicted rank', fontsize=26)
         fig.tight_layout()
+        if footnote:
+            fig.text(0.5, -0.022 * (11.0 / fig.get_size_inches()[1]), footnote,
+                     ha='center', va='top', fontsize=22, color='#333333')
         _pub_save(fig, save_path)
     return fig
 

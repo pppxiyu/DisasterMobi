@@ -135,20 +135,23 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
         decomposition: city_mobility_curves.png (every unit's day-type-
         normalized total activity, minimum + landfall marked) + raw_data/.
         (The MSA cluster map is filed with its cluster instead, under
-        3-cross_city_resi_pred/component_rank/ridge/.)
-    1-decomposition_quality/     STEP 1 + STEP 3, everything about the
+        2-cross_city_resi_pred/component_rank/.)
+    1-decomposition/             the factorisation and what its components
+                                 ARE, in two parts:
+      1-decomposition_quality/   STEP 1 + STEP 3, everything about the
         factorisation itself.  nmf_rank_cv.png (STEP 1) sweeps k under
         held-out-entry cross-validation for EVERY registry unit and is what
         sets each unit's n_behaviors and what EXCLUDED_CODES drops; the units
         it drops keep their (greyed) panel, since this figure is the record of
         why.  The STEP-3 quality check then covers only the RETAINED units,
         FIT-window only (the data the basis is fit on; the disaster period is
-        out of scope): per-unit nmf_quality_<code>.png (per-slot distribution
+        out of scope): the per-unit console report (figures retired
+        2026-08-28) — per-slot distribution
         error, value-CDF overlay, component weights vs the NMF_MIN_COMP_FRAC
-        health threshold) and the cross-city nmf_quality_summary.png
+        health threshold) and the cross-city raw_data/nmf_quality_metrics.csv
         dashboard.  raw_data/ holds the rank-CV curves and selection table plus
         the quality metrics.
-    2-component_characteristics/  per-component characteristics, by type:
+      2-component_characteristics/  per-component characteristics, by type:
         0-temporal/          signature heatmap + timeline (W)
         1-func/              O×D functional cross-tab heatmaps + entropy + raw CSVs
         2-resilience_curves/ per-function ordered line stacks: W timelines and
@@ -167,19 +170,21 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                              between events) + raw_data/
         6-socioeconomic/     per-component median-income bars + raw CSV
         7-spatial/           per-component flow-distance bar (H) + raw CSV
-    3-cross_city_resi_pred/      the cross-city outputs, split by what is predicted:
+    2-cross_city_resi_pred/      the cross-city outputs, split by what is predicted:
         city_total/     the CITY-LEVEL cum_loss prediction, one number per
                         city-event: bar_cross_city_resi_pred.png/.svg (observed
                         vs predicted + a leave-one-out R² panel), raw_data/, and
                         decomp_pred_aggr_denorm/<model>/ per predictor with its
                         own calibration scatter + raw_data/
         component_rank/ the per-COMPONENT rank transfer (cum_loss only, and
-                        no income predictor), one subfolder per predictor —
-                        cos_KNN/ and ridge/ — each with its leave-one-out
-                        scatters (Spearman ρ), the LOO R² matrix, the pairwise
-                        transfer heatmap (Spearman ρ), and raw_data/.  ridge/
-                        additionally carries the cluster-restricted rank
-                        variant's ALL-vs-cluster comparison
+                        no income predictor), ridge only and NO per-model
+                        subfolder (cosine-kNN retired 2026-08-28, the ridge/
+                        level flattened away with it).  THE rank channel lives
+                        here: rank_pred_vs_true.png (the leave-one-out sweep,
+                        one panel per held-out unit, Spearman ρ), the
+                        pairwise transfer heatmap that cuts the partition the
+                        sweep trains on, the cluster-restricted rank variant's
+                        ALL-vs-cluster comparison
                         (cluster_restricted_rank.png + .csv: each held-out
                         city's rank ρ trained on every other city vs on its
                         estimated cluster only, the RANK_TRAIN_SCOPE='cluster'
@@ -195,18 +200,15 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                         SECOND ROW = the same layouts greyed out as a base
                         map with every city-event's own layout drawn on top,
                         colour = the function)
-    4-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
-        plus the mechanism figures (rank_pred_vs_true, rank_to_cumloss_qm,
+    3-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
+        plus the mechanism figures (rank_to_cumloss_qm,
         rank_to_cumloss_scatter),
         (the city-level whole-curve error of each forecast line, per city-event),
         per-unit city_magnitude_curve_<code>.png and component_curves_<code>.png,
         curve_pred_metrics.csv, and raw_data/ (per-day city curves by method +
         the per-component α/L table + the plotted MAE table)
-    5-cross_city_od_pred/        per city-event, one self-contained HTML slider map
+    4-cross_city_od_pred/        per city-event, one self-contained HTML slider map
         of the daily predicted / observed / difference OD flows
-    6-transferability/           the STEP-8 outputs: transferability_map.png,
-        w2_decomposition.png and raw_data/ (domain distances, transfer matrices,
-        the per-feature-group W2 split)
 
 Adding a city-event means adding one CITY_EVENTS entry and providing its graph
 pkl, its geo CSV, and its land-use (EPA Smart Location Database) and income
@@ -240,7 +242,7 @@ from utils.pattern_analysis.nmf_pipeline import (
     nmf_quality_metrics, rank_cv_entry,
 )
 from utils.pattern_analysis.visualization import (
-    vis_heatmap_temporal_signature, vis_nmf_quality, vis_nmf_quality_summary,
+    vis_heatmap_temporal_signature,
     vis_city_mobility_curves, vis_cluster_mapping_pca,
     vis_cluster_function_graph,
     vis_cluster_restricted_rank,
@@ -250,14 +252,14 @@ from utils.pattern_analysis.visualization import (
     vis_line_resilience_curves,
     vis_heatmap_corr,
     vis_hist_function_entropy,
-    vis_bar_component_distance, vis_bar_component_income, vis_scatter_reg_pred,
+    vis_bar_component_distance, vis_bar_component_income,
     vis_heatmap_pair_transfer, vis_scatter_intensity_resilience,
     vis_exposure_vs_cumloss,
     vis_bar_cross_city_resi_pred, vis_scatter_city_pred, vis_bar_curve_mae,
     vis_curves_city_pred, vis_city_curves_grid,
-    vis_component_curves_grid, vis_od_flow_slider_html, vis_w2_decomposition,
+    vis_component_curves_grid, vis_od_flow_slider_html,
     vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_qm_pred_vs_obs, vis_func_vs_time_distribution,
-    vis_transferability_map, vis_centered_spectrum_loo,
+    vis_centered_spectrum_loo,
     vis_centered_distributions, vis_spread_vs_predictors,
     vis_centered_spectrum_schematic,
     vis_spread_concept, vis_mlb2_pca,
@@ -494,11 +496,6 @@ SPACE_FUNCTION_DIR = os.path.join(DATA_DIR, 'space_function')
 ACS_INCOME_YEAR       = 2019
 INCOME_ENDPOINT_MODES = ['combined', 'origin']
 
-# Resilience regression: when True, each function's
-# outflow + inflow shares are merged into ONE feature
-# when False the 12 directional shares are used as-is.
-MERGE_FUNC_DIRECTIONS = True
-
 # Cross-tab axes are the functional categories plus 'Mix'.  Unknown and
 # unmatched endpoints are dropped.  Order defines the heatmap rows (origin)
 # and columns (destination).
@@ -510,8 +507,10 @@ MERGE_FUNC_DIRECTIONS = True
 # full row/column sums, so same-function diagonal flow counts on both sides.
 #   share_from_<cat> — outflow side, the fraction departing from function <cat>
 #   share_to_<cat>   — inflow side, the fraction arriving at function <cat>
-FUNC_COLS = ([f'share_from_{c}' for c in SF_CATEGORIES]
-             + [f'share_to_{c}' for c in SF_CATEGORIES])
+# These are the RAW columns; every model reads the MERGED func_<cat> below
+# (the direction-split pair had no remaining reader once the rank channel was
+# unified on 2026-08-28, so the FUNC_COLS list and its MERGE_FUNC_DIRECTIONS
+# switch went with it).
 
 # The MERGED functional shares the correlation blocks analyse: func_<cat> =
 # share_from_<cat> + share_to_<cat>, the total share of a component's flow
@@ -867,7 +866,12 @@ EXTRA_CORR_COLS = ['mean_distance'] + [f'median_income_{m}' for m in INCOME_ENDP
 # 0-data holds the raw study-overview figures (city mobility curves); the
 # analysis sections are numbered from 1 (bumped +1 on 2026-08-05 to free 0).
 OUTPUT_DATA         = os.path.join(OUTPUT_PLOTS, '0-data')
-OUTPUT_QUALITY      = os.path.join(OUTPUT_PLOTS, '1-decomposition_quality')
+# Everything about the factorisation lives under ONE parent: what the
+# decomposition IS (the quality/rank-CV evidence) and what its components ARE
+# (their characteristics) are two views of the same object, and the top-level
+# list reads as one step per stage of the pipeline.
+OUTPUT_DECOMP       = os.path.join(OUTPUT_PLOTS, '1-decomposition')
+OUTPUT_QUALITY      = os.path.join(OUTPUT_DECOMP, '1-decomposition_quality')
 OUTPUT_QUALITY_RAW  = os.path.join(OUTPUT_QUALITY, 'raw_data')
 
 # ── Rank cross-validation (STEP 1) and the k policy it sets ──────────────────
@@ -925,7 +929,7 @@ PIPELINE_SCOPE    = 'full'
 # is not a constraint anything optimises against.
 NMF_MIN_COMP_FRAC   = 0.05
 
-OUTPUT_CHAR         = os.path.join(OUTPUT_PLOTS, '2-component_characteristics')
+OUTPUT_CHAR         = os.path.join(OUTPUT_DECOMP, '2-component_characteristics')
 OUTPUT_TEMPORAL     = os.path.join(OUTPUT_CHAR, '0-temporal')
 # The two temporal views are split by figure type: the per-component W heatmap
 # (one image showing every component at once) and the per-component timeline
@@ -986,7 +990,7 @@ OUTPUT_RC_BY_FUNC    = os.path.join(OUTPUT_CHAR_RESIL, 'line_component_resilienc
 
 # Cross-city resilience prediction reconstructed to the CITY level (predicted vs
 # ground-truth cum_loss per city-event).  Only for pearson + multi_city_std.
-OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, '3-cross_city_resi_pred')
+OUTPUT_CROSS_CITY_RESI_PRED = os.path.join(OUTPUT_PLOTS, '2-cross_city_resi_pred')
 # Two sibling views of the same STEP-6 transfer, each with its own raw_data/:
 #   city_total/    the CITY-LEVEL cum_loss prediction (one number per unit),
 #                  with decomp_pred_aggr_denorm/<model>/ per predictor
@@ -1104,22 +1108,67 @@ LEVEL_FEATURE_COLS = ['hurricane_intensity', 'evac_level']
 POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
                        + ['mean_distance', 'median_income_combined'])
 
-# The RANK channel runs BOTH predictors side by side, each into its own folder
-# under component_rank/, because neither dominates: a 2026-08-04 leave-one-out
-# ablation put ridge ahead on average (mean test R2 +0.36 vs +0.28, better on 8
-# of 13 units) but it is the riskier of the two exactly where it matters most —
-# BR_Ida, the largest unit at k=12, goes +0.10 -> -0.15, while cosine-kNN's
-# bounded, shrunken predictions never blow up.  Showing both is the honest
-# reading.  (Model choices elsewhere are pinned at their own sites: the legacy
-# kNN(sigma) reference and the raw pooled channel hardcode 'cosine_knn'; the
-# STEP-7 channels read CURVE_PRED_CITY_MODEL / CURVE_PRED_RANK_MODEL.)
-CROSS_CITY_RANK_MODELS = {'cos_KNN': 'cosine_knn', 'ridge': 'ridge'}
+# The RANK channel's predictor.  It ran ridge and cosine-kNN side by side into
+# component_rank/<model>/ from 2026-08-04 (a leave-one-out ablation put ridge
+# ahead on average, mean test R2 +0.36 vs +0.28 and better on 8 of 13 units,
+# but riskier on the largest unit: BR_Ida at k=12 went +0.10 -> -0.15 while
+# cosine-kNN's bounded, shrunken predictions never blow up).  The cosine-kNN
+# folder was RETIRED 2026-08-28 — the rank channel reports ridge alone.  The
+# two-predictor comparison itself is NOT gone: it lives at the city level,
+# where CITY_TOTAL_DECOMP_MODELS still runs both through the rho stage and the
+# headline bar figure shows both.
+#
+# With one predictor left there is no per-model folder any more: the rank
+# channel writes straight into component_rank/, and every downstream mechanism
+# figure (the mapping PCA, the function graph, the cluster-restricted variant)
+# reads that folder.  Reinstating a second predictor means reinstating the
+# subfolder level with it.
+#
+# THE RANK CHANNEL, DEFINED ONCE (unified 2026-08-28).  Predicting a within-city
+# cum_loss ORDERING used to exist twice: STEP 6 fitted 7 columns on every other
+# city, STEP 7 fitted those 7 plus r0 on the held city's estimated cluster, and
+# the two disagreed by +0.09 mean Spearman for reasons that had nothing to do
+# with the question either was asking.  There is now ONE definition -- these
+# three constants and rank_predict() below -- and every rank prediction in the
+# pipeline goes through it: the LOO sweep, the pairwise transfer heatmap, the
+# cluster-restricted diagnostic, the mapping-direction PCA and the STEP-7
+# ordering channel.  Change the rank prediction here and it changes everywhere.
+RANK_MODEL = 'ridge'
+RANK_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
+                     + ['mean_distance', 'r0'])
+
+# The PARTITION step is the one deliberate exception, and it is measured, not
+# stylistic.  The pairwise transfer heatmap cuts the Louvain partition that
+# RANK_TRAIN_SCOPE='cluster' then trains on, and fitting that heatmap WITH r0
+# destroys it: r0 makes single-source transfer uniformly better (mean pair
+# Spearman +0.300 -> +0.386, 112 -> 124 of 156 pairs positive, total edge
+# weight +13%), and a graph where every pair transfers well has no weak edge
+# left to cut along.  Measured on the 13 units, 2026-08-28:
+#     modularity of the chosen partition   +0.026  ->  -0.043
+#     distinct partitions over 40 Louvain seeds   1  ->  6 (3, 4 or 5 clusters)
+#     held-out cluster assignment accuracy   10/13  ->  4/13
+#     rank channel mean test Spearman        +0.637 ->  +0.532
+# So the predictor keeps r0 (it predicts better with it) and the partition is
+# cut without it (it is only recoverable without it).  The fitting code is
+# still one function -- rank_predict -- and only the column list differs.
+PARTITION_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
+                          + ['mean_distance'])
+
+# The predictors compared at the CITY level: aggregate each one's standardized
+# component scores into s, then put s through the identical rho stage, so the
+# figure compares the PREDICTOR and nothing else.  Independent of the rank
+# channel above — this is why dropping cosine-kNN from component_rank/ leaves
+# the headline bar figure's cosine-kNN bar standing.  (Model choices elsewhere
+# are pinned at their own sites: the legacy kNN(sigma) reference and the raw
+# pooled channel hardcode 'cosine_knn'; the STEP-7 channels read
+# CURVE_PRED_CITY_MODEL, and the rank channel reads RANK_MODEL.)
+CITY_TOTAL_DECOMP_MODELS = {'cos_KNN': 'cosine_knn', 'ridge': 'ridge'}
 
 
 # ── STEP 7 parameters — cross-city curve prediction ─────────────────────────────
 
 # Everything the STEP-7 curve prediction writes goes here.
-OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '4-cross_city_curve_pred')
+OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '3-cross_city_curve_pred')
 
 # STEP-7 spatial view: per held city, an interactive slider map of the daily
 # PREDICTED OD flows (forecast curves x component baselines x H), the observed
@@ -1128,7 +1177,7 @@ OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '4-cross_city_curve_pred')
 # is forecast.  One self-contained HTML per city-event under
 # cross_city_od_pred/<code>/.  OD_MAP_TOP_ARCS caps the arcs drawn per
 # day-and-view (kept by |flow|) so the embedded data stays a few MB.
-OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, '5-cross_city_od_pred')
+OUTPUT_OD_PRED = os.path.join(OUTPUT_PLOTS, '4-cross_city_od_pred')
 CURVE_OD_MAPS = True
 OD_MAP_TOP_ARCS = 600
 
@@ -1144,7 +1193,7 @@ OD_MAP_TOP_ARCS = 600
 #     vs 0.543; not significant at n=13, and cosine-kNN stays better on
 #     SL_Ida, 0.543 vs 0.086) — chosen for consistency with the city channel.
 CURVE_PRED_CITY_MODEL = 'ridge'
-CURVE_PRED_RANK_MODEL = 'ridge'
+# (the rank channel's predictor is RANK_MODEL; see the block above)
 
 # Training scope for the RANK channel (STEP-7 curve prediction and the
 # component_rank headline): 'cluster' restricts each held-out city's training
@@ -1161,30 +1210,6 @@ CURVE_PRED_RANK_MODEL = 'ridge'
 # bias/variance and circularity trade the owner accepted.
 RANK_TRAIN_SCOPE = 'cluster'
 
-# ── STEP 8 parameters — transferability (source selection) ─────────────────────
-
-# Everything analysis_transferability writes goes here.
-OUTPUT_TRANSFER = os.path.join(OUTPUT_PLOTS, '6-transferability')
-
-# A unit joins the comparison only with this many usable components; below it
-# neither the OT distance nor the pairwise spearman is meaningful.
-TRANSFER_MIN_ROWS = 5
-
-# Mantel permutations.  The permutation is over UNIT LABELS (n! is tiny at
-# n = 5, so the achievable p-floor is 1/120 — read the statistic, not the
-# decimals, and treat P as descriptive at this sample size).
-TRANSFER_MANTEL_PERM = 5000
-
-# Per-unit colours for the transferability map, applied in CITY_EVENTS order.
-_TRANSFER_COLORS = ['#0F4D92', '#4C9F70', '#7B5EA7', '#E28E2C', '#B0413E']
-
-# Colours for the FEATURE GROUPS of the W2 decomposition.  The six functional
-# shares are treated as ONE group: they are compositional (they sum to a fixed
-# total per component), so splitting them would attribute one signal across six
-# mutually-constrained columns.
-_TRANSFER_GROUP_COLORS = {'func': '#0F4D92', 'dist': '#4C9F70',
-                          'r0': '#B0413E'}
-
 # Minimum usable rows per unit-and-metric inside the cross-city engine, for
 # BOTH the STEP-6 analyses and the STEP-7 curve prediction.  The engine
 # default (MIN_ROWS = 8) guards a WITHIN-city Ridge and is too high here for two
@@ -1195,6 +1220,13 @@ _TRANSFER_GROUP_COLORS = {'func': '#0F4D92', 'dist': '#4C9F70',
 # did not (the city-level cum_loss fold) silently inherited 8 and dropped 11 of
 # 13 units from that figure until 2026-08-03.
 CROSS_CITY_MIN_ROWS = 5
+
+# Rows of the LOO scatter grid.  13 units go 5/5/3 with the short row
+# centred, which stays wider than tall (slide-shaped) while keeping the
+# panels large enough that the type still reads once the figure is
+# scaled to slide width -- a 2-row band puts one row's tick labels into
+# the next row's title.
+CROSS_CITY_SCATTER_GRID_ROWS = 3
 
 
 # ── STEP 1 — global land-use classification ─────────────────────────────────────
@@ -1347,11 +1379,8 @@ def analysis_decomposition_quality(label, code, X_all, W, H, fit_time_cols):
     q = nmf_quality_metrics(X_all.T, W, H, fit_time_cols,
                             min_comp_frac=NMF_MIN_COMP_FRAC)
     os.makedirs(OUTPUT_QUALITY, exist_ok=True)
-    vis_nmf_quality(
-        q,
-        title=f'{label} [{code}]: NMF decomposition quality, fit window '
-              f'(k = {W.shape[1]})',
-        save_path=os.path.join(OUTPUT_QUALITY, f'nmf_quality_{code}.png'))
+    # Figure retired 2026-08-28 — the CHECK is the console line below plus the
+    # cross-city CSV, and neither needed a per-unit three-panel PNG.
     print(f"  Quality (fit window): dist_err={q['dist_err_mean']:.4f}  "
           f"rel_err={q['rel_err']:.4f}  "
           f"comps below {NMF_MIN_COMP_FRAC:.0%}: {q['n_below']}/{W.shape[1]}")
@@ -1393,10 +1422,10 @@ def analysis_cluster_mapping_pca(feats_by_code):
     C2 is the known weak cluster: its pooled rule follows SL_Ida/MB_Dorian
     (+0.87/+0.88) and is anti-aligned with its own member WM_Dorian (-0.19).
 
-    Filed under component_rank/ridge/ because the partition it explains is the
-    ridge one; like the MSA map it reads cross_city_pair_clusters.csv back and
+    Filed under component_rank/ because the partition it explains is the rank
+    channel's; like the MSA map it reads cross_city_pair_clusters.csv back and
     skips if that file is absent, so it never blocks the pipeline."""
-    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank', 'ridge',
+    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
                           'raw_data', 'cross_city_pair_clusters.csv')
     if not os.path.exists(cl_csv):
         print(f"  [cluster mapping] {cl_csv} absent; skipping.")
@@ -1406,7 +1435,10 @@ def analysis_cluster_mapping_pca(feats_by_code):
     from sklearn.decomposition import PCA
     from sklearn.linear_model import RidgeCV
 
-    fcols = [f'func_{c}' for c in SF_CATEGORIES] + ['mean_distance']
+    # Same feature list as every other rank prediction; this one fits its own
+    # ridge because it needs the COEFFICIENT VECTOR (the mapping direction),
+    # not a prediction, which is the one thing rank_predict does not return.
+    fcols = list(RANK_FEATURE_COLS)
     alphas = np.logspace(-3, 3, 13)
     rows, blocks, targets, w_city = [], [], [], {}
     for code, feats in feats_by_code.items():
@@ -1464,8 +1496,7 @@ def analysis_cluster_mapping_pca(feats_by_code):
                 **{f'coef_{c}': float(v[i]) for i, c in enumerate(fcols)}))
     arr = pd.DataFrame(arrows)
 
-    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                           'ridge')
+    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
     raw_dir = os.path.join(out_dir, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
     pts.to_csv(os.path.join(raw_dir, 'cluster_mapping_pca_components.csv'),
@@ -1536,11 +1567,11 @@ def analysis_cluster_function_graph(feats_by_code):
     non-significant edge in a small cluster is weak evidence, not evidence of
     absence.
 
-    Filed under component_rank/ridge/ with the partition it explains.  Skips
+    Filed under component_rank/ with the partition it explains.  Skips
     (never raises) when the clusters CSV is absent OR does not cover every
     unit — it is a downstream overview figure and must not be able to abort
     the city-level reconstruction and STEP 7-8 that follow it."""
-    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank', 'ridge',
+    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
                           'raw_data', 'cross_city_pair_clusters.csv')
     if not os.path.exists(cl_csv):
         print(f"  [cluster graph] {cl_csv} absent; skipping.")
@@ -1715,8 +1746,7 @@ def analysis_cluster_function_graph(feats_by_code):
                              stress_1=stress[name],
                              max_edge_error=maxerr[name]))
 
-    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                           'ridge')
+    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
     raw_dir = os.path.join(out_dir, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
     pd.DataFrame(recs).to_csv(
@@ -1829,6 +1859,219 @@ def _estimate_held_cluster(held_func, ref_func_by_cluster):
     return min(d, key=d.get)
 
 
+# -- THE rank channel: the one predictor every rank figure goes through -------
+
+def rank_merge_feats(feats):
+    """Add the merged func_<cat> shares RANK_FEATURE_COLS names.
+
+    The decomposition tables carry direction-split shares (share_from_<cat> and
+    share_to_<cat>); the rank channel reads a component's involvement with a
+    function regardless of direction, so the two are summed.  Every other
+    column passes through untouched, so a frame that already carries extras
+    (STEP 7's interaction products, r0_city) survives the merge unharmed."""
+    m = feats.copy()
+    for c in SF_CATEGORIES:
+        m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
+    return m
+
+
+def rank_cluster_context(merged, codes):
+    """The transfer-cluster context RANK_TRAIN_SCOPE='cluster' needs, or None.
+
+    Clusters come from the pairwise transfer heatmap written earlier in the
+    same run, which is why that step must run BEFORE any cluster-restricted
+    rank prediction.  Returns (cluster Series, {code -> func-share matrix});
+    the matrices are what re-estimates a held-out city's membership per fold,
+    so no label of the held unit ever enters its own training pool.  None when
+    the scope is pooled, or the clusters CSV is missing or does not cover
+    `codes` -- the caller then trains on every reference city."""
+    if RANK_TRAIN_SCOPE != 'cluster':
+        return None
+    csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
+                       'raw_data', 'cross_city_pair_clusters.csv')
+    if not os.path.exists(csv):
+        return None
+    cl = pd.read_csv(csv, index_col=0)['cluster']
+    if not all(c in cl.index for c in codes):
+        return None
+    fc = [f'func_{c}' for c in SF_CATEGORIES]
+    return cl, {c: merged[c][fc].dropna().to_numpy(float) for c in codes}
+
+
+def rank_train_pool(held, rest, ctx):
+    """`rest` narrowed to held's ESTIMATED cluster (>=1 city), else all of
+    `rest`.  Falls back to the full pool when there is no context, when the
+    reference cities occupy a single cluster (nothing to choose between), or
+    when the estimate would leave no peers."""
+    if ctx is None:
+        return rest
+    cl, func_of = ctx
+    ref = {}
+    for c in rest:
+        ref.setdefault(int(cl[c]), []).append(func_of[c])
+    if len(ref) < 2:
+        return rest
+    est = _estimate_held_cluster(func_of[held], ref)
+    kept = [c for c in rest if int(cl[c]) == est]
+    return kept if kept else rest
+
+
+def rank_predict(held, train_codes, merged, target='cum_loss',
+                 min_rows=CROSS_CITY_MIN_ROWS, feature_cols=None):
+    """THE rank prediction: held's components scored so that their ORDER is the
+    predicted ordering of `target`.  Returns a Series indexed by component, or
+    None when the engine could not fit the fold.
+
+    Only the ORDER of the returned scores means anything -- each score comes
+    from a ridge fit in a frame where every feature and the target were rank-
+    transformed and then z-scored WITHIN each city-event, so a score sits on no
+    city's loss scale.  That within-unit frame is exactly why this channel
+    transfers: it is immune to the cross-city level and scale drift a pooled
+    frame has to assume away.
+
+    The held unit's target column is overwritten with a placeholder ramp so its
+    true losses cannot reach the fit even by accident.  (The engine's transfer
+    path never uses the test target for prediction anyway; the ramp makes that
+    structural rather than a property one has to re-verify.)  Score the result
+    against the OBSERVED target read separately from the table.
+
+    train_codes == [held] is the one exception: that is the unit's own
+    leave-one-component-out, there is no other city to borrow from, and the
+    real target has to stay in place for the fold to mean anything.
+
+    `feature_cols` defaults to RANK_FEATURE_COLS.  The only caller that
+    overrides it is the pairwise heatmap, which cuts the transfer partition and
+    must do so without r0 -- see PARTITION_FEATURE_COLS for the measurement
+    behind that."""
+    self_fit = list(train_codes) == [held]
+    te = merged[held].copy()
+    fold = {held: te}
+    if not self_fit:
+        te[target] = np.arange(len(te), dtype=float)
+        fold.update({c: merged[c] for c in train_codes})
+    _r2, pred, _g = cross_city_resilience(
+        fold, [target],
+        list(RANK_FEATURE_COLS if feature_cols is None else feature_cols),
+        rank=True,
+        split={'train': list(train_codes), 'test': [held]},
+        target_std='within_unit', model=RANK_MODEL, min_rows=min_rows)
+    pm = pred.get('pooled_LOO' if self_fit else held, {}).get(target)
+    if pm is None:
+        return None
+    _y, ypred, cidx = pm
+    return pd.Series(np.asarray(ypred, dtype=float), index=cidx)
+
+
+def analysis_rank_channel(merged, codes, target='cum_loss'):
+    """The rank channel's leave-one-city-out sweep and its figure.
+
+    One fold per city-event: every other unit is the reference pool, narrowed
+    to the held unit's estimated cluster when RANK_TRAIN_SCOPE says so, and
+    rank_predict scores the held unit's components.  The fold's skill is the
+    Spearman between that predicted ordering and the OBSERVED one, which is the
+    only thing an ordering can be scored on -- an R2 would additionally score a
+    prediction amplitude these scores do not have.
+
+    Writes component_rank/rank_pred_vs_true.png plus the per-fold points and
+    the per-fold rho table under raw_data/, and returns the rho Series.
+
+    Requires the pairwise heatmap to have run FIRST when the scope is
+    'cluster': that step writes the partition this one reads."""
+    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
+    raw_dir = os.path.join(out_dir, 'raw_data')
+    os.makedirs(raw_dir, exist_ok=True)
+    ctx = rank_cluster_context(merged, codes)
+    if RANK_TRAIN_SCOPE == 'cluster' and ctx is None:
+        print("  [rank] RANK_TRAIN_SCOPE=cluster but the clusters CSV is "
+              "absent/incomplete; falling back to pooled rank training.")
+
+    rows, rho = [], {}
+    for held in codes:
+        rest = [c for c in codes if c != held]
+        pool = rank_train_pool(held, rest, ctx)
+        score = rank_predict(held, pool, merged, target=target)
+        if score is None:
+            print(f"  [rank] {held}: the engine returned no fold; skipped.")
+            continue
+        obs = merged[held].loc[score.index, target].astype(float)
+        keep = obs.notna() & score.notna()
+        if int(keep.sum()) < 3:
+            print(f"  [rank] {held}: fewer than 3 scorable components; skipped.")
+            continue
+        r = float(spearmanr(obs[keep], score[keep]).statistic)
+        rho[held] = r
+        for comp in score.index[keep]:
+            rows.append({'code': held, 'component': comp,
+                         target: float(obs[comp]),
+                         'rank_score': float(score[comp]),
+                         'spearman': r, 'n_train': len(pool)})
+    if not rows:
+        print("  [rank] no usable folds; skipping the rank channel outputs.")
+        return pd.Series(dtype=float)
+
+    par = pd.DataFrame(rows)
+    par.to_csv(os.path.join(raw_dir, 'rank_pred_vs_true.csv'), index=False)
+    rser = pd.Series(rho, name='spearman').rename_axis('code').reindex(
+        [c for c in codes if c in rho])
+    rser.to_csv(os.path.join(raw_dir, 'rank_loo_spearman.csv'))
+    labels = {c['code']: c['label'] for c in CITY_EVENTS}
+    names = {c: f"{labels.get(c, c)} ({c.split('_', 1)[-1]})"
+             for c in rser.index}
+    vis_rank_pred_vs_true(
+        par, names=names, obs_col=target,
+        save_path=os.path.join(out_dir, 'rank_pred_vs_true.png'),
+        footnote=(f'mean test Spearman ρ over the {len(rser)} held-out '
+                  f'city-events = {rser.mean():+.2f}'))
+    print(f"  [rank] {len(rser)} folds, mean Spearman ρ "
+          f"{rser.mean():+.3f} -> {out_dir}")
+    return rser
+
+
+def city_total_score(held, rest, merged, feats_test, model,
+                     feature_cols=None, pooled_cols=None,
+                     min_rows=CROSS_CITY_MIN_ROWS):
+    """THE phi stage of the city-total estimator: one unit's aggregate score s.
+
+    Every component's cum_loss is predicted on the POOLED-TRAIN scale and the
+    predictions are weight_normal-averaged WITHOUT ever being un-standardized.
+    Keeping them standardized is the whole point: un-standardizing multiplies
+    by the large component-to-component spread and mis-calibrates the
+    aggregate, which is what the raw channel does.  The result feeds
+    _city_total_from_scores (the rho stage) -- together those two are the city
+    total, and both STEP 6's headline figure and STEP 7's quantile-mapping
+    anchor now read this same pair.
+
+    The held unit's cum_loss is overwritten with a placeholder ramp so its own
+    losses cannot reach the fit even by accident.  `feature_cols` defaults to
+    CITY_TOTAL_FEATURE_COLS; the one caller that overrides it is STEP 6's
+    cosine-kNN arm, deliberately kept on the smaller pre-interaction set (a
+    cosine over 24 mostly-collinear products dilutes the neighbourhood it
+    depends on).  NaN when the engine cannot form the fold."""
+    cols = list(CITY_TOTAL_FEATURE_COLS if feature_cols is None
+                else feature_cols)
+    pcols = list(CITY_TOTAL_POOLED_COLS if pooled_cols is None
+                 else pooled_cols)
+    te = merged[held].copy()
+    te['cum_loss'] = np.arange(len(te), dtype=float)
+    fold = {held: te}
+    fold.update({c: merged[c] for c in rest})
+    _r2, pred, _g = cross_city_resilience(
+        fold, ['cum_loss'], cols, rank=False,
+        split={'train': list(rest), 'test': [held]}, target_std='pooled_train',
+        level_feature_cols=LEVEL_FEATURE_COLS, model=model,
+        pooled_feature_cols=pcols, min_rows=min_rows)
+    pm = pred.get(held, {}).get('cum_loss')
+    if pm is None:
+        return np.nan
+    _y, ypred, cidx = pm
+    if len(cidx) == 0:
+        return np.nan
+    w = feats_test[held].loc[cidx, 'weight_normal'].to_numpy(dtype=float)
+    yp = np.asarray(ypred, dtype=float)
+    wsum = float(w.sum())
+    return float((w * yp).sum() / wsum) if wsum > 0 else float(yp.mean())
+
+
 def analysis_cluster_restricted_rank(feats_by_code):
     """Would restricting the rank-prediction TRAINING set to same-cluster
     cities help?  Deployable (not oracle) test: the held-out city's cluster is
@@ -1852,7 +2095,7 @@ def analysis_cluster_restricted_rank(feats_by_code):
     is a diagnostic — nothing downstream consumes it — filed with the ridge
     cluster it depends on; skips (never raises) if the clusters CSV is absent
     or does not cover every unit."""
-    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank', 'ridge',
+    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
                           'raw_data', 'cross_city_pair_clusters.csv')
     if not os.path.exists(cl_csv):
         print(f"  [cluster-restricted rank] {cl_csv} absent; skipping.")
@@ -1863,7 +2106,7 @@ def analysis_cluster_restricted_rank(feats_by_code):
         return
 
     from sklearn.linear_model import RidgeCV
-    fcols = FUNC_MERGED_COLS + ['mean_distance']     # the rank-channel features
+    fcols = list(RANK_FEATURE_COLS)                  # the rank-channel features
     alphas = np.logspace(-3, 3, 13)
     codes = list(feats_by_code)
 
@@ -1899,8 +2142,7 @@ def analysis_cluster_restricted_rank(feats_by_code):
                          rho_est=_predict(same_est, held)))
     R = pd.DataFrame(rows)
 
-    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                           'ridge')
+    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
     raw_dir = os.path.join(out_dir, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
     R.to_csv(os.path.join(raw_dir, 'cluster_restricted_rank.csv'), index=False)
@@ -1978,9 +2220,6 @@ def analysis_decomposition_quality_summary(rows):
     df = pd.DataFrame(rows).set_index('code')
     os.makedirs(OUTPUT_QUALITY_RAW, exist_ok=True)
     df.to_csv(os.path.join(OUTPUT_QUALITY_RAW, 'nmf_quality_metrics.csv'))
-    vis_nmf_quality_summary(
-        df, NMF_MIN_COMP_FRAC,
-        save_path=os.path.join(OUTPUT_QUALITY, 'nmf_quality_summary.png'))
     bad = df[df['n_below'] > 0]
     flag = (f"{len(bad)} unit(s) VIOLATE the component-count rule: "
             + ", ".join(f"{c} ({int(n)})" for c, n in bad['n_below'].items())
@@ -2412,166 +2651,6 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
 
 # ── STEP 6 — cross-city prediction analyses ─────────────────────────────────────
 
-def analysis_cross_city(feats_by_city, lambda_ctx=None,
-                        merge_func_directions=True, res_cols=None,
-                        methods=tuple(CROSS_CITY_METHOD_STD), split=None,
-                        target_std=None, subdir=None, level_feature_cols=(),
-                        model='ridge', pooled_feature_cols=(),
-                        min_rows=CROSS_CITY_MIN_ROWS):
-    """Cross-city rank-transfer generalisation driven by an explicit disjoint
-    train/test `split` of city-event codes: pooled(train) -> predict each test
-    unit.  Each method's target standardization is HARD-PAIRED via
-    CROSS_CITY_METHOD_STD (only spearman -> within_unit survives; the pearson /
-    pooled_train method and the pooled-LOO display mode were retired 2026-08-04
-    with the raw-value channel): target_std=None resolves the pairing, an
-    explicit mismatching value raises ValueError.  Per method into
-    cross_city_resi_pred/<subdir>/ (subdir=None -> the method's paired label):
-    writes the predicted-vs-actual scatter AND its raw data
-    (raw_data/cross_city_scatter_<col>_*_raw.csv), and RETURNS
-    {method -> r2_table} so the caller can aggregate (e.g. the LOO matrix).
-    split=None -> skipped (returns {}).
-    lambda_ctx tags the filenames.  res_cols=None -> the full RES_COLS."""
-    res_cols = list(RES_COLS) if res_cols is None else list(res_cols)
-    # Defensive guard: reject a method/std combo OR an output label that contradicts the
-    # pairing BEFORE anything is computed or written (all methods validated up front; the
-    # subdir check stops results being written under the other method's folder).
-    for m in methods:
-        expected_std, expected_label = CROSS_CITY_METHOD_STD[m]
-        if target_std is not None and target_std != expected_std:
-            raise ValueError(
-                f"analysis_cross_city: method '{m}' is paired with target_std "
-                f"'{expected_std}' (CROSS_CITY_METHOD_STD); got '{target_std}'")
-        # The model folder nests INSIDE the paired label, so the check is a
-        # prefix one: component_rank/cos_KNN is legal, another method's label
-        # still is not.
-        if subdir is not None and not str(subdir).startswith(expected_label):
-            raise ValueError(
-                f"analysis_cross_city: method '{m}' writes under subdir "
-                f"'{expected_label}' (CROSS_CITY_METHOD_STD); got '{subdir}'")
-    if split is None:
-        print("  [cross-city] split is None -> skipping the cross-city step.")
-        return {}
-    lambda_tag = _lambda_tag(lambda_ctx)
-
-    # Per-unit predictor tables (merged func + distance + income).  The
-    # merge is method-independent (only the rank flag inside cross_city_resilience
-    # differs), so build them once and reuse across methods.
-    if merge_func_directions:
-        func_cols = [f'func_{c}' for c in SF_CATEGORIES]
-        cities = {}
-        for code, city_feats in feats_by_city.items():
-            merged_feats = city_feats.copy()
-            for c in SF_CATEGORIES:
-                merged_feats[f'func_{c}'] = city_feats[f'share_from_{c}'] + city_feats[f'share_to_{c}']
-            cities[code] = merged_feats
-    else:
-        func_cols = FUNC_COLS
-        cities = feats_by_city
-    # income is NOT a rank-channel predictor (dropped 2026-08-04): the same
-    # ablation found it carries nothing the func shares and distance do not
-    # already say in rank space — removing it left every fold within +-0.04 and
-    # nudged the mean up (+0.280 -> +0.292).  The pooled_train paths (city-level
-    # reconstruction, STEP-7) keep it: there it is a LEVEL predictor, which is a
-    # different job and was not part of this test.
-    feature_cols = func_cols + ['mean_distance']
-
-    train = [c for c in split.get('train', []) if c in cities]
-    test  = [c for c in split.get('test', []) if c in cities]
-
-    results = {}
-    for method in methods:
-        rank = (method == 'spearman')   # spearman = rank transfer, pearson = raw
-        std_mode, std_label = CROSS_CITY_METHOD_STD[method]   # paired (guard passed)
-        out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED,
-                               std_label if subdir is None else subdir)
-        raw_dir = os.path.join(out_dir, 'raw_data')
-
-        r2_table, pred, _groups = cross_city_resilience(
-            cities, res_cols, feature_cols, rank=rank, split=split,
-            target_std=std_mode, level_feature_cols=level_feature_cols, model=model,
-            # Only the pooled columns this call actually has: the rank channel
-            # dropped income from feature_cols, and the engine indexes
-            # pooled_feature_cols INTO feature_cols before it reaches the branch
-            # that would have ignored them.
-            pooled_feature_cols=[c for c in pooled_feature_cols
-                                 if c in feature_cols],
-            min_rows=min_rows)
-        if r2_table.shape[1] == 0:
-            continue                                    # skipped/empty (warning already emitted)
-        results[method] = r2_table
-
-        # Predicted-vs-actual scatter per output column (test unit, or the pool).
-        for col, pred_data in pred.items():
-            # The engine hands back the model frame (within-unit z-scored ranks);
-            # the figure shows the RANKS themselves.  The z-score's constants are
-            # the rank vector's own mean/sd, so inverting is exact and carries no
-            # test-label information: for untied ranks mean=(n+1)/2 and
-            # sd=sqrt((n^2-1)/12) depend on n alone.  rankdata on the surviving
-            # rows (cidx) reproduces them and stays correct under ties.
-            # Only `pred` is rewritten here — r2_table was computed upstream on
-            # the standardized arrays and the other cross_city_resilience callers
-            # (STEP-6 city reconstruction, STEP-7) read the engine directly, so
-            # none of them sees this.
-            plot_data = dict(pred_data)
-            for m, pm in pred_data.items():
-                if pm is None:
-                    continue
-                y_std, p_std, cidx = (np.asarray(pm[0], dtype=float),
-                                      np.asarray(pm[1], dtype=float), pm[2])
-                # Every point belongs to the (single) test unit `col`.
-                r = rankdata(cities[col].loc[cidx, m].to_numpy(float))
-                sd = r.std() or 1.0
-                plot_data[m] = (y_std * sd + r.mean(), p_std * sd + r.mean(),
-                                cidx)
-            # Spearman replaces R² on the panel: the target IS a within-unit rank,
-            # so ordering is what this channel claims to transfer, while R² also
-            # scores prediction amplitude (a 2026-08-04 sandbox found the two
-            # rank models tie on rho and differ on R² almost entirely through the
-            # amplitude of their predictions).  Invariant to the inversion above.
-            col_stat = {}
-            for m in res_cols:
-                pm = pred_data.get(m)
-                col_stat[m] = (np.nan if pm is None or len(pm[0]) < 3
-                               else float(spearmanr(pm[0], pm[1]).statistic))
-            col_summary = pd.DataFrame({
-                'stat': col_stat,
-                'passed': {m: (bool(col_stat[m] > 0) if pd.notna(col_stat[m])
-                               else False) for m in res_cols},
-                'status': {m: ('ok' if pred_data[m] is not None else 'insufficient_data')
-                           for m in res_cols},
-            })
-            # No suptitle: it named every training unit, which at 13 units wrapped
-            # to four lines over a single panel.  The filename carries the test
-            # unit and the training set is every other unit by construction.
-            fname = f'cross_city_scatter_{col}_{lambda_tag}.png'
-            vis_scatter_reg_pred(
-                plot_data, col_summary, res_cols, stat_label='test Spearman ρ',
-                unit='rank within unit', title=None,
-                save_path=os.path.join(out_dir, fname))
-
-            # Raw data behind this scatter (predicted vs actual per metric), so each
-            # point stays recoverable for later analysis.
-            rows = []
-            for m in res_cols:
-                pm = plot_data.get(m)
-                if pm is None:
-                    continue
-                y_true, y_pred, comp_index = pm
-                for i in range(len(y_true)):
-                    # Same scale as the figure (within-unit ranks), plus the
-                    # panel's rho so the number stays with its points.
-                    rows.append({'metric': m, 'comp_index': comp_index[i],
-                                 'y_true': float(y_true[i]), 'y_pred': float(y_pred[i]),
-                                 'spearman': col_stat.get(m, np.nan),
-                                 'unit': col})
-            if rows:
-                os.makedirs(raw_dir, exist_ok=True)
-                pd.DataFrame(rows).to_csv(
-                    os.path.join(raw_dir, f'cross_city_scatter_{col}_{lambda_tag}_raw.csv'),
-                    index=False)
-    return results
-
-
 # Raw SLD columns that feed the per-category land-use score (counthu = housing proxy;
 # the rest are the 2-digit employment sectors aggregated by FUNCTION_FIELD_MAP).
 _SLD_SCORE_COLS = ['counthu', 'e8_ret', 'e8_off', 'e8_svc', 'e8_ent',
@@ -2758,6 +2837,74 @@ def _mlb2_spread_multiplier(held, rest, cen_by, sbb_by, vec_by,
     return float(np.exp(proj(held) @ g))
 
 
+# The backbone window the spread branch was DEVELOPED on.  Every ML-B2inc
+# decision above -- the 21-feature block, K = 2, the h/lambda grids, the
+# covariance rejection, the income column -- was scored by the mean W1 that
+# analysis_centered_spectrum reports, and that ran this fixed 15-day grid: the
+# adoption record's 1.486 -> 1.474 reproduces from centered_spectrum_metrics.csv
+# to three decimals.  STEP 7 used to pass each held unit's FULL analysis horizon
+# here instead (44/71/151 days, and fold-dependent, since the window came from
+# whichever unit was held out), which applied a tuned component at coordinates
+# it was never validated on.  Both callers now run this window (unified
+# 2026-08-28).
+SPREAD_BACKBONE_DAYS = np.arange(15.0)
+
+
+def pooled_backbone_alpha(merged, codes):
+    """The backbone recovery rate the spread proxy is defined at: the pooled
+    mean of the training units' component recovery_alpha.  Kept separate from
+    STEP 7's curve alpha-bar, which its own ablation switch may replace -- the
+    spread proxy stays pinned to the rate ML-B2inc was fitted at."""
+    a = [merged[c]['recovery_alpha'].dropna().to_numpy(dtype=float)
+         for c in codes if c in merged]
+    a = [v for v in a if len(v)]
+    return float(np.mean(np.concatenate(a))) if a else np.nan
+
+
+def centred_spectra(merged, codes):
+    """{code -> its components' cum_loss on the unit's own mean}, the object
+    the spread branch transfers: centring strips the city LEVEL so a spectrum
+    describes only WITHIN-city inequality.  Units with fewer than two usable
+    components are dropped."""
+    out = {}
+    for c in codes:
+        if c not in merged:
+            continue
+        v = merged[c]['cum_loss'].dropna().to_numpy(dtype=float)
+        if len(v) >= 2:
+            out[c] = v - v.mean()
+    return out
+
+
+def spread_scale(held, rest, merged, mu_a):
+    """THE spread scale: (base, mult), the held unit's centred-spectrum width
+    relative to the training barycentre's.
+
+    `base` is B2, the zero-parameter backbone ratio -- the held unit's backbone
+    spread over the training units' mean, both on SPREAD_BACKBONE_DAYS.  `mult`
+    is the fitted ML-B2inc increment exp(gamma'PC), which is 1.0 wherever the
+    ingredients are missing, so base alone is always a valid answer.  The scale
+    the caller applies is base * mult.
+
+    Callers pass the SAME arguments and get the same number: STEP 6 scores it
+    by W1 against the held unit's true spectrum, STEP 7 multiplies the
+    barycentre by it before the location shift."""
+    codes = [held] + [c for c in rest if c != held]
+    cen = centred_spectra(merged, codes)
+    sbb = {c: _backbone_spread(merged[c]['r0'].to_numpy(dtype=float),
+                               SPREAD_BACKBONE_DAYS, mu_a)
+           for c in codes if c in merged}
+    s_train = [sbb[c] for c in rest
+               if c in sbb and np.isfinite(sbb[c]) and sbb[c] > 0]
+    base = (sbb[held] / float(np.mean(s_train))
+            if s_train and np.isfinite(sbb.get(held, np.nan)) else 1.0)
+    vec = {c: _mlb2_feature_vec(merged[c]) for c in codes if c in merged}
+    vec = {c: v for c, v in vec.items() if v is not None}
+    mult = _mlb2_spread_multiplier(held, rest, cen, sbb, vec,
+                                   CENTERED_QUANTILE_GRID)
+    return float(base), float(mult)
+
+
 def analysis_centered_spectrum(feats_test, codes):
     """Score the CENTRED-SPECTRUM transfer on its own, leave-one-unit-out.
 
@@ -2815,24 +2962,18 @@ def analysis_centered_spectrum(feats_test, codes):
         print("  [centered_spectrum] fewer than 3 usable units; skipping.")
         return
     pg = CENTERED_QUANTILE_GRID
-    days = np.arange(15.0)                       # the shared disaster window
     vec_by = {c: _mlb2_feature_vec(feats_test[c]) for c in usable}
     vec_by = {c: v for c, v in vec_by.items() if v is not None}
     rows, pred = [], {}
     for held in usable:
         rest = [c for c in usable if c != held]
         bary = np.mean([np.quantile(cen[c], pg) for c in rest], axis=0)
-        # fold's backbone rate: pooled-train mean recovery_alpha (STEP 7's mu_a)
-        alph = [feats_test[c]['recovery_alpha'].dropna().to_numpy(dtype=float)
-                for c in rest]
-        alph = np.concatenate([a for a in alph if len(a)]) if alph else []
-        mu_a = float(np.mean(alph)) if len(alph) else np.nan
-        sbb = {c: _backbone_spread(feats_test[c]['r0'].to_numpy(dtype=float),
-                                   days, mu_a) for c in usable}
-        s_train = [sbb[c] for c in rest if np.isfinite(sbb[c]) and sbb[c] > 0]
-        scale = (sbb[held] / float(np.mean(s_train))
-                 if s_train and np.isfinite(sbb.get(held, np.nan)) else 1.0)
-        mult = _mlb2_spread_multiplier(held, rest, cen, sbb, vec_by, pg)
+        # The SHARED spread definition (spread_scale): the backbone ratio and
+        # the ML-B2inc increment, both on SPREAD_BACKBONE_DAYS.  STEP 7 calls
+        # the same function with the same arguments, so this figure and the
+        # curve forecast's width are one number.
+        mu_a = pooled_backbone_alpha(feats_test, rest)
+        scale, mult = spread_scale(held, rest, feats_test, mu_a)
         est = bary * (scale * mult)
         est = est - est.mean()
         qt = np.quantile(cen[held], pg)
@@ -2899,8 +3040,8 @@ def analysis_centered_spectrum(feats_test, codes):
         # the six functional shares fill columns 2-4; gap_after=0 then sets
         # that first column apart.
         sdvar.setdefault('backbone spread from $r_0$', {})[c] = (
-            _backbone_spread(f['r0'].to_numpy(dtype=float), np.arange(15.0),
-                             mu_all))
+            _backbone_spread(f['r0'].to_numpy(dtype=float),
+                             SPREAD_BACKBONE_DAYS, mu_all))
         for i in range(3):
             sdvar.setdefault(f'SD of {MLB2_FUNCS[i]} share', {})[c] = (
                 sd_of(F[:, i]))
@@ -3115,32 +3256,19 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     # against the predictor it was tuned on.  kNN gains nothing from the extra
     # columns anyway: a cosine over 24 mostly-collinear products dilutes the
     # neighbourhood it depends on (sandbox 2026-08-12).
-    fcols_ext = CITY_TOTAL_FEATURE_COLS
-    pooled_ext = CITY_TOTAL_POOLED_COLS
-
     def _fold_ex(held, rest, model_id):
-        cols = fcols_ext if model_id == 'ridge' else fcols_r0
-        pcols = pooled_ext if model_id == 'ridge' else pooled_r0
-        fold = {held: test_merged[held]}
-        fold.update({c: train_merged[c] for c in rest})
-        _, pred, _ = cross_city_resilience(
-            fold, RES_COLS, cols, rank=False,
-            split={'train': rest, 'test': [held]}, target_std=target_std,
-            level_feature_cols=LEVEL_FEATURE_COLS, model=model_id,
-            pooled_feature_cols=pcols,
-            min_rows=CROSS_CITY_MIN_ROWS)
-        pm = pred.get(held, {}).get('cum_loss')
-        if pm is None:
-            return None
-        ypred_std = np.asarray(pm[1], dtype=float)
-        cidx = pm[2]
-        if len(cidx) == 0:
-            return None
-        w = feats_test[held].loc[cidx, 'weight_normal'].to_numpy(dtype=float)
-        wsum = float(w.sum())
-        if wsum <= 0:                       # degenerate weights -> plain mean
-            w, wsum = np.ones(len(cidx)), float(len(cidx))
-        return dict(scity=float((w * ypred_std).sum() / wsum))
+        """One fold's aggregate score s, through the SHARED phi stage
+        (city_total_score) -- the same call STEP 7's quantile-mapping anchor
+        makes, so the headline figure and the anchor cannot drift apart.  The
+        cosine-kNN arm is the one deliberate override: it keeps the smaller
+        pre-interaction feature set (see fcols_r0 above)."""
+        ridge_arm = (model_id == 'ridge')
+        sc = city_total_score(
+            held, rest, {**train_merged, held: test_merged[held]}, feats_test,
+            model_id,
+            feature_cols=None if ridge_arm else fcols_r0,
+            pooled_cols=None if ridge_arm else pooled_r0)
+        return None if not np.isfinite(sc) else dict(scity=float(sc))
 
     # The legacy reconstruction of the component predictions into a city
     # day-equivalent, kept CSV-only as a reference point:
@@ -3177,14 +3305,14 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         row = {'code': held, 'cum_loss_gt': gt[held],
                'cum_loss_pred_knn': pred_knn, 'cum_loss_baseline': base}
 
-        # The aggr_denorm strategy x the same two predictors as the rank
-        # channel: aggregate the standardized component scores into s, then the
+        # The aggr_denorm strategy x both city-level predictors: aggregate
+        # the standardized component scores into s, then the
         # city-level rho stage (_city_total_from_scores) scores [s, r0_city, GDP]
         # and variance-matches onto day-equivalents.  The inner s values must
         # come from the SAME predictor and feature set, so the nested loop reruns
         # _fold_ex per fold.  Both predictors go through the identical rho stage,
         # so the figure stays a like-for-like comparison of the PREDICTOR.
-        for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
+        for model_dir, model_id in CITY_TOTAL_DECOMP_MODELS.items():
             outer_ex = _fold_ex(held, rest, model_id)
             if outer_ex is None:
                 row[f'cum_loss_pred_aggr_denorm_{model_dir}'] = np.nan
@@ -3218,7 +3346,7 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
         'aggr_denorm': 'Decompose+aggr+denorm',
     }
     for strat, strat_title in _STRATEGY_TITLES.items():
-        for model_dir in CROSS_CITY_RANK_MODELS:
+        for model_dir in CITY_TOTAL_DECOMP_MODELS:
             col = f'cum_loss_pred_{strat}_{model_dir}'
             if col not in res.columns:
                 continue
@@ -3245,7 +3373,7 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
     # the aggr_denorm strategy under both predictors against the
     # decomposition-free baseline.  Labels are spelled out — this is the
     # reader-facing figure, so no internal codenames.
-    # The series are BUILT from CROSS_CITY_RANK_MODELS rather than hardcoded:
+    # The series are BUILT from CITY_TOTAL_DECOMP_MODELS rather than hardcoded:
     # those keys name the columns written above, and vis_bar_cross_city_resi_pred
     # silently drops a column it cannot find, so a hardcoded name that drifted
     # out of sync would yield a headline figure showing only the baseline with
@@ -3254,12 +3382,12 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
                      'ridge': 'ridge + func interactions + city r0'}
     bar_pred_cols = tuple(
         (f'Component transfer, {_MODEL_LABELS.get(m, m)}',
-         f'cum_loss_pred_aggr_denorm_{m}') for m in CROSS_CITY_RANK_MODELS)
+         f'cum_loss_pred_aggr_denorm_{m}') for m in CITY_TOTAL_DECOMP_MODELS)
     _missing = [c for _l, c in bar_pred_cols if c not in res.columns]
     if _missing:
         raise KeyError(f"analysis_cross_city_resi_pred: the headline figure's "
                        f"prediction columns {_missing} were never written; "
-                       f"CROSS_CITY_RANK_MODELS and the LOO loop disagree.")
+                       f"CITY_TOTAL_DECOMP_MODELS and the LOO loop disagree.")
     vis_bar_cross_city_resi_pred(
         res, save_path=os.path.join(OUTPUT_CITY_TOTAL,
                                     'bar_cross_city_resi_pred.png'),
@@ -3415,19 +3543,16 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
             f"'{paired_label}' (CROSS_CITY_METHOD_STD); got '{std_label}'")
     target_std = expected_std
     subdir = std_label
-    rank = (method == 'spearman')
-    # Same rank channel as analysis_cross_city, so the same predictors:
-    # income is out (see that function).
-    feature_cols = [f'func_{c}' for c in SF_CATEGORIES] + ['mean_distance']
-
-    def _merge(feats):
-        m = feats.copy()
-        for c in SF_CATEGORIES:
-            m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
-        return m
-
-    train_merged = {c: _merge(feats_train[c]) for c in codes}
-    test_merged  = {c: _merge(feats_test[c]) for c in codes}
+    # method/target_std/model/level_feature_cols/pooled_feature_cols survive as
+    # the pairing GUARD above only: what is actually fitted is rank_predict, so
+    # the pair matrix cannot drift away from the rest of the rank channel.
+    # THE rank channel (rank_predict), one training city at a time, fitted on
+    # PARTITION_FEATURE_COLS -- the rank features WITHOUT r0.  Same model, same
+    # standardization, same code path as every other rank prediction; the one
+    # difference is the column list, and it is there because r0 flattens the
+    # community structure this matrix exists to expose (see the constant).
+    train_merged = {c: rank_merge_feats(feats_train[c]) for c in codes}
+    test_merged = {c: rank_merge_feats(feats_test[c]) for c in codes}
 
     # Cell = SPEARMAN rho of the pair's predicted vs actual cum_loss ordering,
     # not the engine's R².  This channel's target is a within-unit rank, so the
@@ -3444,17 +3569,15 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
         for b in codes:
             feats_pair = ({a: test_merged[a]} if a == b           # self: within-a LOO
                           else {a: train_merged[a], b: test_merged[b]})
-            _r2_t, pred, _ = cross_city_resilience(
-                feats_pair, RES_COLS, feature_cols, rank=rank,
-                split={'train': [a], 'test': [b]}, target_std=target_std,
-                level_feature_cols=level_feature_cols, model=model,
-                pooled_feature_cols=[c for c in pooled_feature_cols
-                                     if c in feature_cols],
-                min_rows=min_rows)
-            col = 'pooled_LOO' if a == b else b
-            pm = pred.get(col, {}).get('cum_loss')
-            mat.loc[a, b] = (float(spearmanr(pm[0], pm[1]).statistic)
-                             if pm is not None and len(pm[0]) >= 3 else np.nan)
+            score = rank_predict(b, [a], feats_pair, min_rows=min_rows,
+                                 feature_cols=PARTITION_FEATURE_COLS)
+            if score is None or len(score) < 3:
+                mat.loc[a, b] = np.nan
+                continue
+            obs = feats_pair[b].loc[score.index, 'cum_loss'].astype(float)
+            keep = obs.notna() & score.notna()
+            mat.loc[a, b] = (float(spearmanr(obs[keep], score[keep]).statistic)
+                             if int(keep.sum()) >= 3 else np.nan)
 
     out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, subdir)
     raw_dir = os.path.join(out_dir, 'raw_data')
@@ -3482,168 +3605,6 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
           f"[{len(blocks)} Louvain clusters: "
           f"{', '.join(f'C{c}={s}' for _, s, c in blocks)}]")
     return mat
-
-
-# ── STEP 8 — transferability: does domain proximity predict rank transfer? ─────
-
-def analysis_transferability(feats_test, codes):
-    """Which city-events can lend their cum_loss ORDERING to which others, and
-    can that be read off the FEATURES alone (i.e. before any target label is
-    seen)?  This is the source-selection question for a new city-event.
-
-    Scope — RANK only.  The pipeline's cum_loss channel is a rank channel: the
-    ordering is what transfers across units (the numeric level is not learned
-    from features but borrowed from the pooled training distribution and
-    re-anchored per unit, see _quantile_mapped_chat).  Measured against the same
-    domain distances, the NUMERIC cum_loss transfer carries no relation at all
-    (sandbox 2026-07-28: spearman +0.02, Mantel P = 0.99, against -0.74 /
-    P = 0.017 for the ordering), so this analysis is deliberately confined to
-    the ordering and its figure is labelled accordingly.
-
-    Distance — entropic-OT (Sinkhorn) W2 between the two units' COMPONENT
-    CLOUDS in the standardized feature space, each component carrying its
-    weight_normal as mass.  The two per-event LEVEL covariates are excluded:
-    being constant within a unit they are domain identifiers in disguise and
-    would separate the units by construction, making the comparison circular.
-
-    Transfer — Ridge fitted on the source unit's components, applied to the
-    target's, scored by spearman(prediction, observed cum_loss).  Directed, so
-    the matrix is asymmetric; panel A can only draw the symmetrized value.
-
-    Writes transferability_map.png plus the three matrices under raw_data/.
-
-    Features follow the rank channel they explain (re-aligned 2026-08-04, when
-    component_rank/ dropped income): func + mean_distance + r0.  Keeping income
-    here while the rank models no longer see it would measure domain proximity
-    over a coordinate the transfer being explained cannot use."""
-    feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
-                    + ['mean_distance', 'r0'])
-
-    def _unit(code):
-        t = feats_test[code].copy()
-        for c in SF_CATEGORIES:
-            t[f'func_{c}'] = t[f'share_from_{c}'] + t[f'share_to_{c}']
-        X = t[feature_cols].to_numpy(dtype=float)
-        y = t['cum_loss'].to_numpy(dtype=float)
-        w = t['weight_normal'].to_numpy(dtype=float)
-        ok = (np.isfinite(X).all(axis=1) & np.isfinite(y)
-              & np.isfinite(w) & (w > 0))
-        return X[ok], y[ok], w[ok] / w[ok].sum() if ok.sum() else (X, y, w)
-
-    U = {c: _unit(c) for c in codes}
-    usable = [c for c in codes if len(U[c][1]) >= TRANSFER_MIN_ROWS]
-    if len(usable) < 3:
-        print("  [transferability] fewer than 3 usable units; skipping.")
-        return None
-    codes = usable
-    n = len(codes)
-    pooled = np.vstack([U[c][0] for c in codes])
-    mu = pooled.mean(axis=0)
-    sd = np.where(pooled.std(axis=0) < 1e-12, 1.0, pooled.std(axis=0))
-    Zs = {c: (U[c][0] - mu) / sd for c in codes}
-
-    def _sinkhorn_coupling(Xa, wa, Xb, wb, eps_frac=0.1, iters=400):
-        """Entropic-OT coupling; eps scaled to the cost median so the
-        regularization is comparable across pairs of different spread."""
-        C = ((Xa[:, None, :] - Xb[None, :, :]) ** 2).sum(-1)
-        K = np.exp(-C / (eps_frac * np.median(C)))
-        u = np.ones_like(wa)
-        for _ in range(iters):
-            v = wb / (K.T @ u + 1e-300)
-            u = wa / (K @ v + 1e-300)
-        return u[:, None] * K * v[None, :], C
-
-    def _ridge_fit(X, y):
-        m, s = X.mean(axis=0), X.std(axis=0)
-        s = np.where(s < 1e-12, 1.0, s)
-        Xs = (X - m) / s
-        A = Xs.T @ Xs + np.eye(Xs.shape[1])            # ridge, alpha = 1
-        coef = np.linalg.solve(A, Xs.T @ (y - y.mean()))
-        return lambda Q: ((Q - m) / s) @ coef + y.mean()
-
-    # A squared-Euclidean cost is additive over dimensions, so ONE coupling
-    # yields both the pair's W2 and its exact split over feature groups.
-    groups = {'func': list(range(len(SF_CATEGORIES))),
-              'dist': [len(SF_CATEGORIES)],
-              'r0': [len(SF_CATEGORIES) + 1]}
-    W2 = np.zeros((n, n))
-    T = np.full((n, n), np.nan)
-    pair_rows = []
-    for i, a in enumerate(codes):
-        pred_a = _ridge_fit(U[a][0], U[a][1])
-        for j, b in enumerate(codes):
-            if i < j:
-                gam, _ = _sinkhorn_coupling(Zs[a], U[a][2], Zs[b], U[b][2])
-                per_dim = np.array([
-                    float((gam * (Zs[a][:, None, d] - Zs[b][None, :, d]) ** 2)
-                          .sum())
-                    for d in range(Zs[a].shape[1])])
-                W2[i, j] = W2[j, i] = float(per_dim.sum())
-                row = dict(
-                    pair=f'{a.split("_", 1)[-1][:3]}–{b.split("_", 1)[-1][:3]}',
-                    a=a, b=b, w2=W2[i, j])
-                row.update({g: float(per_dim[dims].sum())
-                            for g, dims in groups.items()})
-                pair_rows.append(row)
-            if i != j:
-                T[i, j] = float(spearmanr(pred_a(U[b][0]), U[b][1]).statistic)
-    Tsym = np.nan_to_num((T + T.T) / 2.0)
-    dec = pd.DataFrame(pair_rows)
-    dec['transfer'] = [Tsym[codes.index(r.a), codes.index(r.b)]
-                       for r in dec.itertuples()]
-    dec = dec.sort_values('w2').reset_index(drop=True)
-
-    # Mantel: the pair entries are not independent (each unit appears in n-1 of
-    # them), so significance comes from permuting UNIT LABELS, not pairs.
-    iu = np.triu_indices(n, 1)
-    rho = float(spearmanr(W2[iu], Tsym[iu]).statistic)
-    rng = np.random.default_rng(0)
-    hits = 0
-    for _ in range(TRANSFER_MANTEL_PERM):
-        p = rng.permutation(n)
-        r = float(spearmanr(W2[np.ix_(p, p)][iu], Tsym[iu]).statistic)
-        if abs(r) >= abs(rho):
-            hits += 1
-    pval = (hits + 1) / (TRANSFER_MANTEL_PERM + 1)
-
-    # 2-D view of the SAME standardized space the distances live in; the map is
-    # an approximation of it, which is why panel B repeats the claim in full
-    # dimension.
-    Zall = np.vstack([Zs[c] for c in codes])
-    Zc = Zall - Zall.mean(axis=0)
-    _, _, vt = np.linalg.svd(Zc, full_matrices=False)
-    var = (Zc @ vt.T).var(axis=0)
-    var_ratio = (var / var.sum())[:2]
-    emb = {c: (Zs[c] - Zall.mean(axis=0)) @ vt[:2].T for c in codes}
-    centroids = {c: emb[c].mean(axis=0) for c in codes}
-
-    os.makedirs(os.path.join(OUTPUT_TRANSFER, 'raw_data'), exist_ok=True)
-    for name, M in (('domain_distance_w2', W2), ('rank_transfer_directed', T),
-                    ('rank_transfer_symmetrized', Tsym)):
-        pd.DataFrame(M, index=codes, columns=codes).to_csv(
-            os.path.join(OUTPUT_TRANSFER, 'raw_data', f'{name}.csv'))
-    dec.to_csv(os.path.join(OUTPUT_TRANSFER, 'raw_data',
-                            'w2_group_decomposition.csv'), index=False)
-    # Label by EVENT, not city: two of the units are the same city under
-    # different hurricanes, and panel C exists precisely to show that they are
-    # not each other's nearest neighbour.
-    labels = {c: (c.split('_', 1)[1] if '_' in c else c) for c in codes}
-    colors = {c: _TRANSFER_COLORS[i % len(_TRANSFER_COLORS)]
-              for i, c in enumerate(codes)}
-    out_png = os.path.join(OUTPUT_TRANSFER, 'transferability_map.png')
-    vis_transferability_map(emb, centroids, W2, T, Tsym, labels, colors,
-                            var_ratio, rho, pval, save_path=out_png)
-    dec_png = os.path.join(OUTPUT_TRANSFER, 'w2_decomposition.png')
-    vis_w2_decomposition(dec['pair'].tolist(), dec, dec['transfer'].to_numpy(),
-                         list(groups), _TRANSFER_GROUP_COLORS,
-                         save_path=dec_png)
-    print(f"  [transferability] W2 vs rank transfer: spearman {rho:+.2f} "
-          f"(Mantel P = {pval:.3f}, {len(iu[0])} pairs) -> {out_png}")
-    print("  [transferability] W2 group contributions vs rank transfer: "
-          + ", ".join(f"{g} {float(spearmanr(dec[g], dec['transfer']).statistic):+.2f}"
-                      for g in groups)
-          + f" -> {dec_png}")
-    return pd.DataFrame(T, index=codes, columns=codes)
 
 
 # ── STEP 7 — cross-city curve prediction ────────────────────────────────────────
@@ -3782,11 +3743,10 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     #     IS STEP-6's aggr_denorm estimator, so it reads the shared module-level
     #     constants rather than re-deriving the list here (they drifted apart on
     #     2026-08-12 when only STEP 6 gained the interactions and the city r0).
-    #   rank_feature_cols — the rank channel, matching component_rank/ exactly
-    #     (income dropped) + STEP-7's own r0.
+    #   the RANK channel is not listed here: it reads RANK_FEATURE_COLS
+    #     through rank_predict, shared with STEP 6 (unified 2026-08-28).
     feature_cols = ([f'func_{c}' for c in SF_CATEGORIES]
                     + ['mean_distance', 'median_income_combined'])
-    rank_feature_cols = [f'func_{c}' for c in SF_CATEGORIES] + ['mean_distance']
 
     def _merge(feats):
         # The shared city-total builder: adds the merged func_<cat> shares that
@@ -3810,35 +3770,10 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     # (its components never enter a template), so no label of the held unit
     # leaks into its own training pool.  Absent/incomplete clusters CSV ->
     # fall back to pooling every reference city.
-    _rank_cl, _func_of = None, {}
-    if RANK_TRAIN_SCOPE == 'cluster':
-        _cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                               'ridge', 'raw_data',
-                               'cross_city_pair_clusters.csv')
-        if os.path.exists(_cl_csv):
-            _cl = pd.read_csv(_cl_csv, index_col=0)['cluster']
-            if all(c in _cl.index for c in codes):
-                _rank_cl = _cl
-                _fc = [f'func_{c}' for c in SF_CATEGORIES]
-                _func_of = {c: test_merged[c][_fc].dropna().to_numpy(float)
-                            for c in codes}
-        if _rank_cl is None:
-            print("  [curve pred] RANK_TRAIN_SCOPE=cluster but clusters CSV "
-                  "absent/incomplete; falling back to pooled rank training.")
-
-    def _rank_train(held, rest):
-        """The subset of `rest` in held's estimated cluster (>=1 city), or the
-        full `rest` when clustering is unavailable or would leave no peers."""
-        if _rank_cl is None:
-            return rest
-        ref = {}
-        for c in rest:
-            ref.setdefault(int(_rank_cl[c]), []).append(_func_of[c])
-        if len(ref) < 2:
-            return rest
-        est = _estimate_held_cluster(_func_of[held], ref)
-        sub = [c for c in rest if int(_rank_cl[c]) == est]
-        return sub if sub else rest
+    _rank_ctx = rank_cluster_context(test_merged, codes)
+    if RANK_TRAIN_SCOPE == 'cluster' and _rank_ctx is None:
+        print("  [curve pred] RANK_TRAIN_SCOPE=cluster but clusters CSV "
+              "absent/incomplete; falling back to pooled rank training.")
 
     # Observed smoothed relative curves of every unit's TEST components (same
     # decomposition as feats_test, via dec_test), the unit's ungated own-fit
@@ -3967,62 +3902,37 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             hat.loc[cidx] = np.asarray(ypred_std, dtype=float) * sd + mu
         return hat, mu
 
+    def _rank_frames(rest, held):
+        """held's TEST table plus the reference cities' TRAIN tables, the frame
+        dict rank_predict reads.  The two roles are the same object in
+        production; they stay separate here as everywhere else in this
+        function."""
+        f = {held: test_merged[held]}
+        f.update({c: train_merged[c] for c in rest})
+        return f
+
     def _rank_score_prediction(held, rest, target):
         """Predicted within-city ORDERING of `target` over the held unit's
-        components — the engine's RANK path (every feature and the target
-        rankdata'd WITHIN each unit, then within-unit z-scored; cosine-kNN in
-        that frame).  Rank transfer is immune to the cross-city level/scale
-        drift the pooled frame must assume away, which is why this channel
-        transfers best.  Only the ORDER of the returned scores means anything
-        (each score is a weighted mean of other cities' within-city ranks).
-        None when the engine returns no prediction (caller falls back to the
-        raw-path values).  Under RANK_TRAIN_SCOPE='cluster' the training pool
-        is narrowed to the held unit's estimated cluster."""
-        train = _rank_train(held, rest)
-        te = test_merged[held].copy()
-        te[target] = np.arange(len(te), dtype=float)   # placeholder ramp
-        fold = {held: te}
-        fold.update({c: train_merged[c] for c in train})
-        _, pred, _ = cross_city_resilience(
-            fold, [target], rank_feature_cols + ['r0'], rank=True,
-            split={'train': train, 'test': [held]}, target_std='within_unit',
-            model=CURVE_PRED_RANK_MODEL, min_rows=CROSS_CITY_MIN_ROWS)
-        pm = pred.get(held, {}).get(target)
-        if pm is None:
+        components.  This is THE rank channel (rank_predict) -- the same call,
+        the same features and the same training-pool rule the component_rank
+        sweep and the pairwise heatmap run, so a change to the rank prediction
+        cannot land here and nowhere else.  None when the engine returns no
+        prediction (the caller falls back to the raw-path values)."""
+        pool = rank_train_pool(held, rest, _rank_ctx)
+        score = rank_predict(held, pool, _rank_frames(pool, held),
+                             target=target, min_rows=CROSS_CITY_MIN_ROWS)
+        if score is None:
             return None
-        _, ypred_std, cidx = pm
-        return pd.Series(np.asarray(ypred_std, dtype=float),
-                         index=cidx).reindex(test_merged[held].index)
+        return score.reindex(test_merged[held].index)
 
     def _city_score(held, rest):
-        """weight_normal mean of the STANDARDIZED component cum_loss predictions
-        for one unit, i.e. the unit's position on the pooled-train scale without
-        ever un-standardizing a component.  Keeping the components standardized
-        is what separates this from the raw channel, whose per-component
-        un-standardization multiplies by the LARGE component-to-component spread
-        and mis-calibrates the aggregate.  The test table's target is the usual
-        placeholder ramp, so nothing about the held unit's own losses enters.
-        Since 2026-08-04 this is STEP-6's aggr_denorm recipe verbatim, and
-        since 2026-08-12 that is enforced by construction: both read
-        CITY_TOTAL_FEATURE_COLS / CITY_TOTAL_POOLED_COLS (predictor
-        CURVE_PRED_CITY_MODEL)."""
-        te = test_merged[held].copy()
-        te['cum_loss'] = np.arange(len(te), dtype=float)
-        fold = {held: te}
-        fold.update({c: train_merged[c] for c in rest})
-        _, pred, _ = cross_city_resilience(
-            fold, ['cum_loss'], CITY_TOTAL_FEATURE_COLS, rank=False,
-            split={'train': rest, 'test': [held]}, target_std='pooled_train',
-            level_feature_cols=LEVEL_FEATURE_COLS, model=CURVE_PRED_CITY_MODEL,
-            pooled_feature_cols=CITY_TOTAL_POOLED_COLS,
-            min_rows=CROSS_CITY_MIN_ROWS)
-        pm = pred.get(held, {}).get('cum_loss')
-        if pm is None:
-            return np.nan
-        _, ypred_std, cidx = pm
-        w = feats_test[held].loc[cidx, 'weight_normal'].to_numpy(dtype=float)
-        yp = np.asarray(ypred_std, dtype=float)
-        return float((w * yp).sum() / w.sum()) if w.sum() > 0 else float(yp.mean())
+        """One unit's aggregate score s, through the SHARED phi stage
+        (city_total_score) -- byte-for-byte the same call STEP 6's headline
+        city-total figure makes, on the same CITY_TOTAL_FEATURE_COLS and the
+        same predictor."""
+        return city_total_score(
+            held, rest, {**train_merged, held: test_merged[held]}, feats_test,
+            CURVE_PRED_CITY_MODEL)
 
     def _city_total_prediction(held, rest):
         """Predicted CITY cum_loss in day-equivalents: the rho stage of the
@@ -4051,7 +3961,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             outer, [_r0_city(held), _msa_gdp_table()[held]], s_in, x_in, g_in)
 
     def _quantile_mapped_chat(chat_raw, score, obs, wn, rest, mu_a, c_city,
-                              spread_mult=1.0):
+                              scale_value=1.0):
         """Component cum_loss predictions assembled by QUANTILE MAPPING, the
         comonotone assignment, i.e. the optimal-transport map on the line.
         Four ingredients, each contributing what it transfers best:
@@ -4129,12 +4039,9 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             sc = score.to_numpy(dtype=float)
             ok = np.isfinite(sc) & np.isfinite(r0) & (r0 > 1e-6)
             if ok.sum() >= 2:
-                s_test = _backbone_spread(r0, days, mu_a)
-                s_train = [_backbone_spread(train_merged[c]['r0'].to_numpy(dtype=float),
-                                            days, mu_a) for c in rest]
-                s_train = [v for v in s_train if np.isfinite(v) and v > 0]
-                scale = (s_test / float(np.mean(s_train)) * spread_mult
-                         if s_train and np.isfinite(s_test) else 1.0)
+                # The scale comes from the shared spread_scale (see the
+                # caller); this function only APPLIES it.
+                scale = float(scale_value)
                 idx = np.where(ok)[0][np.argsort(sc[ok], kind='stable')]
                 pos = (np.arange(len(idx)) + 0.5) / len(idx)
                 # Wasserstein barycentre: average the training units' QUANTILE
@@ -4357,24 +4264,18 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         wn = w / wsum if wsum > 0 else np.full(len(w), 1.0 / len(w))
         city_total_hat = _city_total_prediction(held, rest)
         # ML-B2inc spread increment, fitted on the training units only (see
-        # the MLB2_* block); falls back to 1.0 when ingredients are missing.
-        days_qm = obs.index.to_numpy(dtype=float)
-        cen_by = {}
-        for c in rest:
-            v = train_merged[c]['cum_loss'].dropna().to_numpy(dtype=float)
-            if len(v) >= 2:
-                cen_by[c] = v - v.mean()
-        sbb_by = {c: _backbone_spread(train_merged[c]['r0'].to_numpy(dtype=float),
-                                      days_qm, mu_a) for c in rest}
-        vec_by = {c: _mlb2_feature_vec(train_merged[c]) for c in rest}
-        vec_by = {c: v for c, v in vec_by.items() if v is not None}
-        vh = _mlb2_feature_vec(test_merged[held])
-        if vh is not None:
-            vec_by[held] = vh
-        spread_mult = _mlb2_spread_multiplier(held, rest, cen_by, sbb_by, vec_by)
-        cum_hat, spread_scale = _quantile_mapped_chat(
+        # the MLB2_* block).  The SHARED spread definition: the same call the
+        # centred_distribution/ figure makes, on SPREAD_BACKBONE_DAYS and at
+        # the backbone rate ML-B2inc was fitted at (pooled_backbone_alpha) --
+        # NOT this fold's curve alpha-bar, which CURVE_ALPHA_BACKBONE may
+        # replace and which would move the tuned increment off its validated
+        # coordinates.
+        _sp_merged = {**train_merged, held: test_merged[held]}
+        _sp_mu_a = pooled_backbone_alpha(train_merged, rest)
+        _sp_base, _sp_mult = spread_scale(held, rest, _sp_merged, _sp_mu_a)
+        cum_hat, spread_scale_applied = _quantile_mapped_chat(
             cum_hat_raw, rank_score, obs, wn, rest, mu_a, city_total_hat,
-            spread_mult=spread_mult)
+            scale_value=_sp_base * _sp_mult)
         if CURVE_PRED_SOLVER == 'joint_alphaL':
             line_a0, line_b = _alphaL_training_line(rest)
             pred_curves, L_solved, alpha_solved = _joint_alphaL_curves(
@@ -4465,7 +4366,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                    'cum_loss_pred_raw': float(cum_hat_raw.iloc[j]),
                    'rank_score': (float(rank_score.iloc[j])
                                   if rank_score is not None else np.nan),
-                   'spread_scale': spread_scale,
+                   'spread_scale': spread_scale_applied,
                    'city_total_pred': city_total_hat,
                    'level_solved': float(L_solved[j]),
                    'alpha_train_mean': mu_a,
@@ -4582,7 +4483,8 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                         + (f", {CURVE_ALPHA_BACKBONE}"
                            if CURVE_ALPHA_BACKBONE != 'surge' else '') + ']')
         print(f"  [curve_pred] {held}: backbone ᾱ {mu_a:.2f}; "
-              f"city total {city_total_hat:.2f}; spread ×{spread_scale:.2f}; "
+              f"city total {city_total_hat:.2f}; "
+              f"spread ×{spread_scale_applied:.2f}; "
               f"solved L [{np.nanmin(L_solved):.2f},{np.nanmax(L_solved):.2f}]; "
               f"city-α̂ {ca_hat:.2f} (fitted {int(val.sum())}/{len(val)}){variant}")
 
@@ -4604,10 +4506,9 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         labels = {c['code']: c['label'] for c in CITY_EVENTS}
         cnames = {c: f"{labels.get(c, c)} ({c.split('_', 1)[-1]})"
                   for c in par_df['code'].drop_duplicates()}
-        vis_rank_pred_vs_true(
-            par_df, names=cnames,
-            save_path=os.path.join(OUTPUT_CURVE_PRED,
-                                   'rank_pred_vs_true.png'))
+        # rank_pred_vs_true is NOT drawn here any more: the ordering it shows
+        # is the shared rank channel's, so it is drawn once, by
+        # analysis_rank_channel, into component_rank/ (moved 2026-08-28).
         vis_rank_to_cumloss_qm(
             par_df, save_path=os.path.join(OUTPUT_CURVE_PRED,
                                            'rank_to_cumloss_qm.png'))
@@ -4654,12 +4555,10 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def _run_steps_78(cc_train, cc_test, units, all_codes, dec_test):
-    """STEP 7 (curve prediction + OD maps) and STEP 8 (transferability)."""
+def _run_step_7(cc_train, cc_test, units, all_codes, dec_test):
+    """STEP 7: cross-city curve prediction + the OD maps."""
     print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
     analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
-    print("\n── Transferability: domain proximity vs rank transfer ──")
-    analysis_transferability(cc_test, all_codes)
 
 
 def main():
@@ -4945,56 +4844,24 @@ def main():
             # with no labels, so the held-out unit uses its own k like any other.
             cc_train[code] = cc_test[code] = feats_cc
 
-        # ── STEP 6 — Cross-city prediction (LOO transfer, pairwise, reconstruction) ──
+        # ── STEP 6 — Cross-city prediction (pairwise, LOO transfer) ─────
+        # ORDER MATTERS: the pairwise heatmap cuts the transfer partition, and
+        # the LOO sweep trains each held-out city on its estimated cluster from
+        # exactly that partition (RANK_TRAIN_SCOPE).  Running the sweep first
+        # would silently fall back to pooled training on a fresh checkout.
+        cc_merged = {c: rank_merge_feats(cc_test[c]) for c in all_codes}
         for method, (std_mode, base_label) in CROSS_CITY_METHOD_STD.items():
-          for model_dir, model_id in CROSS_CITY_RANK_MODELS.items():
-            std_label = os.path.join(base_label, model_dir)
-            print(f"\n── Cross-city LOO [{method}: {std_label}] "
-                  f"({len(all_codes)} folds, model={model_id}) ──")
-            loo_r2 = {}   # held_code -> r2 Series over RES_COLS
-            for held in all_codes:
-                rest = [c for c in all_codes if c != held]
-                fold_feats = {held: cc_test[held]}
-                fold_feats.update({c: cc_train[c] for c in rest})
-                print(f"  fold: test [{held}] <- train [{'+'.join(rest)}]")
-                res = analysis_cross_city(
-                    fold_feats, lambda_ctx=None,
-                    merge_func_directions=MERGE_FUNC_DIRECTIONS,
-                    # component_rank/ carries cum_loss only (2026-08-04):
-                    # recovery_alpha's rank transfer was never the analysis of
-                    # record here, and STEP 7 predicts the rate through its own
-                    # calls, not through this folder.
-                    res_cols=['cum_loss'],
-                    methods=[method],
-                    split={'train': rest, 'test': [held]},
-                    target_std=std_mode, subdir=std_label,
-                    level_feature_cols=LEVEL_FEATURE_COLS, model=model_id,
-                    pooled_feature_cols=POOLED_FEATURE_COLS)
-                r2_table = (res or {}).get(method)
-                if r2_table is not None and held in r2_table.columns:
-                    loo_r2[held] = r2_table[held]
-
-            # Combined LOO R² matrix (rows = metrics, cols = held-out unit).
-            if loo_r2:
-                mat = pd.DataFrame(loo_r2).reindex(index=['cum_loss'],
-                                                   columns=all_codes)
-                raw_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, std_label,
-                                       'raw_data')
-                os.makedirs(raw_dir, exist_ok=True)
-                out_csv = os.path.join(raw_dir, 'loo_cross_city_r2_baseline.csv')
-                mat.to_csv(out_csv)
-                print(f"  [{model_dir}] LOO cross-city R² mean="
-                      f"{mat.loc['cum_loss'].mean():+.3f} -> {out_csv}")
-
-            # Pairwise single-train -> single-test cum_loss R² (ordered pairs);
-            # the diagonal is the within-unit leave-one-component-out.
-            print(f"── Cross-city pairwise cum_loss heatmap [{std_label}] ──")
+            print(f"\n── Cross-city pairwise cum_loss heatmap [{base_label}] ──")
             analysis_cross_city_pairs(cc_train, cc_test, all_codes,
                                       method=method,
-                                      target_std=std_mode, subdir=std_label,
+                                      target_std=std_mode, subdir=base_label,
                                       level_feature_cols=LEVEL_FEATURE_COLS,
-                                      model=model_id,
+                                      model=RANK_MODEL,
                                       pooled_feature_cols=POOLED_FEATURE_COLS)
+
+        print(f"\n── Rank channel LOO ({len(all_codes)} folds, "
+              f"model={RANK_MODEL}, train scope={RANK_TRAIN_SCOPE}) ──")
+        analysis_rank_channel(cc_merged, all_codes)
 
         # Mechanism figures for that partition, both reading back the clusters
         # CSV the ridge pairwise heatmap just wrote: the per-cluster
@@ -5017,8 +4884,8 @@ def main():
         print("\n── Cross-city centred loss spectrum: barycentre transfer ──")
         analysis_centered_spectrum(cc_test, all_codes)
 
-        # ── STEP 7-8 — curve prediction (+ OD maps) and transferability ──────
-        _run_steps_78(cc_train, cc_test, units, all_codes, dec_test)
+        # ── STEP 7 — curve prediction (+ OD maps) ────────────────────────
+        _run_step_7(cc_train, cc_test, units, all_codes, dec_test)
 
 
 if __name__ == '__main__':

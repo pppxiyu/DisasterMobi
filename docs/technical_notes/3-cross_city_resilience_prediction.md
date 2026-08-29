@@ -106,7 +106,7 @@ pins feature side and target side together into two disjoint paths.
 ### 2 · Approach
 
 `CROSS_CITY_METHOD_STD` pins each method to one target standardization and one output folder, and the pairing is enforced,
-because both `analysis_cross_city` and `analysis_cross_city_pairs` raise `ValueError` on a mismatching explicit `target_std` or
+because `analysis_cross_city_pairs` raises `ValueError` on a mismatching explicit `target_std` or
 output subfolder before anything is computed (run_pattern_nmf.py:569-572, 1083-1094, 1414-1426). Only spearman with
 `within_unit` into `cross_city_pred_rank/`, and pearson with `pooled_train` into `cross_city_pred_raw_value/`, ever run.
 
@@ -202,21 +202,33 @@ every choice of held-out city?
 
 ### 2 · Approach
 
-main() loops over the five units, each fold taking the held-out unit's k = 10 test-role table against the rest's registry-k
-train-role tables, and `analysis_cross_city` runs the engine on that fold once per method, into its paired folder
-(run_pattern_nmf.py:2265-2281, 1062-1203). Per fold it writes a predicted-versus-actual scatter,
-`cross_city_scatter_<CODE>_baseline.png`, plus its point-level raw CSV under `raw_data/`; the `baseline` suffix is the
-context-aware-NMF tag, context-aware being off, and is not the analysis-3 baseline. After the five folds main() assembles each
-held-out unit's R² into the one-metric by five-unit matrix `raw_data/loo_cross_city_r2_baseline.csv`
-(run_pattern_nmf.py:2284-2290).
+**Rewritten 2026-08-28 — one rank channel.** Predicting a within-city cum_loss ordering used to exist twice: this step fitted
+six merged function shares plus mean_distance on every other city, while STEP 7's ordering channel fitted those seven plus `r0`
+on the held-out city's *estimated transfer cluster*. The two disagreed by +0.09 mean Spearman for reasons unrelated to the
+question either was asking. There is now ONE definition — `RANK_MODEL`, `RANK_FEATURE_COLS`, `RANK_TRAIN_SCOPE` and
+`rank_predict()` — and every rank prediction in the pipeline routes through it: this sweep, the pairwise transfer heatmap, the
+cluster-restricted diagnostic, the mapping-direction PCA and STEP 7. There is exactly one `rank=True` call into the engine in
+the whole file.
+
+`analysis_rank_channel` runs the sweep: one fold per city-event, the reference pool being every other unit narrowed to the held
+unit's estimated cluster, and `rank_predict` scoring the held unit's components. The held unit's target column is overwritten
+with a placeholder ramp, so its own losses cannot reach the fit even by accident. The fold's skill is the Spearman between the
+predicted ordering and the observed one — an R² would additionally score a prediction amplitude these scores do not have, which
+is why the LOO R² matrix was retired with the old path. Outputs are `component_rank/rank_pred_vs_true.png`, the per-fold points
+in `raw_data/rank_pred_vs_true.csv`, and the per-fold ρ in `raw_data/rank_loo_spearman.csv`.
+
+**Order matters.** The pairwise heatmap cuts the transfer partition, and the sweep trains on clusters read back from exactly
+that partition, so within STEP 6 the heatmap runs FIRST. Running the sweep first would silently fall back to pooled training on
+a fresh checkout.
 
 ### 3 · Interpretation · how should a scatter be read?
 
-Each scatter (`vis_scatter_reg_pred`, one cum_loss panel with a dashed y = x line and the test R² in the title;
-utils/pattern_analysis/visualization.py:1068) shows the held-out city's components on the standardized scale, labelled "std rank"
-on the rank path and "std value" on the raw path. An R² above 0 means the transfer beats predicting the training mean. In the
-raw-value version a systematic level miss alone drives R² negative even when the ordering is right, which is exactly the
-difference the two folders expose.
+`vis_rank_pred_vs_true` gives each held-out city-event one panel: observed cum_loss rank on x, predicted rank on y, the
+diagonal a perfect ordering, and the fold's own Spearman ρ inside the panel. Both axes are ranks WITHIN that city-event, so they
+run 1..n and n differs across units (5–12 components); limits and ticks are per panel and only the axis names are shared, once,
+on the figure. A footnote under the shared x label carries the unweighted mean ρ across folds — every city-event counting once,
+whatever its component count. A ρ above 0 means the transfer recovers the held-out city's ordering; points off the diagonal are
+components the transfer mis-ranked.
 
 ## Step 5 · Analysis 2, the pairwise transfer heatmap
 
