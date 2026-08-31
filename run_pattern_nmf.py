@@ -182,16 +182,12 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                         level flattened away with it).  THE rank channel lives
                         here: rank_pred_vs_true.png (the leave-one-out sweep,
                         one panel per held-out unit, Spearman ρ), the
-                        pairwise transfer heatmap that cuts the partition the
-                        sweep trains on, the cluster-restricted rank variant's
-                        ALL-vs-cluster comparison
-                        (cluster_restricted_rank.png + .csv: each held-out
-                        city's rank ρ trained on every other city vs on its
-                        estimated cluster only, the RANK_TRAIN_SCOPE='cluster'
-                        scope STEP 7 also uses), the cluster-mechanism PCA
-                        (cluster_mapping_pca.png: per-cluster panels of every
-                        component in within-city rank-z space, with each
-                        city's and each cluster's pooled feature->loss
+                        pairwise transfer heatmap (its Louvain boxes are a
+                        DISPLAY ordering — nothing trains on them since
+                        2026-08-31),
+                        the mapping-direction PCA (mapping_direction_pca.png:
+                        one panel of every component in within-city rank-z
+                        space, each city's and the one pooled feature->loss
                         mapping direction as arrows) and the function
                         co-riding graph (cluster_function_graph.png: the
                         pooled average and each cluster as a distance layout
@@ -243,9 +239,8 @@ from utils.pattern_analysis.nmf_pipeline import (
 )
 from utils.pattern_analysis.visualization import (
     vis_heatmap_temporal_signature,
-    vis_city_mobility_curves, vis_cluster_mapping_pca,
+    vis_city_mobility_curves, vis_mapping_pca,
     vis_cluster_function_graph,
-    vis_cluster_restricted_rank,
     vis_cluster_function_heatmap,
     vis_nmf_rank_cv,
     vis_line_nmf_component_timeline, vis_heatmap_od_function,
@@ -1134,25 +1129,25 @@ POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
 # cluster-restricted diagnostic, the mapping-direction PCA and the STEP-7
 # ordering channel.  Change the rank prediction here and it changes everywhere.
 RANK_MODEL = 'ridge'
+# 23 columns since 2026-08-31: the 15 pairwise func PRODUCTS joined the list.
+# Products are computed on the RAW merged shares (rank_merge_feats) and only
+# then ranked within the city -- the rank of a product is not the product of
+# ranks.  Measured on the captured production tables, pooled all-12 training:
+# mean test Spearman +0.587 -> +0.633, median +0.700 -> +0.786, 8 of 13 folds
+# up and 2 down.  That ties the old cluster-restricted 8-feature channel
+# (+0.637) without depending on the Louvain partition (modularity +0.026)
+# that channel trained on -- which is why the cluster restriction retired
+# with this adoption (see RANK_TRAIN_SCOPE).
 RANK_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
-                     + ['mean_distance', 'r0'])
+                     + ['mean_distance', 'r0'] + FUNC_X_COLS)
 
-# The PARTITION step is the one deliberate exception, and it is measured, not
-# stylistic.  The pairwise transfer heatmap cuts the Louvain partition that
-# RANK_TRAIN_SCOPE='cluster' then trains on, and fitting that heatmap WITH r0
-# destroys it: r0 makes single-source transfer uniformly better (mean pair
-# Spearman +0.300 -> +0.386, 112 -> 124 of 156 pairs positive, total edge
-# weight +13%), and a graph where every pair transfers well has no weak edge
-# left to cut along.  Measured on the 13 units, 2026-08-28:
-#     modularity of the chosen partition   +0.026  ->  -0.043
-#     distinct partitions over 40 Louvain seeds   1  ->  6 (3, 4 or 5 clusters)
-#     held-out cluster assignment accuracy   10/13  ->  4/13
-#     rank channel mean test Spearman        +0.637 ->  +0.532
-# So the predictor keeps r0 (it predicts better with it) and the partition is
-# cut without it (it is only recoverable without it).  The fitting code is
-# still one function -- rank_predict -- and only the column list differs.
-PARTITION_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
-                          + ['mean_distance'])
+# (PARTITION_FEATURE_COLS retired 2026-08-31 with the cluster restriction it
+# served: nothing trains on the Louvain partition any more, so the pairwise
+# heatmap simply runs the rank channel's own list and its partition is a
+# DISPLAY ordering.  The 2026-08-28 measurement that motivated the separate
+# r0-free list -- r0 flattens the community structure, modularity +0.026 ->
+# -0.043 -- still holds and is the reason the partition must not be read as a
+# training recipe.)
 
 # The predictors compared at the CITY level: aggregate each one's standardized
 # component scores into s, then put s through the identical rho stage, so the
@@ -1196,19 +1191,25 @@ CURVE_PRED_CITY_MODEL = 'ridge'
 # (the rank channel's predictor is RANK_MODEL; see the block above)
 
 # Training scope for the RANK channel (STEP-7 curve prediction and the
-# component_rank headline): 'cluster' restricts each held-out city's training
-# pool to its ESTIMATED transfer cluster; 'pooled' trains on every reference
-# city (the pre-2026-08-12 behaviour).  Clusters come from the ridge pairwise
-# heatmap (cross_city_pair_clusters.csv); the held-out city's own membership
-# is re-estimated per fold from its function co-riding matrix (leakage
-# controlled — its components never enter a template).  Adopted 2026-08-12:
-# on the n=13 sandbox it lifts the lower half of the per-city rank-ρ
-# distribution (median +0.60 -> +0.80) by rescuing the worst-predicted
-# cities, at the cost of the ~3/13 cities whose cluster is guessed wrong; the
-# paired gain is not significant (Wilcoxon p=0.53) and the cluster labels are
-# themselves derived from the pooled transfer, so this is a deliberate
-# bias/variance and circularity trade the owner accepted.
-RANK_TRAIN_SCOPE = 'cluster'
+# component_rank headline): 'pooled' trains every fold on all 12 reference
+# cities; 'cluster' would restrict to the held city's ESTIMATED transfer
+# cluster (the machinery -- rank_cluster_context / rank_train_pool /
+# _estimate_held_cluster -- is kept for a revert).  A revert is NOT one flag,
+# though: the pairwise heatmap now fits the full 23-column list, so the
+# partition on disk is cut WITH r0 -- the configuration measured on
+# 2026-08-28 to flatten the community structure (assignment 10/13 -> 8/13
+# already at the current partition).  Reinstating the 2026-08-12 behaviour
+# means also restoring the r0-free partition list for the heatmap.  Back to 'pooled'
+# 2026-08-31, together with the 23-column RANK_FEATURE_COLS: wide features
+# and narrow training pools are SUBSTITUTES, not complements.  Measured on
+# the captured production tables (23 features): pooled +0.633 mean Spearman,
+# the transfer-Louvain restriction +0.290, co-riding k-means partitions at
+# k=2/3/4 +0.482/+0.446/+0.133 -- a 23-column ridge on a 2-6-city pool
+# (10-35 components) starves, and the smaller the cluster the worse.  The
+# 8-feature cluster-restricted channel this replaces scored +0.637; the
+# pooled 23-feature channel matches it (difference 0.004 at n=13) with one
+# fewer fragile dependency.
+RANK_TRAIN_SCOPE = 'pooled'
 
 # Minimum usable rows per unit-and-metric inside the cross-city engine, for
 # BOTH the STEP-6 analyses and the STEP-7 curve prediction.  The engine
@@ -1389,10 +1390,6 @@ def analysis_decomposition_quality(label, code, X_all, W, H, fit_time_cols):
                 rel_err=q['rel_err'], n_below=q['n_below'])
 
 
-_MSA_CL_COLOR = {1: '#0F4D92', 2: '#4C9F70', 3: '#B64342'}
-# Sequential colormap per cluster for the mapping-PCA points; the base colours
-# above stay on the arrows, so both figures read on one palette.
-_MAPPING_CL_CMAP = {1: 'Blues', 2: 'Greens', 3: 'Reds'}
 
 # analysis_cluster_function_graph: within-city permutation draws, the BH gate
 # the figure's line style encodes, and the seed shared by the permutation and
@@ -1407,45 +1404,37 @@ _FUNC_COLOR = {'residential': '#0F4D92', 'commercial': '#B64342',
                'health': '#9A4D8E', 'public': '#42949E'}
 
 
-def analysis_cluster_mapping_pca(feats_by_code):
-    """WHY the ridge transfer clusters exist, per cluster: every component of
-    every retained unit in ONE PCA of the within-city rank-z feature space
-    (rank-channel predictors: 6 func shares + mean_distance, ranked and
-    z-scored within each unit — exactly what the transfer model is fed), plus
-    per-city ridge mapping directions (features -> within-city cum_loss rank)
-    and each cluster's POOLED direction, fit on its components stacked.
+def analysis_mapping_pca(feats_by_code):
+    """The rank channel's mapping directions, no clustering (2026-08-31):
+    every component of every retained unit in ONE PCA of the within-city
+    rank-z feature space (RANK_FEATURE_COLS, the 23 columns the transfer
+    model is fed), one dashed per-city ridge direction (features ->
+    within-city cum_loss rank) and ONE solid pooled direction fit on all 81
+    components stacked.
 
-    The clusters group mapping RULES, not feature profiles: same-cluster
-    directions agree (mean cosine C1 +0.63, C3 +0.63; cross-cluster +0.11 —
-    2026-08-06 sandbox, matching raw_data/cluster_mapping_pca_arrows.csv),
-    while the same units' raw feature-profile cosine carries no such split.
-    C2 is the known weak cluster: its pooled rule follows SL_Ida/MB_Dorian
-    (+0.87/+0.88) and is anti-aligned with its own member WM_Dorian (-0.19).
+    This replaces the per-cluster panels: nothing trains on the transfer
+    partition any more (RANK_TRAIN_SCOPE='pooled'), and the figure's question
+    is now how far each city's mapping rule sits from the pooled rule the
+    channel actually fits.  A city whose arrow opposes the pooled one is a
+    city the pooled model cannot serve -- Wilmington (Dorian) is the standing
+    example.
 
-    Filed under component_rank/ because the partition it explains is the rank
-    channel's; like the MSA map it reads cross_city_pair_clusters.csv back and
-    skips if that file is absent, so it never blocks the pipeline."""
-    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                          'raw_data', 'cross_city_pair_clusters.csv')
-    if not os.path.exists(cl_csv):
-        print(f"  [cluster mapping] {cl_csv} absent; skipping.")
-        return
-    cl = pd.read_csv(cl_csv, index_col=0)['cluster']
+    City arrows are COLOURED by the pair heatmap's Louvain communities when
+    its clusters CSV is present -- presentation only, the same display
+    partition the heatmap boxes show, entering no computation; absent CSV ->
+    one colour.
 
+    Fits its own ridge because it needs the COEFFICIENT VECTOR (the mapping
+    direction), not a prediction -- the one thing rank_predict does not
+    return.  Same features, same within-city rank-z frame, same RidgeCV."""
     from sklearn.decomposition import PCA
     from sklearn.linear_model import RidgeCV
 
-    # Same feature list as every other rank prediction; this one fits its own
-    # ridge because it needs the COEFFICIENT VECTOR (the mapping direction),
-    # not a prediction, which is the one thing rank_predict does not return.
     fcols = list(RANK_FEATURE_COLS)
     alphas = np.logspace(-3, 3, 13)
     rows, blocks, targets, w_city = [], [], [], {}
     for code, feats in feats_by_code.items():
-        m = feats.copy()
-        for c in SF_CATEGORIES:
-            m[f'func_{c}'] = m[f'share_from_{c}'] + m[f'share_to_{c}']
-        sub = m[fcols + ['cum_loss']].dropna()
+        sub = rank_merge_feats(feats)[fcols + ['cum_loss']].dropna()
         A = sub[fcols].to_numpy(float)
         R = np.column_stack([rankdata(A[:, j]) for j in range(A.shape[1])])
         R = (R - R.mean(0)) / (R.std(0) + 1e-12)
@@ -1460,23 +1449,19 @@ def analysis_cluster_mapping_pca(feats_by_code):
         blocks.append(R)
         targets.append(yr)
         for i in range(len(sub)):
-            rows.append(dict(code=code, cluster=int(cl[code]),
-                             cum_loss=float(y[i]), shade=float(shade[i])))
+            rows.append(dict(code=code, cum_loss=float(y[i]),
+                             shade=float(shade[i])))
     pts = pd.DataFrame(rows)
     Ar = np.vstack(blocks)
     Yr = np.concatenate(targets)
-
-    w_pool = {int(k): RidgeCV(alphas=alphas).fit(
-                  Ar[(pts['cluster'] == k).to_numpy()],
-                  Yr[(pts['cluster'] == k).to_numpy()]).coef_
-              for k in sorted(pts['cluster'].unique())}
+    w_pool = RidgeCV(alphas=alphas).fit(Ar, Yr).coef_
 
     pca = PCA(n_components=2).fit(Ar)
     emb = pca.transform(Ar)
     pts['pc1'], pts['pc2'] = emb[:, 0], emb[:, 1]
 
     def _unit_and_plane(v):
-        # Unit 7-D coefficient vector + its unit in-plane shadow; near-zero
+        # Unit coefficient vector (23-D) + its unit in-plane shadow; near-zero
         # shadows (direction almost orthogonal to the plane) stay zero rather
         # than blowing up to an arbitrary angle.
         v = v / (np.linalg.norm(v) + 1e-12)
@@ -1486,29 +1471,34 @@ def analysis_cluster_mapping_pca(feats_by_code):
 
     arrows = []
     for kind, items in (('city', w_city.items()),
-                        ('pooled', ((f'C{k}', v) for k, v in w_pool.items()))):
+                        ('pooled', [('ALL', w_pool)])):
         for name, wv in items:
             v, d = _unit_and_plane(wv)
             arrows.append(dict(
-                kind=kind, name=name,
-                cluster=int(cl[name]) if kind == 'city' else int(name[1:]),
-                dx=float(d[0]), dy=float(d[1]),
+                kind=kind, name=name, dx=float(d[0]), dy=float(d[1]),
                 **{f'coef_{c}': float(v[i]) for i, c in enumerate(fcols)}))
     arr = pd.DataFrame(arrows)
 
     out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
     raw_dir = os.path.join(out_dir, 'raw_data')
     os.makedirs(raw_dir, exist_ok=True)
-    pts.to_csv(os.path.join(raw_dir, 'cluster_mapping_pca_components.csv'),
+    cl_csv = os.path.join(raw_dir, 'cross_city_pair_clusters.csv')
+    cluster_of = None
+    if os.path.exists(cl_csv):
+        _cl = pd.read_csv(cl_csv, index_col=0)['cluster']
+        if all(c in _cl.index for c in feats_by_code):
+            cluster_of = {c: int(_cl[c]) for c in feats_by_code}
+    arr['cluster'] = [cluster_of.get(r['name'], 0) if cluster_of and
+                      r['kind'] == 'city' else 0
+                      for _, r in arr.iterrows()]
+    pts.to_csv(os.path.join(raw_dir, 'mapping_pca_components.csv'),
                index=False)
-    arr.to_csv(os.path.join(raw_dir, 'cluster_mapping_pca_arrows.csv'),
-               index=False)
-    vis_cluster_mapping_pca(
-        pts, arr, _MSA_CL_COLOR, _MAPPING_CL_CMAP,
-        evr=tuple(pca.explained_variance_ratio_),   # no suptitle by request
-        save_path=os.path.join(out_dir, 'cluster_mapping_pca.png'))
-    print(f"  [cluster mapping] {len(pts)} components, {len(w_city)} city + "
-          f"{len(w_pool)} pooled arrows -> {out_dir}")
+    arr.to_csv(os.path.join(raw_dir, 'mapping_pca_arrows.csv'), index=False)
+    vis_mapping_pca(
+        pts, arr, evr=tuple(pca.explained_variance_ratio_),
+        save_path=os.path.join(out_dir, 'mapping_direction_pca.png'))
+    print(f"  [mapping pca] {len(pts)} components, {len(w_city)} city arrows "
+          f"+ 1 pooled -> {out_dir}")
 
 
 def analysis_cluster_function_graph(feats_by_code):
@@ -1862,16 +1852,22 @@ def _estimate_held_cluster(held_func, ref_func_by_cluster):
 # -- THE rank channel: the one predictor every rank figure goes through -------
 
 def rank_merge_feats(feats):
-    """Add the merged func_<cat> shares RANK_FEATURE_COLS names.
+    """Add every derived column RANK_FEATURE_COLS names: the merged
+    func_<cat> shares and their 15 pairwise products.
 
-    The decomposition tables carry direction-split shares (share_from_<cat> and
-    share_to_<cat>); the rank channel reads a component's involvement with a
-    function regardless of direction, so the two are summed.  Every other
-    column passes through untouched, so a frame that already carries extras
-    (STEP 7's interaction products, r0_city) survives the merge unharmed."""
+    The decomposition tables carry direction-split shares (share_from_<cat>
+    and share_to_<cat>); the rank channel reads a component's involvement
+    with a function regardless of direction, so the two are summed.  The
+    products are taken on those RAW merged shares -- BEFORE any ranking,
+    because the rank of a product is not the product of ranks -- with the
+    same definition _with_city_total_feats uses, so a frame that already
+    went through that helper survives this one unchanged."""
     m = feats.copy()
     for c in SF_CATEGORIES:
         m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
+    for i, a in enumerate(SF_CATEGORIES):
+        for b in SF_CATEGORIES[i + 1:]:
+            m[f'func_{a}_X_{b}'] = m[f'func_{a}'] * m[f'func_{b}']
     return m
 
 
@@ -1939,10 +1935,9 @@ def rank_predict(held, train_codes, merged, target='cum_loss',
     leave-one-component-out, there is no other city to borrow from, and the
     real target has to stay in place for the fold to mean anything.
 
-    `feature_cols` defaults to RANK_FEATURE_COLS.  The only caller that
-    overrides it is the pairwise heatmap, which cuts the transfer partition and
-    must do so without r0 -- see PARTITION_FEATURE_COLS for the measurement
-    behind that."""
+    `feature_cols` defaults to RANK_FEATURE_COLS; no production caller
+    overrides it since the partition-specific list retired (2026-08-31), the
+    parameter stays for ablations."""
     self_fit = list(train_codes) == [held]
     te = merged[held].copy()
     fold = {held: te}
@@ -2070,87 +2065,6 @@ def city_total_score(held, rest, merged, feats_test, model,
     yp = np.asarray(ypred, dtype=float)
     wsum = float(w.sum())
     return float((w * yp).sum() / wsum) if wsum > 0 else float(yp.mean())
-
-
-def analysis_cluster_restricted_rank(feats_by_code):
-    """Would restricting the rank-prediction TRAINING set to same-cluster
-    cities help?  Deployable (not oracle) test: the held-out city's cluster is
-    ESTIMATED, then training is restricted to that estimated cluster.
-
-    Two chained error sources, per leave-one-city-out fold:
-      1. ASSIGN the held-out city to a cluster.  Templates are the pooled CLR
-         co-riding matrices of the OTHER cities' clusters (health/public etc.
-         removed of the closure artifact, as in analysis_cluster_function_
-         graph); the city is placed by 1 - Spearman of the two 15-cell
-         correlation vectors (the whole-matrix "shape" rule, ~10/13 here).
-      2. PREDICT its within-city cum_loss ranking with a Ridge on the rank
-         channel (6 func shares + mean_distance, within-city rank-z), trained
-         once on ALL other cities and once on only the cities in the ESTIMATED
-         cluster.  Score = within-held-city Spearman(pred, actual).
-
-    The figure and CSV report the DISTRIBUTION over the 13 cities, not just the
-    mean: restriction lifts the lower half (median rose ~+0.2 in the 2026-08-12
-    sandbox) by rescuing the worst-predicted cities, at the cost of the cities
-    whose cluster is guessed wrong (dotted links), which can fall sharply.  It
-    is a diagnostic — nothing downstream consumes it — filed with the ridge
-    cluster it depends on; skips (never raises) if the clusters CSV is absent
-    or does not cover every unit."""
-    cl_csv = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank',
-                          'raw_data', 'cross_city_pair_clusters.csv')
-    if not os.path.exists(cl_csv):
-        print(f"  [cluster-restricted rank] {cl_csv} absent; skipping.")
-        return
-    cl = pd.read_csv(cl_csv, index_col=0)['cluster']
-    if any(c not in cl.index for c in feats_by_code):
-        print("  [cluster-restricted rank] clusters CSV incomplete; skipping.")
-        return
-
-    from sklearn.linear_model import RidgeCV
-    fcols = list(RANK_FEATURE_COLS)                  # the rank-channel features
-    alphas = np.logspace(-3, 3, 13)
-    codes = list(feats_by_code)
-
-    def _rz(A):
-        R = np.column_stack([rankdata(A[:, j]) for j in range(A.shape[1])])
-        return (R - R.mean(0)) / (R.std(0) + 1e-12)
-
-    func_of, XR, YR = {}, {}, {}
-    for code in codes:
-        sub = _with_merged_func(feats_by_code[code])[fcols + ['cum_loss']].dropna()
-        func_of[code] = sub[FUNC_MERGED_COLS].to_numpy(float)  # for _estimate
-        XR[code] = _rz(sub[fcols].to_numpy(float))
-        yr = rankdata(sub['cum_loss'].to_numpy(float))
-        YR[code] = (yr - yr.mean()) / (yr.std() + 1e-12)
-
-    def _predict(train, held):
-        Xtr = np.vstack([XR[c] for c in train])
-        ytr = np.concatenate([YR[c] for c in train])
-        p = RidgeCV(alphas=alphas).fit(Xtr, ytr).predict(XR[held])
-        return float(spearmanr(p, YR[held]).statistic)
-
-    rows = []
-    for held in codes:
-        others = [c for c in codes if c != held]
-        ref = {}
-        for c in others:
-            ref.setdefault(int(cl[c]), []).append(func_of[c])
-        est = _estimate_held_cluster(func_of[held], ref)
-        same_est = [c for c in others if int(cl[c]) == est]
-        rows.append(dict(code=held, cluster=int(cl[held]), est_cluster=est,
-                         correct=est == int(cl[held]),
-                         rho_all=_predict(others, held),
-                         rho_est=_predict(same_est, held)))
-    R = pd.DataFrame(rows)
-
-    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
-    raw_dir = os.path.join(out_dir, 'raw_data')
-    os.makedirs(raw_dir, exist_ok=True)
-    R.to_csv(os.path.join(raw_dir, 'cluster_restricted_rank.csv'), index=False)
-    vis_cluster_restricted_rank(
-        R, save_path=os.path.join(out_dir, 'cluster_restricted_rank.png'))
-    print(f"  [cluster-restricted rank] assignment {int(R['correct'].sum())}"
-          f"/{len(R)}; median rho ALL {R['rho_all'].median():+.2f} -> EST "
-          f"{R['rho_est'].median():+.2f} -> {out_dir}")
 
 
 def analysis_city_mobility_curves(units):
@@ -3435,22 +3349,92 @@ def analysis_cross_city_resi_pred(feats_by_city, feats_test, units, codes, globa
 # identical, cosine-kNN 48/50) — the seed buys literal reproducibility, not
 # stability.
 PAIR_LOUVAIN_SEED = 0
-# Modularity's resolution gamma, which scales the null-model term
-# gamma*k_i*k_j/2m: larger gamma charges more for keeping two units together,
-# so communities come out smaller and more numerous.  Louvain takes no
-# cluster-COUNT argument, so this is the only dial on how many boxes appear.
-# Measured on the 13-unit SPEARMAN transfer matrices (clusters as cosine-kNN /
-# ridge): gamma 0.5 -> 1/1, 0.8 -> 2/2, 1.0 -> 2/2, 1.2 -> 2/3, 1.5 -> 5/5,
-# 2.0 -> 7/9, 5.0 -> 13/13.  1.2 sits just above the plateau where everything
-# collapses into one or two communities and below 1.5, where the partition
-# shatters into five.  It does NOT make the two rank models agree — they return
-# 2 and 3 communities — so the boxes are read per model.  (Under the retired R²
-# version of this matrix 1.2 did make them agree; that agreement was a property
-# of the unbounded metric, not of the data.)  What survives both models and the
-# metric change is the {PG_Ian, NA_Ian, NP_Ian, DT_Ian, CH_Dorian} core.
-# Modularity's resolution limit (~sqrt(2m), m ~ 29-34 here) sits at the scale of
-# these communities, so gamma below ~1 cannot split them whatever the data says.
+# Modularity's resolution gamma scales the null-model term gamma*k_i*k_j/2m:
+# larger gamma charges more for keeping two units together, so communities
+# come out smaller and more numerous.  Louvain takes no cluster-COUNT
+# argument, so gamma is the only dial on how many boxes appear.
+#
+# For the 13-UNIT PAIR HEATMAP gamma is AUTO-SELECTED per run (2026-08-31,
+# _pair_louvain_auto_gamma) by the rule that originally chose the fixed 1.2
+# on the 7-feature matrices: sweep PAIR_LOUVAIN_GAMMA_GRID at the pinned
+# seed, find the plateau where everything collapses into <= 2 communities and
+# the point where the partition shatters into >= 5, and take the smallest
+# gamma strictly between them (no such gap -> fall back to the fixed value
+# below).  The sweep is written to raw_data/pair_louvain_gamma_sweep.csv so
+# the choice is auditable.  On the 23-feature matrix the rule lands on 1.3
+# (3 communities, sizes [6, 5, 2]) — with the standing caveat that at that
+# gamma modularity is already slightly negative and the partition varies
+# across Louvain seeds, so the boxes are a DISPLAY ordering, not a finding;
+# nothing computational consumes them (RANK_TRAIN_SCOPE='pooled').
+#
+# The fixed value below remains the default for OTHER _transfer_communities
+# callers (the 6-function row-ordering inside cluster_function_heatmap),
+# where the 13-unit sweep rule has no meaning, and the fallback of the auto
+# rule.  Modularity's resolution limit (~sqrt(2m), m ~ 29-34 on the pair
+# graph) sits at the scale of these communities, so gamma below ~1 cannot
+# split them whatever the data says.
 PAIR_LOUVAIN_RESOLUTION = 1.2
+PAIR_LOUVAIN_GAMMA_GRID = (0.5, 0.8, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5,
+                           1.7, 2.0, 3.0, 5.0)
+
+
+def _pair_graph(mat):
+    """The undirected non-negative graph every Louvain step here runs on:
+    diagonal dropped, negatives clipped to 0, directions averaged (the three
+    reductions _transfer_communities documents)."""
+    import networkx as nx
+    codes = list(mat.index)
+    A = np.nan_to_num(mat.reindex(index=codes, columns=codes)
+                      .to_numpy(dtype=float), nan=0.0)
+    np.fill_diagonal(A, 0.0)
+    A = np.clip(A, 0.0, None)
+    Wsym = (A + A.T) / 2.0
+    G = nx.Graph()
+    G.add_nodes_from(range(len(codes)))
+    for i in range(len(codes)):
+        for j in range(i + 1, len(codes)):
+            if Wsym[i, j] > 0:
+                G.add_edge(i, j, weight=float(Wsym[i, j]))
+    return G, codes
+
+
+def _pair_louvain_gamma_sweep(mat, seed=PAIR_LOUVAIN_SEED,
+                              grid=PAIR_LOUVAIN_GAMMA_GRID):
+    """One row per candidate gamma: community count and sizes at the pinned
+    seed, modularity of that partition, and how many DISTINCT partitions 40
+    seeds produce (1 = the partition is a property of the data, many = of the
+    seed).  The auto rule reads k_seed0; the rest is the audit trail."""
+    from networkx.algorithms.community import (louvain_communities,
+                                               modularity)
+    G, _codes = _pair_graph(mat)
+    rows = []
+    for g in grid:
+        c0 = louvain_communities(G, weight='weight', seed=seed, resolution=g)
+        q0 = modularity(G, c0, weight='weight', resolution=g)
+        distinct = {tuple(sorted(tuple(sorted(x)) for x in
+                                 louvain_communities(G, weight='weight',
+                                                     seed=s2, resolution=g)))
+                    for s2 in range(40)}
+        rows.append(dict(gamma=g, k_seed0=len(c0),
+                         sizes=str(sorted((len(x) for x in c0),
+                                          reverse=True)),
+                         modularity=round(float(q0), 4),
+                         distinct_40seeds=len(distinct)))
+    return pd.DataFrame(rows)
+
+
+def _pair_louvain_auto_gamma(sweep):
+    """The re-runnable form of the rule that chose 1.2 by hand in 2026-08:
+    the smallest gamma strictly between the <= 2-community collapse plateau
+    and the >= 5-community shatter point.  Falls back to the fixed
+    PAIR_LOUVAIN_RESOLUTION when the grid has no such gap."""
+    k = dict(zip(sweep['gamma'], sweep['k_seed0']))
+    collapsed = [g for g in k if k[g] <= 2]
+    shattered = [g for g in k if k[g] >= 5]
+    lo = max(collapsed) if collapsed else min(k)
+    hi = min(shattered) if shattered else max(k)
+    cand = sorted(g for g in k if lo < g < hi)
+    return float(cand[0]) if cand else float(PAIR_LOUVAIN_RESOLUTION)
 
 
 def _transfer_communities(mat, seed=PAIR_LOUVAIN_SEED,
@@ -3477,22 +3461,9 @@ def _transfer_communities(mat, seed=PAIR_LOUVAIN_SEED,
 
     Returns (ordered_codes, {code -> cluster_id}, [(start, size, cluster_id)]).
     """
-    import networkx as nx
     from networkx.algorithms.community import louvain_communities
 
-    codes = list(mat.index)
-    A = np.nan_to_num(mat.reindex(index=codes, columns=codes)
-                      .to_numpy(dtype=float), nan=0.0)
-    np.fill_diagonal(A, 0.0)
-    A = np.clip(A, 0.0, None)
-    Wsym = (A + A.T) / 2.0
-
-    G = nx.Graph()
-    G.add_nodes_from(range(len(codes)))
-    for i in range(len(codes)):
-        for j in range(i + 1, len(codes)):
-            if Wsym[i, j] > 0:
-                G.add_edge(i, j, weight=float(Wsym[i, j]))
+    G, codes = _pair_graph(mat)
     comms = louvain_communities(G, weight='weight', seed=seed,
                                 resolution=resolution)
     # Deterministic presentation: communities ordered by their first member's
@@ -3546,11 +3517,10 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
     # method/target_std/model/level_feature_cols/pooled_feature_cols survive as
     # the pairing GUARD above only: what is actually fitted is rank_predict, so
     # the pair matrix cannot drift away from the rest of the rank channel.
-    # THE rank channel (rank_predict), one training city at a time, fitted on
-    # PARTITION_FEATURE_COLS -- the rank features WITHOUT r0.  Same model, same
-    # standardization, same code path as every other rank prediction; the one
-    # difference is the column list, and it is there because r0 flattens the
-    # community structure this matrix exists to expose (see the constant).
+    # THE rank channel (rank_predict), one training city at a time, on the
+    # full RANK_FEATURE_COLS.  Nothing trains on this matrix's Louvain
+    # partition any more (RANK_TRAIN_SCOPE='pooled'), so the boxes on the
+    # figure are a display ordering, not a training recipe.
     train_merged = {c: rank_merge_feats(feats_train[c]) for c in codes}
     test_merged = {c: rank_merge_feats(feats_test[c]) for c in codes}
 
@@ -3569,8 +3539,7 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
         for b in codes:
             feats_pair = ({a: test_merged[a]} if a == b           # self: within-a LOO
                           else {a: train_merged[a], b: test_merged[b]})
-            score = rank_predict(b, [a], feats_pair, min_rows=min_rows,
-                                 feature_cols=PARTITION_FEATURE_COLS)
+            score = rank_predict(b, [a], feats_pair, min_rows=min_rows)
             if score is None or len(score) < 3:
                 mat.loc[a, b] = np.nan
                 continue
@@ -3586,7 +3555,11 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
     # Louvain over the off-diagonal transfer; the matrix is REORDERED into the
     # partition so each community is a contiguous block the figure can box, and
     # the CSV is written in the same order as the figure it backs.
-    ordered, cl_labels, blocks = _transfer_communities(mat)
+    sweep = _pair_louvain_gamma_sweep(mat)
+    gamma = _pair_louvain_auto_gamma(sweep)
+    sweep.to_csv(os.path.join(raw_dir, 'pair_louvain_gamma_sweep.csv'),
+                 index=False)
+    ordered, cl_labels, blocks = _transfer_communities(mat, resolution=gamma)
     mat = mat.reindex(index=ordered, columns=ordered)
     mat.to_csv(os.path.join(raw_dir, 'cross_city_pair_heatmap.csv'))
     pd.Series(cl_labels, name='cluster').rename_axis('code').loc[ordered].to_csv(
@@ -3602,7 +3575,7 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
         save_path=os.path.join(out_dir, 'cross_city_pair_heatmap.png'))
     print(f"  [pairwise] cum_loss Spearman ρ heatmap ({method}) -> "
           f"{os.path.join(out_dir, 'cross_city_pair_heatmap.png')}  "
-          f"[{len(blocks)} Louvain clusters: "
+          f"[auto gamma {gamma}; {len(blocks)} Louvain clusters: "
           f"{', '.join(f'C{c}={s}' for _, s, c in blocks)}]")
     return mat
 
@@ -3763,13 +3736,12 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         second predictor after the aggregate score s."""
         return float(train_merged[c]['r0_city'].iloc[0])
 
-    # RANK_TRAIN_SCOPE='cluster': the rank channel below trains each held-out
-    # city only on its ESTIMATED transfer cluster.  Clusters come from the
-    # ridge pairwise heatmap written earlier this run; the held-out city's own
-    # membership is re-estimated per fold from its function co-riding matrix
-    # (its components never enter a template), so no label of the held unit
-    # leaks into its own training pool.  Absent/incomplete clusters CSV ->
-    # fall back to pooling every reference city.
+    # Rank-channel training-pool context.  Under the production
+    # RANK_TRAIN_SCOPE='pooled' (2026-08-31) this resolves to None and every
+    # fold trains on all reference cities; under a 'cluster' revert it would
+    # narrow each fold to the held city's ESTIMATED transfer cluster (see
+    # rank_cluster_context for the leakage control and RANK_TRAIN_SCOPE for
+    # why a plain revert no longer reproduces 2026-08-12).
     _rank_ctx = rank_cluster_context(test_merged, codes)
     if RANK_TRAIN_SCOPE == 'cluster' and _rank_ctx is None:
         print("  [curve pred] RANK_TRAIN_SCOPE=cluster but clusters CSV "
@@ -4845,10 +4817,10 @@ def main():
             cc_train[code] = cc_test[code] = feats_cc
 
         # ── STEP 6 — Cross-city prediction (pairwise, LOO transfer) ─────
-        # ORDER MATTERS: the pairwise heatmap cuts the transfer partition, and
-        # the LOO sweep trains each held-out city on its estimated cluster from
-        # exactly that partition (RANK_TRAIN_SCOPE).  Running the sweep first
-        # would silently fall back to pooled training on a fresh checkout.
+        # The heatmap still runs FIRST: nothing trains on its partition under
+        # RANK_TRAIN_SCOPE='pooled', but the cluster-restricted DIAGNOSTIC and
+        # the function co-riding figures read the clusters CSV it writes, and
+        # a 'cluster' revert would again depend on this ordering.
         cc_merged = {c: rank_merge_feats(cc_test[c]) for c in all_codes}
         for method, (std_mode, base_label) in CROSS_CITY_METHOD_STD.items():
             print(f"\n── Cross-city pairwise cum_loss heatmap [{base_label}] ──")
@@ -4863,15 +4835,12 @@ def main():
               f"model={RANK_MODEL}, train scope={RANK_TRAIN_SCOPE}) ──")
         analysis_rank_channel(cc_merged, all_codes)
 
-        # Mechanism figures for that partition, both reading back the clusters
-        # CSV the ridge pairwise heatmap just wrote: the per-cluster
-        # mapping-direction PCA (what rule each city fits) and the function
-        # co-riding graph (what colocation structure lets that rule exist).
-        analysis_cluster_mapping_pca(cc_test)
+        # Mechanism figures: the mapping-direction PCA (one panel, no
+        # clustering — what rule each city fits against the pooled one) and
+        # the function co-riding graph (which still panels by the heatmap's
+        # DESCRIPTIVE partition, reading back the clusters CSV).
+        analysis_mapping_pca(cc_test)
         analysis_cluster_function_graph(cc_test)
-        # Deployable test of same-cluster-restricted rank training (estimates
-        # each held-out city's cluster first).
-        analysis_cluster_restricted_rank(cc_test)
 
         # City-level reconstruction of the cross-city cum_loss prediction vs ground
         # truth (runs only for pearson + multi_city_std; guarded inside the function).

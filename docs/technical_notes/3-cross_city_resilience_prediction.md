@@ -115,7 +115,9 @@ a missing feature or target, skipping a unit with fewer than 8 usable components
 rank-transforming every feature column and the target within the unit. It returns the feature matrix before any standardization,
 so neither path inherits a standardization from the other (utils/pattern_analysis/ml_resilience.py:209-229).
 
-On the RANK path all eight feature columns are z-scored within their own city-event, and the target likewise, while
+On the RANK path all 23 feature columns (RANK_FEATURE_COLS: the six merged function shares, mean_distance, r0, and the 15
+pairwise function products — the products taken on the raw shares before ranking, adopted 2026-08-31) are z-scored within their
+own city-event, and the target likewise, while
 `pooled_feature_cols` and `level_feature_cols` stay inert. A rank says only that one component lost more than another in this
 city, so only a within-unit frame is honest, and a pooled z-score of per-unit ranks would fake a cross-city level ranks cannot
 carry (utils/pattern_analysis/ml_resilience.py:271-274 for the transfer,
@@ -210,16 +212,18 @@ question either was asking. There is now ONE definition — `RANK_MODEL`, `RANK_
 cluster-restricted diagnostic, the mapping-direction PCA and STEP 7. There is exactly one `rank=True` call into the engine in
 the whole file.
 
-`analysis_rank_channel` runs the sweep: one fold per city-event, the reference pool being every other unit narrowed to the held
-unit's estimated cluster, and `rank_predict` scoring the held unit's components. The held unit's target column is overwritten
+`analysis_rank_channel` runs the sweep: one fold per city-event, the reference pool being every other unit — POOLED since
+2026-08-31 (`RANK_TRAIN_SCOPE='pooled'`): with the 23-column list, restricting the pool to a cluster starves the ridge (pooled
++0.633 mean Spearman vs +0.290 under the transfer partition), so no cluster narrowing is applied — and `rank_predict` scoring
+the held unit's components. The held unit's target column is overwritten
 with a placeholder ramp, so its own losses cannot reach the fit even by accident. The fold's skill is the Spearman between the
 predicted ordering and the observed one — an R² would additionally score a prediction amplitude these scores do not have, which
 is why the LOO R² matrix was retired with the old path. Outputs are `component_rank/rank_pred_vs_true.png`, the per-fold points
 in `raw_data/rank_pred_vs_true.csv`, and the per-fold ρ in `raw_data/rank_loo_spearman.csv`.
 
-**Order matters.** The pairwise heatmap cuts the transfer partition, and the sweep trains on clusters read back from exactly
-that partition, so within STEP 6 the heatmap runs FIRST. Running the sweep first would silently fall back to pooled training on
-a fresh checkout.
+**Order.** The pairwise heatmap still runs FIRST within STEP 6, but nothing trains on its Louvain partition any more — the
+clusters CSV it writes now feeds only the cluster-restricted DIAGNOSTIC and the function co-riding figures, and the boxes on
+the heatmap are a display ordering.
 
 ### 3 · Interpretation · how should a scatter be read?
 
@@ -508,8 +512,9 @@ back to it (run_pattern_nmf.py:1708-1713). It also returns that mean, which §8.
 
 The rank channel, `_rank_score_prediction` (run_pattern_nmf.py:1716), predicts a within-city ORDERING. Here every feature and the
 target are rank-transformed within their own unit before standardization (utils/pattern_analysis/ml_resilience.py:222-224),
-which erases each city's absolute level and scale. Its feature list is the eight trunk predictors plus the observed r0 as a
-ninth, likewise rank-transformed, column (run_pattern_nmf.py:1731), and the caller uses only the order of the returned scores.
+which erases each city's absolute level and scale. Its feature list is the shared RANK_FEATURE_COLS — 23 columns since
+2026-08-31 (six merged function shares, mean_distance, r0, and the 15 pairwise function products), likewise rank-transformed —
+and the caller uses only the order of the returned scores.
 
 #### 3 · Interpretation · why is r0 admitted as a predictor, and why keep a separate rank channel?
 

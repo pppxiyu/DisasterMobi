@@ -1594,93 +1594,84 @@ def vis_city_mobility_curves(curves, save_path=None, ncols=5, names=None):
     return fig
 
 
-def vis_cluster_mapping_pca(points, arrows, cl_color, cl_cmap, evr,
-                            save_path=None, title=None):
-    """One panel per transfer cluster over a SHARED PCA frame (the PCA is fit
-    once, on every component's within-city rank-z features, so directions are
-    comparable across panels).
+def vis_mapping_pca(points, arrows, evr, save_path=None):
+    """The rank channel's mapping directions on one panel, no clustering.
 
-    `points`: one row per component — cluster, shade (colormap fraction;
-    light = lower cum_loss rank within its own city), pc1, pc2.  The other
-    clusters' components stay in each panel as grey context.  Every city's
-    cloud is centred on the origin by construction: the rank-z input removes
-    each city's mean, so the panels carry direction information only.
+    `points`: one row per component -- shade (colormap fraction; light =
+    lower cum_loss rank within its own city), pc1, pc2.  Every city's cloud
+    is centred on the origin by construction: the rank-z input removes each
+    city's mean, so the panel carries direction information only.
 
-    `arrows`: kind ('city' | 'pooled'), name, cluster, dx, dy (unit in-plane
-    direction).  City arrows draw dashed and labelled; the cluster's pooled
-    arrow draws solid, same colour, unlabelled.  All arrows are drawn at one
-    fixed length — the projection loses the out-of-plane magnitude, so a drawn
-    length would not be meaningful."""
+    `arrows`: kind ('city' | 'pooled'), name, dx, dy (unit in-plane
+    direction), cluster (0 = unclustered).  City arrows draw dashed with an
+    edge label, coloured by their DISPLAY transfer community (the pair
+    heatmap's Louvain partition -- presentation only); the pooled arrow
+    draws solid black, slightly heavier, unlabelled.  Components are one
+    uniform grey: the panel is about directions, and shading the points by
+    loss rank pulled attention the arrows should have.  All arrows are drawn
+    at one fixed length -- the projection loses the out-of-plane magnitude,
+    so a drawn length would not be meaningful."""
     from matplotlib.lines import Line2D
     rc = {'font.family': 'sans-serif',
-          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans',
+                              'sans-serif'],
           'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 13}
-    clusters = sorted(cl_color)
+    CL_COLORS = {0: '#57068C', 1: '#0F4D92', 2: '#4C9F70', 3: '#B64342',
+                 4: '#E28E2C', 5: '#7B5EA7'}
+    POOL_COL, PT_COL = '#111111', '#B8B8B8'
     rad = 0.42 * float(np.abs(points[['pc1', 'pc2']].to_numpy()).max())
     lim = 1.08 * float(np.abs(points[['pc1', 'pc2']].to_numpy()).max())
 
     with matplotlib.rc_context(rc):
-        fig, axes = plt.subplots(1, len(clusters),
-                                 figsize=(6.5 * len(clusters), 7.2),
-                                 sharex=True, sharey=True)
-        for ax, k in zip(np.atleast_1d(axes), clusters):
-            ax.axhline(0, color='#DDDDDD', lw=0.8, zorder=1)
-            ax.axvline(0, color='#DDDDDD', lw=0.8, zorder=1)
-            mine = points['cluster'] == k
-            ax.scatter(points.loc[~mine, 'pc1'], points.loc[~mine, 'pc2'],
-                       s=60, color='#D9D9D9', edgecolor='none', zorder=2)
-            cmap = matplotlib.colormaps[cl_cmap[k]]
-            for _, r in points[mine].iterrows():
-                ax.scatter(r['pc1'], r['pc2'], s=130, color=cmap(r['shade']),
-                           edgecolor='#444444', linewidth=0.6, zorder=4)
-            # Arrows first (no labels): many cities in a cluster point the
-            # same way, so their tip labels collide.
-            for _, a in arrows[arrows['cluster'] == k].iterrows():
-                solid = a['kind'] == 'pooled'
-                ax.annotate('', xy=(a['dx'] * rad, a['dy'] * rad),
-                            xytext=(0, 0), zorder=7 if solid else 6,
-                            arrowprops=dict(arrowstyle='-|>', lw=2.2,
-                                            color=cl_color[k],
-                                            linestyle='-' if solid else '--'))
-            # City labels: push each anchor out along its arrow direction near
-            # the panel edge (which amplifies the small angular gaps between
-            # arrows), declutter the anchors, and tie each back to its tip with
-            # a hairline leader.
-            cd = arrows[(arrows['cluster'] == k) & (arrows['kind'] == 'city')]
-            if len(cd):
-                tip = cd[['dx', 'dy']].to_numpy(float) * rad
-                unit = tip / np.linalg.norm(tip, axis=1, keepdims=True)
-                anc = _declutter_points(unit * (lim * 0.74), 0.62)
-                for nm, tp, an in zip(cd['name'], tip, anc):
-                    ax.plot([tp[0], an[0]], [tp[1], an[1]], color=cl_color[k],
-                            lw=0.7, alpha=0.6, zorder=6)
-                    ax.annotate(nm, an, fontsize=13, ha='center', va='center',
-                                color=cl_color[k], zorder=8)
-            ax.set_xlim(-lim, lim)
-            ax.set_ylim(-lim, lim)
-            ax.set_title(f"Cluster {k}  —  "
-                         f"{points.loc[mine, 'code'].nunique()} cities, "
-                         f"{int(mine.sum())} components",
-                         fontsize=18, color=cl_color[k], pad=8)
-            ax.set_xlabel(f'PC1 of within-city rank-z features  '
-                          f'({evr[0]:.0%})', fontsize=15)
-            ax.tick_params(labelsize=13)
-        ax0 = np.atleast_1d(axes)[0]
-        ax0.set_ylabel(f'PC2  ({evr[1]:.0%})', fontsize=15)
-        leg = [Line2D([0], [0], marker='o', ls='', mfc='#999999',
-                      mec='#444444', ms=11,
-                      label='component (light = lower cum_loss rank in its '
-                            'city)'),
-               Line2D([0], [0], marker='o', ls='', mfc='#D9D9D9', mec='none',
-                      ms=10,
-                      label='components of the other clusters (context)'),
-               Line2D([0], [0], color='#666666', lw=2.2, ls='--',
-                      label='dashed = one city\'s mapping direction'),
-               Line2D([0], [0], color='#666666', lw=2.2,
-                      label='solid = cluster pooled mapping direction')]
-        ax0.legend(handles=leg, loc='lower left', fontsize=12, framealpha=0.9)
-        if title:
-            fig.suptitle(title, fontsize=15, y=1.00)
+        fig, ax = plt.subplots(figsize=(9.2, 8.6))
+        ax.axhline(0, color='#DDDDDD', lw=0.8, zorder=1)
+        ax.axvline(0, color='#DDDDDD', lw=0.8, zorder=1)
+        ax.scatter(points['pc1'], points['pc2'], s=130, color=PT_COL,
+                   edgecolor='#555555', linewidth=0.6, zorder=4)
+        cl_col = (arrows['cluster'] if 'cluster' in arrows.columns
+                  else pd.Series(0, index=arrows.index))
+        for (_, a), k in zip(arrows.iterrows(), cl_col):
+            solid = a['kind'] == 'pooled'
+            col = POOL_COL if solid else CL_COLORS[int(k) % len(CL_COLORS)]
+            ax.annotate('', xy=(a['dx'] * rad, a['dy'] * rad), xytext=(0, 0),
+                        zorder=7 if solid else 6,
+                        arrowprops=dict(arrowstyle='-|>',
+                                        lw=3.2 if solid else 2.2, color=col,
+                                        linestyle='-' if solid else '--'))
+        cd = arrows[arrows['kind'] == 'city']
+        tip = cd[['dx', 'dy']].to_numpy(float) * rad
+        unit = tip / np.linalg.norm(tip, axis=1, keepdims=True)
+        anc = _declutter_points(unit * (lim * 0.74), 0.62)
+        cdk = cl_col[cd.index]
+        for nm, tp, an, k in zip(cd['name'], tip, anc, cdk):
+            col = CL_COLORS[int(k) % len(CL_COLORS)]
+            ax.plot([tp[0], an[0]], [tp[1], an[1]], color=col, lw=0.7,
+                    alpha=0.6, zorder=6)
+            ax.annotate(nm, an, fontsize=13, ha='center', va='center',
+                        color=col, zorder=8)
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+        ax.set_title(f"All {points['code'].nunique()} city-events, "
+                     f"{len(points)} components", fontsize=18, pad=8)
+        ax.set_xlabel(f'PC1 of within-city rank-z features  ({evr[0]:.0%})',
+                      fontsize=15)
+        ax.set_ylabel(f'PC2  ({evr[1]:.0%})', fontsize=15)
+        ax.tick_params(labelsize=13)
+        leg = [Line2D([0], [0], marker='o', ls='', mfc=PT_COL,
+                      mec='#555555', ms=11, label='component'),
+               Line2D([0], [0], color=POOL_COL, lw=3.2,
+                      label='solid black = pooled mapping direction '
+                            '(all cities)')]
+        for k in sorted(set(int(x) for x in cl_col
+                            [arrows['kind'] == 'city'])):
+            leg.append(Line2D([0], [0],
+                              color=CL_COLORS[k % len(CL_COLORS)], lw=2.2,
+                              ls='--',
+                              label=("one city's mapping direction"
+                                     if k == 0 else
+                                     f"city arrow, heatmap community C{k} "
+                                     f"(display partition)")))
+        ax.legend(handles=leg, loc='lower left', fontsize=12, framealpha=0.9)
         fig.tight_layout()
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)),
@@ -1688,7 +1679,6 @@ def vis_cluster_mapping_pca(points, arrows, cl_color, cl_cmap, evr,
             fig.savefig(save_path, dpi=200, bbox_inches='tight')
             plt.close(fig)
     return fig
-
 
 def _cf_graph_panel(ax, p, pos_color, neg_color, node_color, fdr_q,
                     fs_label):
@@ -1923,67 +1913,6 @@ def vis_cluster_function_graph(panels, over_panels, func_color,
             os.makedirs(os.path.dirname(os.path.abspath(save_path)),
                         exist_ok=True)
             fig.savefig(save_path, dpi=200)
-            plt.close(fig)
-    return fig
-
-
-def vis_cluster_restricted_rank(df, save_path=None):
-    """Dumbbell of the rank-prediction score per held-out city under two
-    training regimes: ALL (pooled reference cities) vs EST (only cities in the
-    held-out unit's ESTIMATED cluster).
-
-    `df`: one row per city with code, cluster, rho_all, rho_est, correct
-    (whether the held-out city's cluster was estimated correctly).  Rows are
-    drawn sorted by rho_all.  The connecting line is red when EST beats ALL,
-    blue when it loses, and DOTTED when the city's cluster was misassigned —
-    those are the deployable failure cases, so they read differently from the
-    genuine gains/losses.  Two dashed medians make the distribution shift
-    legible without a table."""
-    from matplotlib.lines import Line2D
-    rc = {'font.family': 'sans-serif',
-          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-          'svg.fonttype': 'none', 'pdf.fonttype': 42, 'font.size': 13}
-    s = df.sort_values('rho_all').reset_index(drop=True)
-    y = np.arange(len(s))
-    with matplotlib.rc_context(rc):
-        fig, ax = plt.subplots(figsize=(9.2, 6.4))
-        for i, r in s.iterrows():
-            d = r['rho_est'] - r['rho_all']
-            c = '#B64342' if d > 0.02 else ('#0F4D92' if d < -0.02 else '#9A9A9A')
-            ax.plot([r['rho_all'], r['rho_est']], [i, i], color=c, lw=2.2,
-                    alpha=0.75, ls=':' if not r['correct'] else '-', zorder=2)
-        ax.scatter(s['rho_all'], y, s=95, color='#B8B8B8', edgecolor='#666',
-                   zorder=3)
-        ax.scatter(s['rho_est'], y, s=95, color='#1A1A1A', zorder=4)
-        ax.axvline(s['rho_all'].median(), color='#B8B8B8', ls='--', lw=1.4,
-                   zorder=1)
-        ax.axvline(s['rho_est'].median(), color='#1A1A1A', ls='--', lw=1.4,
-                   zorder=1)
-        ax.set_yticks(y)
-        ax.set_yticklabels([f"{r['code']} (C{int(r['cluster'])})"
-                            for _, r in s.iterrows()], fontsize=11)
-        ax.set_xlabel('Within-City Spearman ρ (Predicted vs Actual cum_loss '
-                      'Rank)', fontsize=12)
-        ax.set_xlim(-0.5, 1.12)
-        ax.set_ylim(-0.8, len(s) - 0.2)
-        ax.grid(False)
-        leg = [Line2D([0], [0], marker='o', ls='', mfc='#B8B8B8', mec='#666',
-                      ms=10, label='ALL (Pooled Reference Cities)'),
-               Line2D([0], [0], marker='o', ls='', mfc='#1A1A1A', mec='none',
-                      ms=10, label='EST (Estimated Cluster Only)'),
-               Line2D([0], [0], color='#B64342', lw=2.2, label='EST Better'),
-               Line2D([0], [0], color='#0F4D92', lw=2.2, label='EST Worse'),
-               Line2D([0], [0], color='#777777', lw=2.2, ls=':',
-                      label='City Cluster Misassigned'),
-               Line2D([0], [0], color='#666666', lw=1.4, ls='--',
-                      label='Median')]
-        ax.legend(handles=leg, loc='upper left', fontsize=10.5, frameon=False,
-                  bbox_to_anchor=(0.005, 0.99))
-        fig.tight_layout()
-        if save_path:
-            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
-                        exist_ok=True)
-            fig.savefig(save_path, dpi=200, bbox_inches='tight')
             plt.close(fig)
     return fig
 
