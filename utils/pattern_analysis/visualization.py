@@ -846,64 +846,105 @@ def vis_bar_cross_city_resi_pred(df, gt_col='cum_loss_gt',
     return fig
 
 
-def vis_bar_curve_mae(df, save_path=None, title=None, colors=None,
+def vis_bar_curve_mae(df, save_path=None, colors=None, names=None, nrows=2,
                       ylabel='city-curve MAE (fraction of the normal baseline)'):
-    """Publication (Nature-style) grouped bar: per city-event (x), the ERROR of each
-    curve-prediction method as side-by-side bars, one bar per column of `df` in column
-    order, y = the mean absolute deviation between the predicted and observed city
-    relative curve over the disaster window.  Unlike vis_bar_cross_city_resi_pred there
-    is no ground-truth bar, because every bar IS an error and lower is better; the
-    all-unit mean of each method is annotated in the corner instead of an MAE-vs-GT
-    line.  Bar values are printed VERTICALLY and the legend sits BELOW the axes, so
-    neither collides with a neighbour.  PNG >= 300 dpi."""
+    """Grouped bar: per city-event, the ERROR of each curve-prediction method as
+    side-by-side bars, one bar per column of `df` in column order, y = the mean
+    absolute deviation between the predicted and observed city relative curve
+    over the disaster window.  Unlike vis_bar_cross_city_resi_pred there is no
+    ground-truth bar, because every bar IS an error and lower is better.
+
+    The city-events are dealt over `nrows` stacked rows sharing one y scale:
+    13 units x 4 methods in a single row forced a ~5:1 canvas on which nothing
+    could be read at slide size.  Both rows keep the SAME x unit width, so a
+    short final row leaves whitespace rather than fattening its bars, and bar
+    widths stay comparable across rows.
+
+    Each legend entry carries that method's all-unit mean, which is what the
+    corner text block used to hold: with four methods it no longer fitted on
+    one line, and the number belongs next to the colour key that identifies the
+    method anyway.  Colours come from _BAR_METHOD_COLORS by METHOD NAME -- the
+    bar's OWN set, see the note there for why it is not the curve page's; an
+    explicit `colors` overrides, and unknown labels fall back to the positional
+    palette.
+    `names` maps code -> the full city-event title for the x tick labels.
+    PNG >= 300 dpi."""
     codes = list(df.index)
     methods = list(df.columns)
-    palette = colors or ['#0F4D92', '#E28E2C', '#7B5EA7', '#767676', '#4C9F70']
-    mean_txt = "    ".join(f"mean({m})={np.nanmean(df[m].to_numpy(dtype=float)):.4f}"
-                           for m in methods)
-    nature_rc = {
+    names = names or {}
+    fallback = colors or ['#0F4D92', '#E28E2C', '#7B5EA7', '#767676', '#4C9F70']
+    palette = [(_BAR_METHOD_COLORS[m] if not colors and m in _BAR_METHOD_COLORS
+                else fallback[i % len(fallback)])
+               for i, m in enumerate(methods)]
+    means = {m: float(np.nanmean(df[m].to_numpy(dtype=float))) for m in methods}
+    nrows = max(int(nrows), 1)
+    per_row = int(np.ceil(len(codes) / nrows)) if codes else 1
+    rows = [codes[i * per_row:(i + 1) * per_row] for i in range(nrows)]
+    rows = [r for r in rows if r]
+
+    rc = {
         'font.family': 'sans-serif',
         'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
-        'font.size': 8, 'axes.spines.right': False, 'axes.spines.top': False,
-        'axes.linewidth': 0.8, 'legend.frameon': False,
-        'svg.fonttype': 'none', 'pdf.fonttype': 42,
+        'font.size': 15, 'axes.labelsize': 17,
+        'xtick.labelsize': 14, 'ytick.labelsize': 14,
+        'axes.spines.right': False, 'axes.spines.top': False,
+        'axes.linewidth': 1.1, 'legend.frameon': False,
     }
-    with plt.rc_context(nature_rc):
+    with plt.rc_context(rc):
+        fig, axes2d = plt.subplots(len(rows), 1, squeeze=False, sharey=True,
+                                   figsize=(1.62 * per_row + 1.5,
+                                            3.05 * len(rows) + 1.25))
+        axes = axes2d.ravel()
         n = max(len(methods), 1)
-        x = np.arange(len(codes))
         w = 0.8 / n
-        fig, ax = plt.subplots(figsize=(1.35 * len(codes) + 1.4, 3.9))
-        for i, m in enumerate(methods):
-            vals = df[m].to_numpy(dtype=float)
-            offset = (i - (n - 1) / 2) * w
-            bars = ax.bar(x + offset, vals, width=w * 0.92, label=m,
-                          color=palette[i % len(palette)],
-                          edgecolor='black', linewidth=0.7)
-            for bar in bars:
-                h = bar.get_height()
-                if np.isnan(h):
-                    continue
-                ax.annotate(f'{h:.3f}', (bar.get_x() + bar.get_width() / 2, max(h, 0)),
-                            xytext=(0, 2), textcoords='offset points', rotation=90,
-                            ha='center', va='bottom', fontsize=5.5, color='#3a3a3a')
-        ax.set_xticks(x)
-        ax.set_xticklabels(codes, rotation=20, ha='right')
-        ax.set_ylabel(ylabel)
-        ax.set_xlabel('city-event')
-        ax.margins(y=0.22)
-        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.20), ncol=2, fontsize=7,
-                  columnspacing=1.4, handlelength=1.3)
-        ax.text(0.99, 0.99, mean_txt, transform=ax.transAxes, ha='right', va='top',
-                fontsize=6.5, color='#4D4D4D')
-        if title:
-            ax.set_title(title, fontsize=8.5)
-        fig.tight_layout()
+        top = np.nanmax(df.to_numpy(dtype=float)) if len(df) else 1.0
+        for ax, grp in zip(axes, rows):
+            x = np.arange(len(grp))
+            sub = df.loc[grp]
+            for i, m in enumerate(methods):
+                vals = sub[m].to_numpy(dtype=float)
+                bars = ax.bar(x + (i - (n - 1) / 2) * w, vals, width=w * 0.9,
+                              label=m, color=palette[i % len(palette)],
+                              edgecolor='#2b2b2b', linewidth=0.7)
+                for bar in bars:
+                    h = bar.get_height()
+                    if np.isnan(h):
+                        continue
+                    # Rotated, and it has to stay that way: four bars share a
+                    # group, so a horizontal "0.064" overruns its neighbours
+                    # even at this width (measured, not guessed).
+                    ax.annotate(f'{h:.3f}',
+                                (bar.get_x() + bar.get_width() / 2, max(h, 0)),
+                                xytext=(0, 4), textcoords='offset points',
+                                rotation=90, ha='center', va='bottom',
+                                fontsize=10.5, color='#3a3a3a')
+            ax.set_xticks(x)
+            # "Baton Rouge (Ida)" -> two horizontal lines.  A row holds only
+            # `per_row` groups, so the widest city name still fits inside its
+            # group, and upright ticks read better than rotated ones.
+            ax.set_xticklabels([names.get(c, c).replace(' (', '\n(', 1)
+                                for c in grp], ha='center')
+            # identical x unit width on every row (see the docstring)
+            ax.set_xlim(-0.62, per_row - 0.38)
+            ax.set_ylim(0, top * 1.34)
+        h, l = axes[0].get_legend_handles_labels()
+        l = [f'{m}  (mean {means[m]:.3f})' for m in l]
+        # supylabel defaults to x=0.02 while tight_layout reserves its own
+        # left margin, which left a visible channel between the label and the
+        # tick numbers; pin both so the label sits just outside the ticks.
+        fig.supylabel(ylabel, fontsize=17, x=0.028)
+        # Two columns, not one row: the entries carry a mean each, and four of
+        # them abreast make the legend WIDER than the plot area -- which then
+        # sets the saved width and pads a dead margin down the left side.
+        fig.tight_layout(rect=(0.052, 0.10, 1.0, 1.0))
+        fig.legend(h, l, loc='lower center', ncol=min(len(methods), 2),
+                   fontsize=14, handlelength=1.5, columnspacing=2.4,
+                   labelspacing=0.5, bbox_to_anchor=(0.55, 0.005))
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
             fig.savefig(save_path, dpi=300, bbox_inches='tight')
             plt.close(fig)
     return fig
-
 
 def vis_curves_city_pred(days, gt, method_curves, save_path=None, title=None,
                          ylabel='daily mobility (flow volume per day)',
@@ -1653,7 +1694,8 @@ def vis_mapping_pca(points, arrows, evr, save_path=None):
         ax.set_ylim(-lim, lim)
         ax.set_title(f"All {points['code'].nunique()} city-events, "
                      f"{len(points)} components", fontsize=18, pad=8)
-        ax.set_xlabel(f'PC1 of within-city rank-z features  ({evr[0]:.0%})',
+        ax.set_xlabel(f'PC1 of within-city standardized features  '
+                      f'({evr[0]:.0%})',
                       fontsize=15)
         ax.set_ylabel(f'PC2  ({evr[1]:.0%})', fontsize=15)
         ax.tick_params(labelsize=13)
@@ -2021,21 +2063,48 @@ _PUB_BLUE, _PUB_DARK, _PUB_GREY = '#0F4D92', '#3a3a3a', '#BBBBBB'
 # looks identical in the component grid and on the city page.  Hue and stroke
 # both separate the lines, so neither has to carry it alone, and the forecast
 # (blue) never sits next to a similar green baseline again.
+# One style per METHOD, keyed by the label the pipeline prints, so a method
+# looks identical in the component grid and on the city curve page.  Hue and
+# stroke both separate the lines, so neither has to carry it alone.
+# These are the CURVE colours.  The MAE bar keeps its OWN set below: a filled
+# bar and a 2pt line have different legibility floors -- the recessive grey the
+# bar gives the do-nothing baseline all but vanishes as a dashed line here
+# (measured 2026-09-03), so the two figures cannot share one table.
 _CURVE_STYLE = {
     'ground truth':               ('#3a3a3a', '-'),
     'observed':                   ('#3a3a3a', '-'),
-    'component-based prediction': ('#E28E2C', '--'),
-    'train-mean':                 ('#0F4D92', (0, (1, 1.6))),
+    'proposed pipeline':          ('#E28E2C', '--'),
+    'train-mean baseline':        ('#0F4D92', (0, (1, 1.6))),
     'oracle':                     ('#7B5EA7', '-'),
     'city-wise prediction (kNN)': ('#4C9F70', (0, (5, 1.5, 1, 1.5))),
+    # A deeper violet than the oracle's muted #7B5EA7 on purpose: the two
+    # purples sit in different figures of the same deck and must not read as
+    # one method.
+    'naive ridge regression':     ('#7030A0', (0, (6, 1.6, 1.4, 1.6))),
+}
+
+# Bar-chart colours.  The methods are ORDERED (do nothing -> naive regression
+# -> the two real forecasts) and as solid fills there is room to say so: the
+# proposed pipeline takes the only warm saturated hue so the eye lands on it,
+# and the train-mean baseline takes a neutral grey because it predicts nothing
+# and looking inert is the honest reading.  Orange/teal/violet/grey also
+# survives deuteranopia, where the orange/green pair this figure used to run on
+# does not.
+_BAR_METHOD_COLORS = {
+    'proposed pipeline':          '#D95F02',
+    'city-wise prediction (kNN)': '#1B9E77',
+    'naive ridge regression':     '#7030A0',
+    'train-mean baseline':        '#6E6E6E',
+    'oracle':                     '#7B5EA7',
 }
 _STYLE_FALLBACK = [('#B0413E', '--'), ('#4C9F70', '-.'), ('#7B5EA7', ':')]
 
-# Reading order for the per-panel MAE stack: baselines above the model, so the
-# number to beat sits on top.  Unlisted labels fall in after these, in the
+# Reading order for the per-panel MAE stack: increasing sophistication downwards
+# (do nothing, then the naive regression, then the pipeline), so every number is
+# read against the one above it.  Unlisted labels fall in after these, in the
 # order they were plotted.
-_MAE_TEXT_ORDER = ['train-mean', 'city-wise prediction (kNN)',
-                   'component-based prediction', 'oracle']
+_MAE_TEXT_ORDER = ['train-mean baseline', 'city-wise prediction (kNN)',
+                   'naive ridge regression', 'proposed pipeline', 'oracle']
 
 
 def _mae_text_row(label):
@@ -2951,12 +3020,30 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None):
     flatten the small cities into invisible lines.  x is shared and therefore
     labelled once; the y label names the quantity once for the page.  A single
     figure-level legend sits in the free grid slot -- with 13 panels on a 5-wide
-    grid there are two spare, and using one costs nothing.  Per-panel error
-    numbers are deliberately absent: bar_cross_city_curve_mae.png already
-    reports the MAE of every method for every unit."""
+    grid there are two spare, and using one costs nothing.
+
+    Each legend entry carries that method's page-level error RATE: per unit the
+    mean over days of |forecast - observed| / observed, then the mean over
+    units (the mean absolute percentage error).  It is computed HERE, from the
+    very arrays that are drawn, so the number cannot drift away from the lines;
+    and being scale-free it reads the same on these magnitude curves as on the
+    relative curves underneath.  The per-panel numbers stay absolute (a MAE in
+    flow volume, in each method's own colour), so the page carries both the
+    per-unit magnitude of the error and the one comparable rate."""
     codes = list(per_city)
     names = names or {}
     nrow = int(np.ceil(len(codes) / ncols))
+    rate = {}
+    for code in codes:
+        _days, _gt, _lines = per_city[code]
+        _gt = np.asarray(_gt, dtype=float)
+        for lab, vals in _lines.items():
+            vals = np.asarray(vals, dtype=float)
+            ok = np.isfinite(_gt) & np.isfinite(vals) & (_gt != 0)
+            if ok.any():
+                rate.setdefault(lab, []).append(
+                    float(np.mean(np.abs(vals[ok] - _gt[ok]) / _gt[ok])))
+    rate = {lab: float(np.mean(v)) for lab, v in rate.items()}
 
     rc = dict(_SLIDE_RC, **{'font.size': 19, 'axes.titlesize': 21,
                             'xtick.labelsize': 15, 'ytick.labelsize': 15})
@@ -2988,12 +3075,23 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None):
             ax.set_title(names.get(code, code))
             ax.margins(y=0.10)
         h, l = axes[0].get_legend_handles_labels()
+        l = [f'{lab}  (MAPE {rate[lab]:.1%})' if lab in rate else lab
+             for lab in l]
         for ax in axes[len(codes):]:
             ax.axis('off')
         if len(axes) > len(codes):
-            axes[len(codes)].legend(h, l, loc='center', fontsize=20,
-                                    frameon=False, handlelength=1.9,
-                                    labelspacing=0.6)
+            spare = len(axes) - len(codes)
+            lg = axes[len(codes)].legend(h, l, loc='center', fontsize=20,
+                                         frameon=False, handlelength=1.9,
+                                         labelspacing=0.6)
+            # loc='center' centres the box in the FIRST free cell, so a longer
+            # label grows it symmetrically and its left edge creeps back over
+            # the last panel.  Re-anchor to the middle of the whole free region
+            # instead: length-independent, with a spare cell either side to
+            # absorb the growth.
+            if spare > 1:
+                lg.set_bbox_to_anchor((spare / 2.0, 0.5),
+                                      transform=axes[len(codes)].transAxes)
         fig.supxlabel('days since landfall', fontsize=26)
         fig.supylabel('daily mobility magnitude', fontsize=26)
         fig.tight_layout()

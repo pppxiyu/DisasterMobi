@@ -29,7 +29,8 @@ RIDGE_ALPHAS = np.logspace(-3, 3, 13)     # ridge penalty grid (RidgeCV LOO-sele
 def cross_city_resilience(feats_by_city, res_cols, feature_cols,
                           alphas=RIDGE_ALPHAS, min_rows=MIN_ROWS, rank=True,
                           split=None, target_std='within_unit', level_feature_cols=(),
-                          model='ridge', pooled_feature_cols=()):
+                          model='ridge', pooled_feature_cols=(),
+                          rank_features=True):
     """
     Cross-city resilience generalisation driven by an explicit train/test split.
 
@@ -37,7 +38,9 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
     selected by `target_std` — the two paths are DISJOINT (they share no
     standardization step), so read them separately:
       * 'within_unit'  (the RANK / spearman path): EVERY feature is z-scored WITHIN
-        its own city-event and the target likewise (Option A, level-robust) —
+        its own city-event and the target likewise (Option A, level-robust); with
+        rank=True the target is rank-transformed first, and the features too
+        unless `rank_features=False` —
         absolute-level differences between disasters are normalised away and R²
         reflects only the within-unit shape.  `pooled_feature_cols` and
         `level_feature_cols` are IGNORED here: a rank only means "more than" WITHIN a
@@ -102,7 +105,13 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
         X = sub[feature_cols].to_numpy(dtype=float)
         y = sub[target].to_numpy(dtype=float)
         if rank:
-            X = np.column_stack([rankdata(X[:, j]) for j in range(X.shape[1])])
+            # `rank_features=False` ranks the TARGET only: the channel still
+            # predicts an ordering, but the predictors keep their raw shape
+            # and are merely z-scored within the unit below.  Splitting the
+            # two is what the caller's V0r recipe needs; both stay per-unit.
+            if rank_features:
+                X = np.column_stack([rankdata(X[:, j])
+                                     for j in range(X.shape[1])])
             y = rankdata(y)
         L = (sub[level_feature_cols].to_numpy(dtype=float) if level_feature_cols
              else None)

@@ -1129,6 +1129,18 @@ POOLED_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
 # cluster-restricted diagnostic, the mapping-direction PCA and the STEP-7
 # ordering channel.  Change the rank prediction here and it changes everywhere.
 RANK_MODEL = 'ridge'
+# Does the channel RANK-transform its features?  False since 2026-08-31 (the
+# V0r recipe): the TARGET is still ranked -- the channel predicts an ordering
+# -- but the 23 predictors are only z-scored within their city, keeping their
+# raw shape.  Measured on the captured production tables, pooled all-12 LOO:
+# mean test Spearman +0.633 -> +0.667, median +0.786 -> +0.886 (6 folds up, 4
+# down, 3 tied; Wilcoxon p = 0.24, so the direction is positive but not
+# significant at n = 13).  The asymmetry is the informative part: de-ranking
+# HELPS when the interaction columns are z(f_a*f_b) as here (+0.034) and HURTS
+# when they are z(f_a)*z(f_b) (+0.553 -> +0.486) -- the products belong on the
+# raw share geometry, and once there they do not need the rank transform to
+# behave.  Set True to restore the pre-2026-08-31 channel.
+RANK_TRANSFORM_FEATURES = False
 # 23 columns since 2026-08-31: the 15 pairwise func PRODUCTS joined the list.
 # Products are computed on the RAW merged shares (rank_merge_feats) and only
 # then ranked within the city -- the rank of a product is not the product of
@@ -1407,10 +1419,11 @@ _FUNC_COLOR = {'residential': '#0F4D92', 'commercial': '#B64342',
 def analysis_mapping_pca(feats_by_code):
     """The rank channel's mapping directions, no clustering (2026-08-31):
     every component of every retained unit in ONE PCA of the within-city
-    rank-z feature space (RANK_FEATURE_COLS, the 23 columns the transfer
-    model is fed), one dashed per-city ridge direction (features ->
-    within-city cum_loss rank) and ONE solid pooled direction fit on all 81
-    components stacked.
+    STANDARDIZED feature space (RANK_FEATURE_COLS, the 23 columns the
+    transfer model is fed, transformed exactly as the channel transforms
+    them -- see RANK_TRANSFORM_FEATURES), one dashed per-city ridge
+    direction (features -> within-city cum_loss rank) and ONE solid pooled
+    direction fit on all 81 components stacked.
 
     This replaces the per-cluster panels: nothing trains on the transfer
     partition any more (RANK_TRAIN_SCOPE='pooled'), and the figure's question
@@ -1436,8 +1449,11 @@ def analysis_mapping_pca(feats_by_code):
     for code, feats in feats_by_code.items():
         sub = rank_merge_feats(feats)[fcols + ['cum_loss']].dropna()
         A = sub[fcols].to_numpy(float)
-        R = np.column_stack([rankdata(A[:, j]) for j in range(A.shape[1])])
-        R = (R - R.mean(0)) / (R.std(0) + 1e-12)
+        # Same feature transform the channel itself runs, so the arrows are
+        # the directions the transfer model actually fits.
+        if RANK_TRANSFORM_FEATURES:
+            A = np.column_stack([rankdata(A[:, j]) for j in range(A.shape[1])])
+        R = (A - A.mean(0)) / (A.std(0) + 1e-12)
         y = sub['cum_loss'].to_numpy(float)
         yr = rankdata(y)
         yr = (yr - yr.mean()) / (yr.std() + 1e-12)
@@ -1947,7 +1963,7 @@ def rank_predict(held, train_codes, merged, target='cum_loss',
     _r2, pred, _g = cross_city_resilience(
         fold, [target],
         list(RANK_FEATURE_COLS if feature_cols is None else feature_cols),
-        rank=True,
+        rank=True, rank_features=RANK_TRANSFORM_FEATURES,
         split={'train': list(train_codes), 'test': [held]},
         target_std='within_unit', model=RANK_MODEL, min_rows=min_rows)
     pm = pred.get('pooled_LOO' if self_fit else held, {}).get(target)
@@ -3598,11 +3614,14 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
 # 81/81 coverage it contributes nothing, so naming the line after it was wrong.
 # 'city' DOES stay tagged kNN: that baseline really is a cosine-kNN over city
 # feature vectors predicting one city-level alpha.
+# Insertion order is the order the CITY figures use: the bar's columns and the
+# magnitude grid's lines/legend both walk _CITY_FIGURE_METHODS below.
 _CURVE_METHOD_LABELS = {
-    'pred':       'component-based prediction',
-    'city':       'city-wise prediction (kNN)',
-    'oracle':     'oracle',
-    'train_mean': 'train-mean',
+    'pred':        'proposed pipeline',
+    'city':        'city-wise prediction (kNN)',
+    'naive_ridge': 'naive ridge regression',
+    'oracle':      'oracle',
+    'train_mean':  'train-mean baseline',
 }
 
 # Which method lines appear in the CITY-LEVEL figures (the magnitude overlay and
@@ -3685,6 +3704,18 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                        own r0) — the zero-shrinkage (w = 0) special case of
                        'pred', so the pair isolates exactly what the cum_loss
                        transfer adds.
+           naive_ridge the SKIP-THE-PIPELINE reference: a ridge regresses each
+                       component's own α on RANK_FEATURE_COLS (pooled-train
+                       standardized, no LEVEL covariates) and the same L = 1
+                       slice is synthesized from it, so the three baselines
+                       read as a ladder — predict nothing, predict the rate
+                       directly, run the pipeline.  It sits between the other
+                       two (2026-09-03: city MAE 0.104 vs train_mean 0.110 and
+                       pred 0.089) and its gap to train_mean is not significant
+                       (9 of 13 units better, Wilcoxon P = 0.17).  The PLATEAU
+                       is deliberately not regressed: predicting L directly
+                       scored 0.331 — worse than predicting nothing — because
+                       an L error is a permanent offset on every day.
          Components with an unusable anchor (all-NaN curve, or a day-0 total
          stop r0 ≈ 0) emit r ≡ 1; their (near-)zero weight_normal makes the
          aggregation unaffected.
@@ -3695,11 +3726,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
     Outputs under cross_city_curve_pred/:
       bar_cross_city_curve_mae.png    per city-event, the city-level whole-curve
-                                      MAE of the 3 FORECAST lines side by side,
+                                      MAE of the 4 FORECAST lines side by side,
                                       comparing them on the quantity the forecast
                                       optimises (lower is better; the oracle's own
                                       MAE stays in curve_pred_metrics.csv)
-      city_magnitude_curve_<code>.png observed vs the 3 FORECAST lines, absolute
+      city_magnitude_curve_<code>.png observed vs the FORECAST lines, absolute
                                       volume (the oracle is a ceiling, not a
                                       forecast, so it is not drawn here)
       component_curves_<code>.png     per-component grid: observed / oracle / pred
@@ -3831,18 +3862,26 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         curve = 1.0 / (1.0 + (1.0 / r0c - 1.0) * np.exp(-a_hat * days_f))
         return curve, a_hat
 
-    def _param_prediction(held, rest, target, extra_pooled=()):
+    def _param_prediction(held, rest, target, extra_pooled=(), cols=None,
+                          model='cosine_knn', level_cols=None):
         """(param_hat Series over the held unit's component index, pooled-train
         mean) for one target column.  `extra_pooled` adds observed pooled
         predictors (r0 for the cum_loss transfer).  param_hat is finite
         everywhere (train-mean fallback for feature-incomplete components).
-        None when no unit supplies rows for `target`."""
-        feat_cols = feature_cols + list(extra_pooled)
-        pooled_cols = POOLED_FEATURE_COLS + list(extra_pooled)
+        None when no unit supplies rows for `target`.
+
+        `cols`, `model` and `level_cols` default to the production channel (the
+        8 pooled predictors, cosine-kNN, both LEVEL covariates); the naive-ridge
+        reference line overrides all three.  Whatever `cols` names is fully
+        pooled-train standardized, which is what the caller's absolute-level
+        target needs."""
+        feat_cols = (feature_cols if cols is None else list(cols)) + list(extra_pooled)
+        pooled_cols = ((POOLED_FEATURE_COLS if cols is None else list(cols))
+                       + list(extra_pooled))
+        lvl_cols = LEVEL_FEATURE_COLS if level_cols is None else list(level_cols)
         tr_vals = []
         for t in rest:
-            sub = train_merged[t][[target] + feat_cols
-                                  + LEVEL_FEATURE_COLS].dropna()
+            sub = train_merged[t][[target] + feat_cols + lvl_cols].dropna()
             if len(sub) < CROSS_CITY_MIN_ROWS or sub[target].nunique() < 2:
                 continue          # the engine skips this unit too (same rule)
             tr_vals.append(sub[target].to_numpy(dtype=float))
@@ -3862,7 +3901,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         _, pred, _ = cross_city_resilience(
             fold, [target], feat_cols, rank=False,
             split={'train': rest, 'test': [held]}, target_std='pooled_train',
-            level_feature_cols=LEVEL_FEATURE_COLS, model='cosine_knn',
+            level_feature_cols=lvl_cols, model=model,
             pooled_feature_cols=pooled_cols,
             min_rows=CROSS_CITY_MIN_ROWS)
         pm = pred.get(held, {}).get(target)
@@ -4257,6 +4296,25 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             pred_curves, L_solved = _plateau_inversion_curves(
                 obs, mu_a, cum_hat.to_numpy(dtype=float))
             alpha_solved = None
+        # NAIVE RIDGE reference: the obvious thing to try instead of the whole
+        # pipeline — regress the curve's own rate α straight onto the 23 rank-
+        # channel features (ridge, pooled-train standardized, no LEVEL
+        # covariates) and synthesize the same L = 1 slice.  It is the honest
+        # midpoint between doing nothing (train_mean) and the pipeline, and it
+        # is here because the 2026-09-03 sandbox measured what it costs to skip
+        # the decomposition-side machinery: city-curve MAE 0.104 against the
+        # train-mean 0.110 and the pipeline's 0.089.  The plateau is NOT
+        # regressed — predicting L directly scores 0.331, worse than predicting
+        # nothing, because an L error is a permanent offset on every day (the
+        # 2026-07-13 free-L failure, re-measured with ridge).
+        # None when the wider 23-column dropna leaves no unit above min_rows;
+        # the line then degenerates to train_mean rather than dropping out, so
+        # the figures keep a complete row of methods.
+        a_naive, _ = _param_prediction(held, rest, 'recovery_alpha',
+                                       cols=RANK_FEATURE_COLS, model='ridge',
+                                       level_cols=())
+        a_naive = (np.full(k, mu_a) if a_naive is None
+                   else a_naive.to_numpy(dtype=float))
         lines = {
             'pred':       pred_curves,
             'oracle':     _curves_from_params(obs,
@@ -4264,6 +4322,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                                               orc['recovery_level'].to_numpy(dtype=float),
                                               orc['surge_strength'].to_numpy(dtype=float),
                                               orc['surge_rate'].to_numpy(dtype=float)),
+            'naive_ridge': _curves_from_params(obs, a_naive, ones),
             'train_mean': _curves_from_params(obs, np.full(k, mu_a), ones),
         }
 
@@ -4515,11 +4574,13 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                                 {r['method'] for r in metric_rows}])
               .rename(columns=_CURVE_METHOD_LABELS))
     mae_df.to_csv(os.path.join(raw_dir, 'city_curve_mae.csv'))
+    # Full "City (Storm)" tick labels, the same naming the magnitude page uses.
+    _bar_labels = {c['code']: c['label'] for c in CITY_EVENTS}
     vis_bar_curve_mae(
         mae_df,
+        names={c: f"{_bar_labels.get(c, c)} ({c.split('_', 1)[-1]})"
+               for c in mae_df.index},
         ylabel='city-curve MAE (fraction of the normal baseline)',
-        title='Whole-curve prediction error per city-event, by method '
-              '(lower is better)',
         save_path=os.path.join(OUTPUT_CURVE_PRED, 'bar_cross_city_curve_mae.png'))
     print(f"  [curve_pred] -> {OUTPUT_CURVE_PRED} "
           f"({len({r['code'] for r in metric_rows})} city-events)")
