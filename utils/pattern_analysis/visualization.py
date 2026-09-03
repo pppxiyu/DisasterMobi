@@ -3075,26 +3075,34 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None):
             ax.set_title(names.get(code, code))
             ax.margins(y=0.10)
         h, l = axes[0].get_legend_handles_labels()
-        l = [f'{lab}  (MAPE {rate[lab]:.1%})' if lab in rate else lab
-             for lab in l]
         for ax in axes[len(codes):]:
             ax.axis('off')
-        if len(axes) > len(codes):
+        lg = (axes[len(codes)].legend(h, l, loc='center', fontsize=20,
+                                      frameon=False, handlelength=1.9,
+                                      labelspacing=0.6)
+              if len(axes) > len(codes) else None)
+        fig.supxlabel('days since landfall', fontsize=26)
+        fig.supylabel('daily mobility magnitude', fontsize=26)
+        # Lay out against the BARE labels, THEN widen them.  The MAPE suffix
+        # nearly doubles the legend's width, and tight_layout pays for that out
+        # of the panels -- enough to squeeze the x ticks from 0/5/10 down to
+        # 0/10 and visibly narrow every subplot.  The legend lives in a free
+        # grid cell with another spare cell beside it, so it has somewhere to
+        # grow after the layout is fixed.
+        fig.tight_layout()
+        if lg is not None:
+            for t in lg.get_texts():
+                if t.get_text() in rate:
+                    t.set_text(f'{t.get_text()}  '
+                               f'(MAPE {rate[t.get_text()]:.1%})')
+            # loc='center' centres the box in the FIRST free cell, so the now
+            # longer labels grow it symmetrically and its left edge creeps back
+            # over the last panel.  Re-anchor to the middle of the whole free
+            # region: length-independent, a spare cell either side.
             spare = len(axes) - len(codes)
-            lg = axes[len(codes)].legend(h, l, loc='center', fontsize=20,
-                                         frameon=False, handlelength=1.9,
-                                         labelspacing=0.6)
-            # loc='center' centres the box in the FIRST free cell, so a longer
-            # label grows it symmetrically and its left edge creeps back over
-            # the last panel.  Re-anchor to the middle of the whole free region
-            # instead: length-independent, with a spare cell either side to
-            # absorb the growth.
             if spare > 1:
                 lg.set_bbox_to_anchor((spare / 2.0, 0.5),
                                       transform=axes[len(codes)].transAxes)
-        fig.supxlabel('days since landfall', fontsize=26)
-        fig.supylabel('daily mobility magnitude', fontsize=26)
-        fig.tight_layout()
         if save_path:
             os.makedirs(os.path.dirname(os.path.abspath(save_path)),
                         exist_ok=True)
