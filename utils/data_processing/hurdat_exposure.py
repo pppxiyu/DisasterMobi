@@ -147,3 +147,117 @@ def city_exposure(track, city_lat, city_lon, window=None, step_min=15):
                 time=pd.Timestamp(grid[k]),
                 storm_wind_kt=float(wind[k]),
                 quadrant=quad, local_wind_kt=local, band=band)
+
+
+def wind_field(track, lats, lons):
+    """Peak modelled wind (kt) at each point, maximised over the whole track.
+
+    `city_exposure` answers the same question for ONE point and returns a BAND
+    (64 / 50 / 34 / 0), which is what the 5-disaster_vs_resi x-axis needs but
+    is useless inside a city: every block group of a 30-km study area lands in
+    the same band, so a banded column is constant within the unit and any
+    within-city standardization sends it to zero.  This returns a CONTINUOUS
+    value instead, which is what a component-level exposure has to be built
+    from.
+
+    The profile between the analysed radii is a modified Rankine vortex, the
+    standard parametric choice when only the 34/50/64-kt radii are available:
+
+        d <= r64          64 + (vmax - 64) * (1 - d / r64)
+        r64 < d <= r50    linear from 64 down to 50
+        r50 < d <= r34    linear from 50 down to 34
+        d  > r34          34 * (r34 / d) ** 0.6
+
+    The exponent 0.6 is the conventional outer decay rate; it only affects
+    points beyond tropical-storm force, where every study area's block groups
+    sit on the same side of the gradient, so the within-city ORDERING it
+    produces is insensitive to the choice.
+
+    Quadrant selection reuses `_quadrant`, so this function and `city_exposure`
+    read the same radius for the same geometry.  HURDAT2 quadrants are compass
+    quadrants about the centre (NE spans due north clockwise to due east),
+    which is exactly the latitude/longitude sign test `_quadrant` applies.
+
+    The maximum is taken over every record rather than at closest approach,
+    because a slow-moving storm can deliver its strongest wind to a block group
+    well before or after the centre's nearest pass.
+    """
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    best = np.zeros(len(lats), dtype=float)
+    for row in track.itertuples(index=False):
+        d = _haversine_km(row.lat, row.lon, lats, lons)
+        north, east = lats >= row.lat, lons >= row.lon
+        # index into _QUADRANTS = (NE, SE, SW, NW)
+        quad = np.where(north & east, 0, np.where(east, 1, np.where(north, 3, 2)))
+        r = {}
+        for thr in (34, 50, 64):
+            per_quad = np.array([getattr(row, f'r{thr}_{q}') for q in _QUADRANTS],
+                                dtype=float) * _NM_TO_KM
+            r[thr] = per_quad[quad]
+        r34, r50, r64 = r[34], r[50], r[64]
+        vmax = float(row.wind_kt)
+
+        # Inner anchor per branch.  A radius of 0 means the record states there
+        # is NO wind of that strength anywhere in the quadrant, so interpolating
+        # DOWN from 64 kt there would invent hurricane-force wind at the eye of a
+        # storm the record says never reached it (measured on these 13 units:
+        # 414 of Baton Rouge's 500 block groups moved, mean 7.0 kt, max 14.6 kt).
+        # Where the inner radius is absent the profile therefore starts from the
+        # record's own vmax instead.
+        v = np.full(len(lats), np.nan)
+        m = np.isfinite(r64) & (r64 > 0) & (d <= r64)
+        v[m] = 64 + (vmax - 64) * (1 - d[m] / r64[m])
+        m = (np.isfinite(r64) & np.isfinite(r50) & (r50 > r64)
+             & (d > r64) & (d <= r50))
+        inner = np.where(r64 > 0, 64.0, vmax)
+        v[m] = inner[m] + (50 - inner[m]) * (d[m] - r64[m]) / (r50[m] - r64[m])
+        m = (np.isfinite(r50) & np.isfinite(r34) & (r34 > r50)
+             & (d > r50) & (d <= r34))
+        inner = np.where(r50 > 0, 50.0, np.where(r64 > 0, 64.0, vmax))
+        v[m] = inner[m] + (34 - inner[m]) * (d[m] - r50[m]) / (r34[m] - r50[m])
+        m = np.isfinite(r34) & (r34 > 0) & (d > r34)
+        v[m] = 34.0 * (r34[m] / d[m]) ** 0.6
+        best = np.fmax(best, np.nan_to_num(v))
+    return best
+
+
+def track_distance(track, lats, lons, step_min=15):
+    """Minimum centre-to-point great-circle distance (km) over the whole track.
+
+    Pure geometry: the best track's centre positions and nothing else -- no wind
+    field, no radii, no vortex profile.  That is the point of it.  Every
+    modelled-exposure definition tried on these 13 units (parametric wind under
+    eight defensible variants, MRMS storm rainfall) either failed to beat this or
+    beat it only inside the spread its own implementation choices could produce.
+
+    The track is interpolated to `step_min` first, for the reason city_exposure
+    interpolates: a 6-hourly record can leave the closest approach 100 km off.
+    """
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    ts = track.time.astype('int64').to_numpy()
+    grid = np.arange(ts[0], ts[-1], step_min * 60 * 1_000_000_000)
+    tlat = np.interp(grid, ts, track.lat.to_numpy())
+    tlon = np.interp(grid, ts, track.lon.to_numpy())
+    best = np.full(len(lats), np.inf)
+    for la, lo in zip(tlat, tlon):
+        best = np.minimum(best, _haversine_km(la, lo, lats, lons))
+    return best
+
+
+def landfall_day_wind(track, lats, lons, when):
+    """City-wide MEAN modelled wind (kt) on the day of `when`.
+
+    The per-event severity the rank channel's interaction term is moderated by.
+    Records are restricted to the calendar day (UTC) of the city's own closest
+    approach -- the same storm reaches Slidell and Deltona 36 hours apart, so a
+    fixed calendar day would compare different phases of the storm.  Falls back
+    to the single nearest record when no record shares that day.
+    """
+    day = pd.Timestamp(when).normalize()
+    same = track[track.time.dt.normalize() == day]
+    if len(same) == 0:
+        j = int(np.argmin(np.abs(track.time - pd.Timestamp(when))))
+        same = track.iloc[[j]]
+    return float(np.mean(wind_field(same, lats, lons)))

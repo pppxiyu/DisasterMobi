@@ -3109,3 +3109,52 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None):
             fig.savefig(save_path, dpi=200, bbox_inches='tight')
             plt.close(fig)
     return fig
+
+
+def vis_rank_coef_heatmap(matrix, row_labels, col_labels, block_edges=(),
+                          save_path=None):
+    """The rank channel's per-unit mapping picture, one row per city-event.
+
+    `matrix` is [rows x features]; the LAST row is the pooled ridge direction
+    scaled to unit length and every row above it is that unit's within-city
+    correlation between the feature and the loss rank.  The two are deliberately
+    on different scales -- a unit-length coefficient vector of n entries cannot
+    exceed 1/sqrt(n) on average while a correlation reaches 1 -- so on the shared
+    diverging scale the pooled row reads fainter than the unit rows.  That is a
+    property of putting a partial effect and a marginal one on one panel, not a
+    plotting fault: the unit rows say what a feature does ALONE in that city, the
+    pooled row says what it contributes once the other features compete for the
+    same variance.
+
+    `block_edges` draws a heavy rule after those column indices, separating the
+    feature families; the pooled row is ruled off from the unit rows the same way.
+    """
+    import numpy as _np
+    m = _np.asarray(matrix, dtype=float)
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 15, 'xtick.labelsize': 13, 'ytick.labelsize': 15}
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(0.72 * m.shape[1] + 2.0,
+                                        0.50 * m.shape[0] + 1.4))
+        v = float(_np.abs(m).max()) or 1.0
+        im = ax.pcolormesh(m, cmap='RdBu_r', vmin=-v, vmax=v,
+                           edgecolors='white', linewidth=0.6)
+        ax.set_xticks(_np.arange(m.shape[1]) + .5)
+        ax.set_xticklabels(list(col_labels), rotation=90)
+        ax.set_yticks(_np.arange(m.shape[0]) + .5)
+        ax.set_yticklabels(list(row_labels))
+        ax.invert_yaxis()
+        for x in block_edges:
+            ax.axvline(x, color='#2b2b2b', lw=2.2)
+        ax.axhline(m.shape[0] - 1, color='#2b2b2b', lw=2.6)
+        cb = fig.colorbar(im, ax=ax, pad=0.012, aspect=26)
+        cb.set_label('city rows: Spearman with the loss rank\n'
+                     'pooled row: ridge direction, unit length\n'
+                     '(positive = LESS loss)', fontsize=13)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=200, bbox_inches='tight')
+            plt.close(fig)
+    return fig

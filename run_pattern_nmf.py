@@ -239,7 +239,7 @@ from utils.pattern_analysis.nmf_pipeline import (
 )
 from utils.pattern_analysis.visualization import (
     vis_heatmap_temporal_signature,
-    vis_city_mobility_curves, vis_mapping_pca,
+    vis_city_mobility_curves, vis_mapping_pca, vis_rank_coef_heatmap,
     vis_cluster_function_graph,
     vis_cluster_function_heatmap,
     vis_nmf_rank_cv,
@@ -273,7 +273,9 @@ from utils.pattern_analysis.ml_resilience import (
     cross_city_resilience,
 )
 from utils.data_processing.geo_loader import load_city_geo
-from utils.data_processing.hurdat_exposure import load_track, city_exposure
+from utils.data_processing.hurdat_exposure import (load_track, city_exposure,
+                                                   track_distance,
+                                                   landfall_day_wind)
 from utils.data_processing.fetch_sld_landuse import (
     ensure_city_landuse_raw, classify_dominant_function, pooled_iwf_weights,
     CATEGORIES as SF_CATEGORIES,
@@ -1150,8 +1152,47 @@ RANK_TRANSFORM_FEATURES = False
 # (+0.637) without depending on the Louvain partition (modularity +0.026)
 # that channel trained on -- which is why the cluster restriction retired
 # with this adoption (see RANK_TRAIN_SCOPE).
+#
+# 25 columns since 2026-09-05.  r0 LEFT the predictor list and a physical
+# exposure took its slot, joined by two derived columns.  The three changes and
+# what each is worth, measured on the captured production tables (pooled all-12
+# LOO, mean test Spearman over the 13 units; the repo baseline is +0.667):
+#
+#   track_dist replaces r0            +0.661   each component's loading-weighted
+#       distance to the interpolated best track.  On its own it does NOT beat r0
+#       on the mean; what it does is halve the spread (sd 0.477 -> 0.303) and lift
+#       the worst unit from -0.700 to -0.100.  It is a ROBUSTNESS trade, and it is
+#       taken because r0's failure mode is catastrophic and unit-specific:
+#       Wilmington (Dorian) orders its components BACKWARDS under r0.
+#   + z_gap                           +0.693   see rank_merge_feats.
+#   + dist_X_sev                      +0.691   see rank_merge_feats.
+#
+# dist_X_sev is kept despite being 0.002 BELOW the 24-column set: it is the
+# hypothesis the exposure channel exists to test (does proximity matter less
+# when the whole city was hit hard?), it costs one column, and the two differ by
+# one component in one unit.  Drop it and the channel is the 24-column set.
+#
+# Exposure definitions that were tried and are NOT here, so they are not tried
+# again: a parametric wind field (best-justified variant +0.689, but its value
+# moves +/-0.06 across eight defensible implementation choices -- quadrant
+# convention, inner anchor, endpoint mode -- which is larger than the effect
+# being claimed), and MRMS gauge-corrected storm rainfall (+0.538, worse than
+# the repo baseline at P = 0.083, the closest to significance anything reached,
+# in the wrong direction).  Pure geometry wins because it has no implementation
+# choices to get wrong.
 RANK_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
-                     + ['mean_distance', 'r0'] + FUNC_X_COLS)
+                     + ['mean_distance', 'track_dist', 'z_gap', 'dist_X_sev']
+                     + FUNC_X_COLS)
+
+# Global centring statistics for `landfall_wind`, filled once per run by
+# set_severity_center() before any rank prediction.  A city-level moderator can
+# only reach the rank channel through the SIGN of a centred value (see
+# rank_merge_feats), and the centre must be one number for the whole run: the
+# pipeline builds each unit's merged table once, not once per LOO fold.
+# Measured both ways on the captured tables -- centring on each fold's 12
+# training units gives byte-identical per-unit scores to centring on all 13 --
+# so the simpler global centre is used.
+_SEVERITY_CENTER = {}
 
 # (PARTITION_FEATURE_COLS retired 2026-08-31 with the cluster restriction it
 # served: nothing trains on the Louvain partition any more, so the pairwise
@@ -1212,7 +1253,7 @@ CURVE_PRED_CITY_MODEL = 'ridge'
 # 2026-08-28 to flatten the community structure (assignment 10/13 -> 8/13
 # already at the current partition).  Reinstating the 2026-08-12 behaviour
 # means also restoring the r0-free partition list for the heatmap.  Back to 'pooled'
-# 2026-08-31, together with the 23-column RANK_FEATURE_COLS: wide features
+# 2026-08-31, together with the then 23-column RANK_FEATURE_COLS: wide features
 # and narrow training pools are SUBSTITUTES, not complements.  Measured on
 # the captured production tables (23 features): pooled +0.633 mean Spearman,
 # the transfer-Louvain restriction +0.290, co-riding k-means partitions at
@@ -1419,7 +1460,7 @@ _FUNC_COLOR = {'residential': '#0F4D92', 'commercial': '#B64342',
 def analysis_mapping_pca(feats_by_code):
     """The rank channel's mapping directions, no clustering (2026-08-31):
     every component of every retained unit in ONE PCA of the within-city
-    STANDARDIZED feature space (RANK_FEATURE_COLS, the 23 columns the
+    STANDARDIZED feature space (RANK_FEATURE_COLS, the 25 columns the
     transfer model is fed, transformed exactly as the channel transforms
     them -- see RANK_TRANSFORM_FEATURES), one dashed per-city ridge
     direction (features -> within-city cum_loss rank) and ONE solid pooled
@@ -1515,6 +1556,79 @@ def analysis_mapping_pca(feats_by_code):
         save_path=os.path.join(out_dir, 'mapping_direction_pca.png'))
     print(f"  [mapping pca] {len(pts)} components, {len(w_city)} city arrows "
           f"+ 1 pooled -> {out_dir}")
+
+
+def analysis_rank_coef_heatmap(feats_by_code):
+    """The same question as the mapping PCA, read one feature at a time.
+
+    The PCA shows each unit's mapping DIRECTION projected onto two axes; this
+    shows the per-feature detail the projection throws away.  Every unit row is
+    that unit's own Spearman correlation between the feature and the loss rank
+    -- a MARGINAL effect, what the feature does alone in that city -- and the
+    last row is the pooled ridge direction, a PARTIAL effect, what the feature
+    contributes once the other 24 compete for the same variance.  The two answer
+    different questions and the panel is worth reading precisely where they
+    disagree: a column that is strong per city and near zero pooled is collinear
+    with something else, and a unit whose row opposes the pooled row is a unit
+    the pooled model cannot serve.
+
+    Loss rank is coded 1 = LARGEST cum_loss, so a positive value means more of
+    that feature goes with LESS loss.  (That convention is local to this figure;
+    the channel itself ranks cum_loss ascending, and since flipping the target
+    negates both the fitted coefficients and the predictions, no score anywhere
+    in the pipeline changes -- only how this panel reads.)"""
+    from sklearn.linear_model import RidgeCV
+
+    fcols = list(RANK_FEATURE_COLS)
+    alphas = np.logspace(-3, 3, 13)
+    rows_corr, blocks, targets = {}, [], []
+    for code, feats in feats_by_code.items():
+        sub = rank_merge_feats(feats)[fcols + ['cum_loss']].dropna()
+        if len(sub) < CROSS_CITY_MIN_ROWS:
+            continue
+        A = sub[fcols].to_numpy(dtype=float)
+        yr = rankdata(-sub['cum_loss'].to_numpy(dtype=float))   # 1 = largest loss
+        rows_corr[code] = np.array(
+            [0.0 if A[:, j].std() < 1e-12
+             else float(spearmanr(A[:, j], yr).statistic)
+             for j in range(A.shape[1])])
+        blocks.append((A - A.mean(0)) / (A.std(0) + 1e-12))
+        targets.append((yr - yr.mean()) / (yr.std() + 1e-12))
+    if not rows_corr:
+        return
+    wp = RidgeCV(alphas=alphas).fit(np.vstack(blocks), np.concatenate(targets)).coef_
+    wpn = wp / (np.linalg.norm(wp) or 1.0)
+
+    unit = lambda v: v / (np.linalg.norm(v) or 1.0)
+    cos = {c: float(unit(r) @ wpn) for c, r in rows_corr.items()}
+    order = sorted(rows_corr, key=lambda c: -cos[c])
+    M = np.vstack([rows_corr[c] for c in order] + [wpn])
+    # Full "City (Storm)" row labels, the naming every other cross-city figure uses.
+    _lab = {c['code']: c['label'] for c in CITY_EVENTS}
+    labels = ([f"{_lab.get(c, c)} ({c.split('_', 1)[-1]})" for c in order]
+              + ['POOLED (the rule the model uses)'])
+
+    def pretty(col):
+        col = (col.replace('func_', '')
+                  .replace('mean_distance', 'mean trip distance')
+                  .replace('track_dist', 'distance to storm track')
+                  .replace('z_gap', 'anticipatory-excess gap')
+                  .replace('dist_X_sev', 'distance × landfall severity'))
+        return col.replace('_X_', ' × ')
+
+    out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
+    raw_dir = os.path.join(out_dir, 'raw_data')
+    os.makedirs(raw_dir, exist_ok=True)
+    tab = pd.DataFrame({c: rows_corr[c] for c in order}, index=fcols).T
+    tab.loc['POOLED (ridge, unit length)'] = wpn
+    tab.to_csv(os.path.join(raw_dir, 'rank_feature_target_correlation.csv'))
+    # 6 merged func shares | the 4 scalars | the 15 pairwise func products
+    vis_rank_coef_heatmap(
+        M, labels, [pretty(c) for c in fcols], block_edges=(6, 10),
+        save_path=os.path.join(out_dir, 'rank_feature_target_heatmap.png'))
+    print(f"  [rank heatmap] {len(order)} city-events x {len(fcols)} features; "
+          f"alignment with the pooled rule "
+          f"{min(cos.values()):+.3f} to {max(cos.values()):+.3f} -> {out_dir}")
 
 
 def analysis_cluster_function_graph(feats_by_code):
@@ -1867,9 +1981,28 @@ def _estimate_held_cluster(held_func, ref_func_by_cluster):
 
 # -- THE rank channel: the one predictor every rank figure goes through -------
 
+def set_severity_center(feats_by_code):
+    """Fix the global centring of `landfall_wind`, once, before any rank call.
+
+    Must run before rank_merge_feats builds `dist_X_sev`; every caller of that
+    helper sits downstream of STEP 5, which is where this is invoked."""
+    s = np.array([float(f['landfall_wind'].iloc[0])
+                  for f in feats_by_code.values()], dtype=float)
+    _SEVERITY_CENTER['mean'] = float(s.mean())
+    _SEVERITY_CENTER['std'] = float(s.std() or 1.0)
+    return _SEVERITY_CENTER
+
+
+def _zc(v):
+    """z-score within the unit -- the frame the rank channel standardizes in."""
+    v = np.asarray(v, dtype=float)
+    return (v - v.mean()) / (v.std() or 1.0)
+
+
 def rank_merge_feats(feats):
     """Add every derived column RANK_FEATURE_COLS names: the merged
-    func_<cat> shares and their 15 pairwise products.
+    func_<cat> shares, their 15 pairwise products, and the two columns built
+    on top of the exposure channel.
 
     The decomposition tables carry direction-split shares (share_from_<cat>
     and share_to_<cat>); the rank channel reads a component's involvement
@@ -1877,13 +2010,53 @@ def rank_merge_feats(feats):
     products are taken on those RAW merged shares -- BEFORE any ranking,
     because the rank of a product is not the product of ranks -- with the
     same definition _with_city_total_feats uses, so a frame that already
-    went through that helper survives this one unchanged."""
+    went through that helper survives this one unchanged.
+
+    z_gap -- the ANTICIPATORY EXCESS:
+
+        z_gap = z_unit(1 - r0) - z_unit(1 / track_dist)
+
+    how far the component dropped on landfall day, minus how close it sat to the
+    track, both standardized inside the unit.  Positive means it dropped further
+    than its exposure justifies (people left before the storm arrived); negative
+    means it was hit harder than its drop implies.  This is where r0 re-enters
+    the channel after losing its own slot: as a RESIDUAL against exposure rather
+    than as a level.  Proximity is the inverse distance, not the negated
+    distance, so it rises sharply near the track instead of linearly; measured
+    both ways, the two differ on one unit of thirteen (+0.693 vs +0.701).
+
+    dist_X_sev -- the exposure channel MODERATED by how hard the whole city was
+    hit, testing whether proximity discriminates less when everyone was hit:
+
+        dist_X_sev = z_pooled(landfall_wind) * z_unit(track_dist)
+
+    Read the standardization before reading the term.  Every rank feature is
+    z-scored WITHIN its unit, and for a unit-level constant s and a within-unit
+    vector x, z_unit(s*x) == sign(s) * z_unit(x) exactly -- the magnitude of s
+    divides straight back out.  A raw severity-times-feature product is
+    therefore the feature column again, a duplicate the ridge cannot use.  Only
+    the SIGN of a unit-level moderator can reach this channel, which is why
+    landfall_wind is CENTRED first (set_severity_center).  What the ridge
+    actually gets is one slope for units above the mean landfall wind and
+    another for units below it: a two-group moderation, not a continuous one.
+    The continuous version is unavailable in this frame, not merely untested --
+    it needs the pooled_train path, where level_feature_cols survive."""
     m = feats.copy()
     for c in SF_CATEGORIES:
         m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
     for i, a in enumerate(SF_CATEGORIES):
         for b in SF_CATEGORIES[i + 1:]:
             m[f'func_{a}_X_{b}'] = m[f'func_{a}'] * m[f'func_{b}']
+    if 'track_dist' in m.columns:
+        dist = m['track_dist'].to_numpy(dtype=float)
+        m['z_gap'] = (_zc(1.0 - m['r0'].to_numpy(dtype=float))
+                      - _zc(1.0 / dist))
+        if not _SEVERITY_CENTER:
+            raise RuntimeError('set_severity_center() must run before '
+                               'rank_merge_feats builds dist_X_sev')
+        sev = ((float(m['landfall_wind'].iloc[0]) - _SEVERITY_CENTER['mean'])
+               / _SEVERITY_CENTER['std'])
+        m['dist_X_sev'] = sev * _zc(dist)
     return m
 
 
@@ -2504,6 +2677,16 @@ def analysis_func_ordered_lines(W, n_nor, n_dis, first_day_normal,
 
 # ── STEP 5 — cross-city feature tables ──────────────────────────────────────────
 
+_TRACK_CACHE = {}
+
+
+def _load_track_cached(basin_id):
+    """One parse of the HURDAT2 file per storm per run (13 units, 5 storms)."""
+    if basin_id not in _TRACK_CACHE:
+        _TRACK_CACHE[basin_id] = load_track(basin_id)
+    return _TRACK_CACHE[basin_id]
+
+
 def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_cols, k,
                             share_lookup):
     """Decompose this city at `k` and assemble ONLY the cross-city predictor/target
@@ -2530,10 +2713,26 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     income = load_city_income(inc_csv)
     income_by_aggr = dict(zip(income['aggr_id'], income['median_household_income']))
     income_array = build_income_array(mapping, income_by_aggr, mode='combined')
+    # Per-component storm exposure, on the SAME route income takes: a
+    # block-group layer -> a per-OD-flow array (nan-aware mean of the flow's two
+    # endpoints) -> the H-loading-weighted mean.  The layer is each block
+    # group's distance to the interpolated best track, which is pure geometry.
+    # Note what the aggregation costs: a component is a city-wide travel
+    # pattern, so loading-weighting flattens the block-group gradient hard
+    # (Naples spans 54-125 km across its block groups and 70.4-71.2 km across
+    # its components).  Every layer tried has this problem; it is the reason
+    # none of them beats r0 by much.
+    track = _load_track_cached(HURDAT2_BASIN_IDS[cfg['code'].split('_', 1)[1]])
+    cen4326 = gdf.to_crs(epsg=3857).geometry.centroid.to_crs(epsg=4326)
+    bg_lat, bg_lon = cen4326.y.to_numpy(), cen4326.x.to_numpy()
+    dist_by_aggr = dict(zip(gdf['aggr_id'].astype(str),
+                            track_distance(track, bg_lat, bg_lon)))
+    track_array = build_income_array(mapping, dist_by_aggr, mode='combined')
     feats = pd.concat([
         functional_features(M, SF_CATEGORIES),
         spatial_features(H, distances),
         socioeconomic_features(H, income_array, name='median_income_combined'),
+        socioeconomic_features(H, track_array, name='track_dist'),
         resilience_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE, n_dis=n_dis),
         recovery_curve_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
                                 n_dis=n_dis, max_rate=ALPHA_MAX_RATE,
@@ -2573,6 +2772,14 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     # HEvOD evacuation strength.
     feats['hurricane_intensity'] = cfg['ss_intensity']
     feats['evac_level'] = cfg['evac_level']
+    # Per-event severity: the city-wide MEAN modelled wind on the day of this
+    # unit's OWN closest approach.  Unlike ss_intensity (a per-storm category)
+    # it varies between units of the same storm, which is what a moderator has
+    # to do.  It moderates the rank channel's exposure column through
+    # dist_X_sev; see rank_merge_feats for why only its sign gets through.
+    feats['landfall_wind'] = landfall_day_wind(
+        track, bg_lat, bg_lon,
+        city_exposure(track, float(bg_lat.mean()), float(bg_lon.mean()))['time'])
     # The decomposition is returned alongside the table so the STEP-7 curve
     # prediction can rebuild the SAME components' observed curves without a
     # second (identical, deterministic) NMF fit.
@@ -3753,11 +3960,16 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                     + ['mean_distance', 'median_income_combined'])
 
     def _merge(feats):
-        # The shared city-total builder: adds the merged func_<cat> shares that
-        # every channel uses, plus the interaction products and r0_city that
-        # only _city_score reads.  Extra columns are inert for the channels
-        # that do not name them.
-        return _with_city_total_feats(feats)
+        # Both builders, because this function feeds BOTH channels from one
+        # frame: the city-total builder adds the merged func_<cat> shares, the
+        # interaction products and r0_city that _city_score reads, and
+        # rank_merge_feats adds the exposure-derived columns
+        # (z_gap, dist_X_sev) that RANK_FEATURE_COLS names.  The city-total
+        # builder alone used to be enough only because the rank channel's list
+        # happened to be a subset of what it produced; that stopped being true
+        # when the exposure columns joined the list.  The shared columns are
+        # computed identically by both, so chaining them is a no-op for those.
+        return rank_merge_feats(_with_city_total_feats(feats))
 
     train_merged = {c: _merge(feats_by_city[c]) for c in codes}
     test_merged = {c: _merge(feats_test[c]) for c in codes}
@@ -4877,6 +5089,14 @@ def main():
             # with no labels, so the held-out unit uses its own k like any other.
             cc_train[code] = cc_test[code] = feats_cc
 
+        # Fix the landfall-wind centring for the whole run before anything
+        # calls rank_merge_feats -- dist_X_sev cannot be built without it.
+        ctr = set_severity_center(cc_test)
+        print(f"  [severity] landfall-wind centre {ctr['mean']:.1f} kt "
+              f"(sd {ctr['std']:.1f}); above it: "
+              + ', '.join(c for c in all_codes
+                          if float(cc_test[c]['landfall_wind'].iloc[0]) > ctr['mean']))
+
         # ── STEP 6 — Cross-city prediction (pairwise, LOO transfer) ─────
         # The heatmap still runs FIRST: nothing trains on its partition under
         # RANK_TRAIN_SCOPE='pooled', but the cluster-restricted DIAGNOSTIC and
@@ -4901,6 +5121,7 @@ def main():
         # the function co-riding graph (which still panels by the heatmap's
         # DESCRIPTIVE partition, reading back the clusters CSV).
         analysis_mapping_pca(cc_test)
+        analysis_rank_coef_heatmap(cc_test)
         analysis_cluster_function_graph(cc_test)
 
         # City-level reconstruction of the cross-city cum_loss prediction vs ground
