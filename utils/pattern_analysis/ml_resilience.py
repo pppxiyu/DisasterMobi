@@ -30,7 +30,7 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
                           alphas=RIDGE_ALPHAS, min_rows=MIN_ROWS, rank=True,
                           split=None, target_std='within_unit', level_feature_cols=(),
                           model='ridge', pooled_feature_cols=(),
-                          rank_features=True):
+                          rank_features=True, pooled_scale_cols=()):
     """
     Cross-city resilience generalisation driven by an explicit train/test split.
 
@@ -90,6 +90,16 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
     # feature_cols), so `nonpooled_idx` is empty and the raw path is fully pooled.
     pidx = [feature_cols.index(c) for c in pooled_feature_cols]
     nonpooled_idx = [j for j in range(len(feature_cols)) if j not in pidx]
+    # RANK path: columns that must keep a POOLED-TRAIN scale even though every
+    # other feature is z-scored within its own unit.  A within-unit z divides out
+    # any unit-level constant a column was multiplied by -- z_unit(s*x) ==
+    # sign(s)*z_unit(x) exactly -- so a feature carrying a unit-level magnitude,
+    # or an interaction between one and a component-level column, cannot survive
+    # that frame.  Naming it here keeps it on the pooled scale instead.  The
+    # statistics come from the TRAINING units only, so the held-out unit never
+    # sets its own scale.
+    psidx = [feature_cols.index(c) for c in pooled_scale_cols
+             if c in feature_cols]
 
     def _prep(df, target):
         # Prepare ONE city-event: drop rows with a missing feature/target, skip a
@@ -164,7 +174,14 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
         if target_std == 'within_unit':
             Xtr = np.vstack([_within_z(p[0]) for p in tr_parts])
             ytr = np.concatenate([_zscore(p[1]) for p in tr_parts])
-            return Xtr, ytr, _within_z(Xte_raw), _zscore(yte_raw)
+            Xte = _within_z(Xte_raw)
+            if psidx:
+                Rtr = np.vstack([p[0] for p in tr_parts])[:, psidx]
+                mu, sd = Rtr.mean(axis=0), Rtr.std(axis=0)
+                sd[sd == 0] = 1.0
+                Xtr[:, psidx] = (Rtr - mu) / sd
+                Xte[:, psidx] = (Xte_raw[:, psidx] - mu) / sd
+            return Xtr, ytr, Xte, _zscore(yte_raw)
         # pooled_train (RAW path)
         Xtr = np.vstack([p[0] for p in tr_parts]).astype(float)
         Xte = Xte_raw.astype(float).copy()
@@ -197,6 +214,11 @@ def cross_city_resilience(feats_by_city, res_cols, feature_cols,
         if target_std == 'within_unit':
             X = np.vstack([_within_z(p[0]) for p in parts])
             y = np.concatenate([_zscore(p[1]) for p in parts])
+            if psidx:
+                R = np.vstack([p[0] for p in parts])[:, psidx]
+                mu, sd = R.mean(axis=0), R.std(axis=0)
+                sd[sd == 0] = 1.0
+                X[:, psidx] = (R - mu) / sd
             return X, y
         X = np.vstack([p[0] for p in parts]).astype(float)
         if nonpooled_idx:

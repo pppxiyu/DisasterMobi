@@ -263,6 +263,7 @@ from utils.pattern_analysis.space_function import (
     share_lookup_from_landuse, build_od_function_matrix_soft,
 )
 from utils.pattern_analysis.component_features import (
+    pre_landfall_decline_loss,
     PERIOD_BANDS,
     temporal_features, functional_features, time_function_correlation,
     resilience_features, resilience_curves, component_function_entropy,
@@ -327,6 +328,7 @@ CITY_EVENTS = [
          analysis_days=151, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=12, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Ida @ BR ~Cat 2
          evac_level=0.091041,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
+         outage_frac=0.802968,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Wednesday', first_day_disaster='Sunday'),
     dict(code='FM_Ian', label='Fort Myers', key='Fort_Myers',
@@ -335,6 +337,7 @@ CITY_EVENTS = [
          analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=6, l1_reg=0.13, filter_factor=0, ss_intensity=7,  # Ian @ FM ~Cat 4
          evac_level=1.603633,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
+         outage_frac=0.725895,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
     # New city-events: 87-day (L-56 -> L+30) block_group graphs, landfall at day 56
@@ -347,6 +350,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=1.626, filter_factor=0, ss_intensity=5,  # Dorian @ Wilmington ~Cat 2 (true arrival)
          evac_level=0.814236,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
+         outage_frac=0.612115,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
     dict(code='WM_Isaias', label='Wilmington', key='Wilmington',
@@ -355,6 +359,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=0.315, filter_factor=0, ss_intensity=4,  # Isaias @ Wilmington ~Cat 1
          evac_level=0.018679,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
+         outage_frac=1.723832,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Thursday', first_day_disaster='Monday'),
     dict(code='LC_Laura', label='Lake Charles', key='Lake_Charles',
@@ -363,6 +368,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=10, l1_reg=0.549, filter_factor=0, ss_intensity=6,  # Laura @ Lake Charles ~Cat 3 (true arrival)
          evac_level=1.868990,  # BG-pop-weighted HEvOD 3-level evacuation strength (data/evacuation_orders)
+         outage_frac=float('nan'),  # excluded unit; never extracted
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
     # ── top-15 extension (2026-07-28): 12 city-events from the FEMA-ranked
@@ -384,6 +390,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=10, l1_reg=0.5, filter_factor=0, ss_intensity=6,  # Ida @ Houma Cat 3 (borderline 4; eyewall)
          evac_level=2.000000,
+         outage_frac=float('nan'),  # excluded unit; never extracted
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Wednesday', first_day_disaster='Sunday'),
     dict(code='HM_Ida', label='Hammond', key='Hammond',
@@ -392,6 +399,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=4,  # Ida @ Hammond Cat 1 (borderline 2)
          evac_level=0.000000,
+         outage_frac=1.255010,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Wednesday', first_day_disaster='Sunday'),
     dict(code='SL_Ida', label='Slidell', key='Slidell',
@@ -400,6 +408,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=6, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Ida @ Slidell Cat 2 (54 mi W of track)
          evac_level=0.000000,
+         outage_frac=0.789430,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Wednesday', first_day_disaster='Sunday'),
     dict(code='PG_Ian', label='Punta Gorda', key='Punta_Gorda',
@@ -408,6 +417,7 @@ CITY_EVENTS = [
          analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=7,  # Ian @ Punta Gorda Cat 4 (landfall hit)
          evac_level=1.365782,
+         outage_frac=0.968088,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
     dict(code='NA_Ian', label='Naples', key='Naples',
@@ -416,6 +426,7 @@ CITY_EVENTS = [
          analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=7,  # Ian @ Naples Cat 4 (40 mi WNW)
          evac_level=0.442624,
+         outage_frac=0.694813,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
     dict(code='NP_Ian', label='North Port', key='North_Port',
@@ -424,6 +435,7 @@ CITY_EVENTS = [
          analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=7, l1_reg=0.5, filter_factor=0, ss_intensity=7,  # Ian @ North Port Cat 4 (weakening inland)
          evac_level=0.370944,
+         outage_frac=0.685480,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
     dict(code='DT_Ian', label='Deltona', key='Deltona',
@@ -432,6 +444,7 @@ CITY_EVENTS = [
          analysis_days=44, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=8, l1_reg=0.5, filter_factor=0, ss_intensity=3,  # Ian @ Deltona TS (inland crossing)
          evac_level=0.000000,
+         outage_frac=1.037872,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
     dict(code='CH_Dorian', label='Charleston', key='Charleston',
@@ -440,6 +453,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=6,  # Dorian @ Charleston Cat 3 (borderline 2, offshore)
          evac_level=1.496924,
+         outage_frac=0.452309,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
     dict(code='MB_Dorian', label='Myrtle Beach', key='Myrtle_Beach',
@@ -448,6 +462,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=7, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Dorian @ Myrtle Beach Cat 2 (offshore)
          evac_level=0.201570,
+         outage_frac=0.060658,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
     dict(code='HH_Dorian', label='Hilton Head', key='Hilton_Head',
@@ -456,6 +471,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=10, l1_reg=0.5, filter_factor=0, ss_intensity=6,  # Dorian @ Hilton Head Cat 3 (offshore)
          evac_level=1.861403,
+         outage_frac=float('nan'),  # excluded unit; never extracted
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Sunday', first_day_disaster='Thursday'),
     dict(code='DA_Sally', label='Daphne', key='Daphne',
@@ -464,6 +480,7 @@ CITY_EVENTS = [
          analysis_days=71, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=5, l1_reg=0.5, filter_factor=0, ss_intensity=5,  # Sally @ Daphne Cat 2 (landfall county)
          evac_level=0.325377,
+         outage_frac=0.646781,  # EAGLE-I landfall-day peak customers out / county max customers
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Saturday', first_day_disaster='Wednesday'),
     dict(code='LC_Delta', label='Lake Charles', key='Lake_Charles',
@@ -472,6 +489,7 @@ CITY_EVENTS = [
          analysis_days=55, window=_WIN, buffer=_BUF, disaster=_DIS,
          n_behaviors=10, l1_reg=0.5, filter_factor=0, ss_intensity=4,  # Delta @ Lake Charles Cat 1 (weakening at closest approach)
          evac_level=2.000000,
+         outage_frac=float('nan'),  # excluded unit; never extracted
          context_aware=False, lambda_ctx=0.1, fit_segments=('normal', 'buffer'),
          first_day_normal='Monday', first_day_disaster='Friday'),
 ]
@@ -1153,46 +1171,47 @@ RANK_TRANSFORM_FEATURES = False
 # that channel trained on -- which is why the cluster restriction retired
 # with this adoption (see RANK_TRAIN_SCOPE).
 #
-# 25 columns since 2026-09-05.  r0 LEFT the predictor list and a physical
-# exposure took its slot, joined by two derived columns.  The three changes and
-# what each is worth, measured on the captured production tables (pooled all-12
-# LOO, mean test Spearman over the 13 units; the repo baseline is +0.667):
+# 24 columns since 2026-09-06.  r0 left the predictor list; a physical exposure
+# (track distance) took its slot, and the anticipation channel is carried by a
+# PRE-LANDFALL quantity.  Measured on the captured production tables, pooled
+# all-12 LOO over the 13 units, on BOTH a rank metric (mean test Spearman) and a
+# level metric (R^2 of the prediction against the standardized rank target):
 #
-#   track_dist replaces r0            +0.661   each component's loading-weighted
-#       distance to the interpolated best track.  On its own it does NOT beat r0
-#       on the mean; what it does is halve the spread (sd 0.477 -> 0.303) and lift
-#       the worst unit from -0.700 to -0.100.  It is a ROBUSTNESS trade, and it is
-#       taken because r0's failure mode is catastrophic and unit-specific:
-#       Wilmington (Dorian) orders its components BACKWARDS under r0.
-#   + z_gap                           +0.693   see rank_merge_feats.
-#   + dist_X_sev                      +0.691   see rank_merge_feats.
+#                                       Spearman        R^2
+#   base 23 (func + mean_distance + track_dist + products)
+#                                         +0.657      0.447
+#   + pre_cumloss                         +0.788      0.608
+#       vs base: 9 up / 1 down / 3 tied, Wilcoxon p = 0.014 on Spearman;
+#       12 up / 1 down, p = 0.003 on R^2.  The only change in this channel that
+#       is significant on both metrics, and the gain is spread rather than one
+#       unit's: Baton Rouge +0.706, Slidell +0.286, Charleston +0.200, Fort
+#       Myers +0.171, Deltona +0.167, four more smaller.
 #
-# dist_X_sev is kept despite being 0.002 BELOW the 24-column set: it is the
-# hypothesis the exposure channel exists to test (does proximity matter less
-# when the whole city was hit hard?), it costs one column, and the two differ by
-# one component in one unit.  Drop it and the channel is the 24-column set.
-#
-# Exposure definitions that were tried and are NOT here, so they are not tried
-# again: a parametric wind field (best-justified variant +0.689, but its value
-# moves +/-0.06 across eight defensible implementation choices -- quadrant
-# convention, inner anchor, endpoint mode -- which is larger than the effect
-# being claimed), and MRMS gauge-corrected storm rainfall (+0.538, worse than
-# the repo baseline at P = 0.083, the closest to significance anything reached,
-# in the wrong direction).  Pure geometry wins because it has no implementation
-# choices to get wrong.
+# TRIED AND REJECTED, so it is not retried:
+#   pre_cumloss x outage_frac (a 25th column, in the repo 2026-09-05 to -06):
+#       Spearman +0.787 (-0.001 against the 24-column set), R^2 +0.617 (+0.009,
+#       but 5 up / 8 down, p = 0.273 -- and +0.015 of that +0.009 comes from
+#       Wilmington (Isaias) alone, the one extreme outage value).  One extra
+#       column and a city-level moderation assumption for a difference carried
+#       by a single point.
+#   r0 as a predictor: it is literally the d=0 term of cum_loss, so part of its
+#       apparent power is arithmetic rather than mechanism.
+#   the anticipatory-excess gap z(1-r0) - z(1/track_dist): +0.685, superseded.
+#   a parametric wind field: its value moves +/-0.06 across eight defensible
+#       implementation choices, and at Wilmington it ranks Dorian above Isaias
+#       (66.2 vs 60.7 kt) against both the station observations (75 vs 99 mph
+#       peak gust at Federal Point) and the outage record (0.61 vs 1.72).
+#   MRMS gauge-corrected storm rainfall: +0.538, worse than the base.
 RANK_FEATURE_COLS = ([f'func_{c}' for c in SF_CATEGORIES]
-                     + ['mean_distance', 'track_dist', 'z_gap', 'dist_X_sev']
+                     + ['mean_distance', 'track_dist', 'pre_cumloss']
                      + FUNC_X_COLS)
 
-# Global centring statistics for `landfall_wind`, filled once per run by
-# set_severity_center() before any rank prediction.  A city-level moderator can
-# only reach the rank channel through the SIGN of a centred value (see
-# rank_merge_feats), and the centre must be one number for the whole run: the
-# pipeline builds each unit's merged table once, not once per LOO fold.
-# Measured both ways on the captured tables -- centring on each fold's 12
-# training units gives byte-identical per-unit scores to centring on all 13 --
-# so the simpler global centre is used.
-_SEVERITY_CENTER = {}
+# The column that must NOT be z-scored within its unit.  pre_cumloss carries a
+# POOLED magnitude -- how deep this component's pre-landfall withdrawal was
+# relative to every component in the study, not relative to its own city -- and
+# a within-unit z would throw that away.  cross_city_resilience keeps it on the
+# pooled-TRAIN scale instead (see its pooled_scale_cols).
+RANK_POOLED_SCALE_COLS = ('pre_cumloss',)
 
 # (PARTITION_FEATURE_COLS retired 2026-08-31 with the cluster restriction it
 # served: nothing trains on the Louvain partition any more, so the pairwise
@@ -1457,6 +1476,34 @@ _FUNC_COLOR = {'residential': '#0F4D92', 'commercial': '#B64342',
                'health': '#9A4D8E', 'public': '#42949E'}
 
 
+def _rank_design(sub, fcols, pooled_stats):
+    """The rank channel's design matrix for ONE unit, standardized as the model
+    standardizes it: within-unit z everywhere except RANK_POOLED_SCALE_COLS,
+    which keep the pooled scale (see cross_city_resilience's pooled_scale_cols).
+    Without this the diagnostic figures would z the pooled columns within each
+    unit and show a moderated interaction collapsed to its sign."""
+    A = sub[fcols].to_numpy(dtype=float)
+    X = (A - A.mean(0)) / (A.std(0) + 1e-12)
+    for c, (mu, sd) in pooled_stats.items():
+        if c in fcols:
+            j = fcols.index(c)
+            X[:, j] = (A[:, j] - mu) / sd
+    return X
+
+
+def _rank_pooled_stats(feats_by_code, fcols):
+    """Pooled mean/sd of RANK_POOLED_SCALE_COLS over every unit's components."""
+    out = {}
+    for c in RANK_POOLED_SCALE_COLS:
+        if c not in fcols:
+            continue
+        v = np.concatenate([rank_merge_feats(f)[c].to_numpy(dtype=float)
+                            for f in feats_by_code.values()])
+        v = v[np.isfinite(v)]
+        out[c] = (float(v.mean()), float(v.std() or 1.0))
+    return out
+
+
 def analysis_mapping_pca(feats_by_code):
     """The rank channel's mapping directions, no clustering (2026-08-31):
     every component of every retained unit in ONE PCA of the within-city
@@ -1486,6 +1533,7 @@ def analysis_mapping_pca(feats_by_code):
 
     fcols = list(RANK_FEATURE_COLS)
     alphas = np.logspace(-3, 3, 13)
+    pstats = _rank_pooled_stats(feats_by_code, fcols)
     rows, blocks, targets, w_city = [], [], [], {}
     for code, feats in feats_by_code.items():
         sub = rank_merge_feats(feats)[fcols + ['cum_loss']].dropna()
@@ -1494,7 +1542,7 @@ def analysis_mapping_pca(feats_by_code):
         # the directions the transfer model actually fits.
         if RANK_TRANSFORM_FEATURES:
             A = np.column_stack([rankdata(A[:, j]) for j in range(A.shape[1])])
-        R = (A - A.mean(0)) / (A.std(0) + 1e-12)
+        R = _rank_design(sub, fcols, pstats)
         y = sub['cum_loss'].to_numpy(float)
         yr = rankdata(y)
         yr = (yr - yr.mean()) / (yr.std() + 1e-12)
@@ -1581,6 +1629,7 @@ def analysis_rank_coef_heatmap(feats_by_code):
 
     fcols = list(RANK_FEATURE_COLS)
     alphas = np.logspace(-3, 3, 13)
+    pstats = _rank_pooled_stats(feats_by_code, fcols)
     rows_corr, blocks, targets = {}, [], []
     for code, feats in feats_by_code.items():
         sub = rank_merge_feats(feats)[fcols + ['cum_loss']].dropna()
@@ -1592,7 +1641,7 @@ def analysis_rank_coef_heatmap(feats_by_code):
             [0.0 if A[:, j].std() < 1e-12
              else float(spearmanr(A[:, j], yr).statistic)
              for j in range(A.shape[1])])
-        blocks.append((A - A.mean(0)) / (A.std(0) + 1e-12))
+        blocks.append(_rank_design(sub, fcols, pstats))
         targets.append((yr - yr.mean()) / (yr.std() + 1e-12))
     if not rows_corr:
         return
@@ -1612,8 +1661,7 @@ def analysis_rank_coef_heatmap(feats_by_code):
         col = (col.replace('func_', '')
                   .replace('mean_distance', 'mean trip distance')
                   .replace('track_dist', 'distance to storm track')
-                  .replace('z_gap', 'anticipatory-excess gap')
-                  .replace('dist_X_sev', 'distance × landfall severity'))
+                  .replace('pre_cumloss', 'pre-landfall decline loss'))
         return col.replace('_X_', ' × ')
 
     out_dir = os.path.join(OUTPUT_CROSS_CITY_RESI_PRED, 'component_rank')
@@ -1622,9 +1670,9 @@ def analysis_rank_coef_heatmap(feats_by_code):
     tab = pd.DataFrame({c: rows_corr[c] for c in order}, index=fcols).T
     tab.loc['POOLED (ridge, unit length)'] = wpn
     tab.to_csv(os.path.join(raw_dir, 'rank_feature_target_correlation.csv'))
-    # 6 merged func shares | the 4 scalars | the 15 pairwise func products
+    # 6 merged func shares | the 3 scalars | the 15 pairwise func products
     vis_rank_coef_heatmap(
-        M, labels, [pretty(c) for c in fcols], block_edges=(6, 10),
+        M, labels, [pretty(c) for c in fcols], block_edges=(6, 9),
         save_path=os.path.join(out_dir, 'rank_feature_target_heatmap.png'))
     print(f"  [rank heatmap] {len(order)} city-events x {len(fcols)} features; "
           f"alignment with the pooled rule "
@@ -1981,24 +2029,6 @@ def _estimate_held_cluster(held_func, ref_func_by_cluster):
 
 # -- THE rank channel: the one predictor every rank figure goes through -------
 
-def set_severity_center(feats_by_code):
-    """Fix the global centring of `landfall_wind`, once, before any rank call.
-
-    Must run before rank_merge_feats builds `dist_X_sev`; every caller of that
-    helper sits downstream of STEP 5, which is where this is invoked."""
-    s = np.array([float(f['landfall_wind'].iloc[0])
-                  for f in feats_by_code.values()], dtype=float)
-    _SEVERITY_CENTER['mean'] = float(s.mean())
-    _SEVERITY_CENTER['std'] = float(s.std() or 1.0)
-    return _SEVERITY_CENTER
-
-
-def _zc(v):
-    """z-score within the unit -- the frame the rank channel standardizes in."""
-    v = np.asarray(v, dtype=float)
-    return (v - v.mean()) / (v.std() or 1.0)
-
-
 def rank_merge_feats(feats):
     """Add every derived column RANK_FEATURE_COLS names: the merged
     func_<cat> shares, their 15 pairwise products, and the two columns built
@@ -2012,51 +2042,17 @@ def rank_merge_feats(feats):
     same definition _with_city_total_feats uses, so a frame that already
     went through that helper survives this one unchanged.
 
-    z_gap -- the ANTICIPATORY EXCESS:
-
-        z_gap = z_unit(1 - r0) - z_unit(1 / track_dist)
-
-    how far the component dropped on landfall day, minus how close it sat to the
-    track, both standardized inside the unit.  Positive means it dropped further
-    than its exposure justifies (people left before the storm arrived); negative
-    means it was hit harder than its drop implies.  This is where r0 re-enters
-    the channel after losing its own slot: as a RESIDUAL against exposure rather
-    than as a level.  Proximity is the inverse distance, not the negated
-    distance, so it rises sharply near the track instead of linearly; measured
-    both ways, the two differ on one unit of thirteen (+0.693 vs +0.701).
-
-    dist_X_sev -- the exposure channel MODERATED by how hard the whole city was
-    hit, testing whether proximity discriminates less when everyone was hit:
-
-        dist_X_sev = z_pooled(landfall_wind) * z_unit(track_dist)
-
-    Read the standardization before reading the term.  Every rank feature is
-    z-scored WITHIN its unit, and for a unit-level constant s and a within-unit
-    vector x, z_unit(s*x) == sign(s) * z_unit(x) exactly -- the magnitude of s
-    divides straight back out.  A raw severity-times-feature product is
-    therefore the feature column again, a duplicate the ridge cannot use.  Only
-    the SIGN of a unit-level moderator can reach this channel, which is why
-    landfall_wind is CENTRED first (set_severity_center).  What the ridge
-    actually gets is one slope for units above the mean landfall wind and
-    another for units below it: a two-group moderation, not a continuous one.
-    The continuous version is unavailable in this frame, not merely untested --
-    it needs the pooled_train path, where level_feature_cols survive."""
+pre_cumloss needs no derivation here: it arrives from
+    _build_cross_city_feats as a raw day-equivalent figure and the engine
+    standardizes it on the pooled training components (RANK_POOLED_SCALE_COLS).
+    An interaction with the per-event outage fraction was built here until
+    2026-09-06; see RANK_FEATURE_COLS for what it was worth."""
     m = feats.copy()
     for c in SF_CATEGORIES:
         m[f'func_{c}'] = feats[f'share_from_{c}'] + feats[f'share_to_{c}']
     for i, a in enumerate(SF_CATEGORIES):
         for b in SF_CATEGORIES[i + 1:]:
             m[f'func_{a}_X_{b}'] = m[f'func_{a}'] * m[f'func_{b}']
-    if 'track_dist' in m.columns:
-        dist = m['track_dist'].to_numpy(dtype=float)
-        m['z_gap'] = (_zc(1.0 - m['r0'].to_numpy(dtype=float))
-                      - _zc(1.0 / dist))
-        if not _SEVERITY_CENTER:
-            raise RuntimeError('set_severity_center() must run before '
-                               'rank_merge_feats builds dist_X_sev')
-        sev = ((float(m['landfall_wind'].iloc[0]) - _SEVERITY_CENTER['mean'])
-               / _SEVERITY_CENTER['std'])
-        m['dist_X_sev'] = sev * _zc(dist)
     return m
 
 
@@ -2138,7 +2134,8 @@ def rank_predict(held, train_codes, merged, target='cum_loss',
         list(RANK_FEATURE_COLS if feature_cols is None else feature_cols),
         rank=True, rank_features=RANK_TRANSFORM_FEATURES,
         split={'train': list(train_codes), 'test': [held]},
-        target_std='within_unit', model=RANK_MODEL, min_rows=min_rows)
+        target_std='within_unit', model=RANK_MODEL, min_rows=min_rows,
+        pooled_scale_cols=RANK_POOLED_SCALE_COLS)
     pm = pred.get('pooled_LOO' if self_fit else held, {}).get(target)
     if pm is None:
         return None
@@ -2770,13 +2767,38 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     # Per-event-constant LEVEL features (only used by the cross-city pooled_train mode,
     # see LEVEL_FEATURE_COLS): Saffir-Simpson arrival intensity and the BG-pop-weighted
     # HEvOD evacuation strength.
+    # Cumulative activity loss over each component's PRE-LANDFALL declining
+    # segment (see pre_landfall_decline_loss).  Measured entirely before
+    # landfall day and, unlike r0, not one of the terms of cum_loss -- so it
+    # carries neither post-landfall information nor mechanical overlap with the
+    # target.  Adopted 2026-09-05: it is the first predictor in this channel to
+    # beat the base at conventional significance.
+    feats['pre_cumloss'] = pre_landfall_decline_loss(
+        W, n_nor, n_dis, cfg['first_day_normal'], SLOTS_ACTIVE).to_numpy()
     feats['hurricane_intensity'] = cfg['ss_intensity']
     feats['evac_level'] = cfg['evac_level']
+    # Per-event physical severity: EAGLE-I landfall-day peak customers out over
+    # the unit's counties, divided by those counties' maximum customer count.
+    # A fraction above 1 is an EAGLE-I artefact (overlapping utility service
+    # areas reported against a conservative denominator), not 110% of customers
+    # dark; it stays usable as a relative index.  Only the landfall-day PEAK is
+    # taken -- restoration duration is post-landfall and inadmissible here.
+    # Measured and kept, but NOT a rank-channel predictor: as a per-event
+    # constant it cannot move a within-city ordering at all, and its interaction
+    # with pre_cumloss was tried and dropped (see RANK_FEATURE_COLS).  Kept so
+    # the 4.6 GB EAGLE-I extraction behind these 13 numbers is not repeated, and
+    # because it is the one severity measure that orders Wilmington's two storms
+    # the way the station observations and outage reports do.
+    feats['outage_frac'] = cfg['outage_frac']
     # Per-event severity: the city-wide MEAN modelled wind on the day of this
     # unit's OWN closest approach.  Unlike ss_intensity (a per-storm category)
     # it varies between units of the same storm, which is what a moderator has
     # to do.  It moderates the rank channel's exposure column through
-    # dist_X_sev; see rank_merge_feats for why only its sign gets through.
+    # Kept as a diagnostic only: it is NOT a rank-channel predictor.  Station
+    # observations contradict it -- at Wilmington it ranks Dorian above Isaias
+    # (66.2 vs 60.7 kt) while the most exposed coastal site recorded a 75 mph
+    # gust under Dorian against 99 mph under Isaias, and outages ran 0.61 vs
+    # 1.72 of customers.  outage_frac replaced it as the per-event severity.
     feats['landfall_wind'] = landfall_day_wind(
         track, bg_lat, bg_lon,
         city_exposure(track, float(bg_lat.mean()), float(bg_lon.mean()))['time'])
@@ -3964,7 +3986,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         # frame: the city-total builder adds the merged func_<cat> shares, the
         # interaction products and r0_city that _city_score reads, and
         # rank_merge_feats adds the exposure-derived columns
-        # (z_gap, dist_X_sev) that RANK_FEATURE_COLS names.  The city-total
+        # (pre_cumloss) that RANK_FEATURE_COLS names.  The city-total
         # builder alone used to be enough only because the rank channel's list
         # happened to be a subset of what it produced; that stopped being true
         # when the exposure columns joined the list.  The shared columns are
@@ -5088,14 +5110,6 @@ def main():
             # tuned k, but the rank CV supplies one from the city's own matrix
             # with no labels, so the held-out unit uses its own k like any other.
             cc_train[code] = cc_test[code] = feats_cc
-
-        # Fix the landfall-wind centring for the whole run before anything
-        # calls rank_merge_feats -- dist_X_sev cannot be built without it.
-        ctr = set_severity_center(cc_test)
-        print(f"  [severity] landfall-wind centre {ctr['mean']:.1f} kt "
-              f"(sd {ctr['std']:.1f}); above it: "
-              + ', '.join(c for c in all_codes
-                          if float(cc_test[c]['landfall_wind'].iloc[0]) > ctr['mean']))
 
         # ── STEP 6 — Cross-city prediction (pairwise, LOO transfer) ─────
         # The heatmap still runs FIRST: nothing trains on its partition under

@@ -669,3 +669,62 @@ def time_function_correlation(df, time_cols, func_cols, method='spearman'):
             r, pv = corr_fn(sub[t], sub[f])
             rho.loc[t, f], pval.loc[t, f] = r, pv
     return rho, pval
+
+
+def pre_landfall_decline_loss(W, n_nor, n_dis, first_day, slots_per_day):
+    """Per-component cumulative loss over the PRE-LANDFALL declining segment.
+
+    The buffer days [n_nor, n_dis) sit between the normal segment and landfall.
+    Activity there first RISES above baseline -- the preparation and evacuation
+    surge, which peaks at 1.16 to 1.53 across these units -- and then falls into
+    landfall day.  That fall is what this measures.
+
+    The segment is located PER COMPONENT, not per city: it starts at that
+    component's own maximum over the buffer and ends on the last buffer day.
+    Components turn down at different times (a leisure pattern before a
+    commuting one), and using each component's own turning point is what makes
+    this an anticipation measure rather than a fixed-window average.  When the
+    maximum falls on the last buffer day the segment is that single day.
+
+    The summand is the one cum_loss uses, (1 - relative level), so the two are
+    on one scale and the result is in day-equivalents.  The first term of the
+    segment is NEGATIVE by construction (the peak is above baseline); that is
+    the surge being counted, not an error.
+
+    Nothing here reads landfall day or later, so the feature is admissible where
+    only pre-landfall information may be used -- and unlike r0 it is not one of
+    the terms of cum_loss, so it carries no mechanical overlap with the target.
+
+    Returns a Series indexed by component.  Baselines follow
+    _daily_relative_curve: day-type matched, from the NORMAL days only.
+    """
+    W = np.asarray(W, dtype=float)
+    n_days = W.shape[0] // slots_per_day
+    if n_days * slots_per_day != W.shape[0]:
+        raise ValueError("W length is not a multiple of slots_per_day")
+    if n_nor % slots_per_day or n_dis % slots_per_day:
+        raise ValueError("n_nor / n_dis must be multiples of slots_per_day")
+    days_nor, days_dis = n_nor // slots_per_day, n_dis // slots_per_day
+    if days_dis <= days_nor:
+        raise ValueError("no buffer segment: n_dis must exceed n_nor")
+
+    daily = W.reshape(n_days, slots_per_day, W.shape[1]).sum(axis=1)
+    di0 = DAYS.index(first_day.capitalize())
+    is_wd = np.array([((di0 + d) % 7) < 5 for d in range(n_days)])
+    base_wd = daily[:days_nor][is_wd[:days_nor]].mean(axis=0)
+    base_we = daily[:days_nor][~is_wd[:days_nor]].mean(axis=0)
+
+    rel = np.full((days_dis - days_nor, W.shape[1]), np.nan)
+    for i, d in enumerate(range(days_nor, days_dis)):
+        base = base_wd if is_wd[d] else base_we
+        rel[i] = np.divide(daily[d], base, out=np.full(W.shape[1], np.nan),
+                           where=base > 0)
+
+    out = np.full(W.shape[1], np.nan)
+    for j in range(W.shape[1]):
+        v = rel[:, j]
+        if not np.isfinite(v).any():
+            continue
+        out[j] = float(np.nansum(1.0 - v[int(np.nanargmax(v)):]))
+    return pd.Series(out, index=pd.RangeIndex(W.shape[1], name='component'),
+                     name='pre_cumloss')
