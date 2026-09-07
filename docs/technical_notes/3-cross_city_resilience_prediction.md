@@ -81,6 +81,17 @@ early_collapse, recovery_day and recovery_deficit were retired on 2026-07-12 and
 component_features.resilience_features. The step yields `cc_train` and `cc_test`, both labelled with the one shared global-IWF
 category lookup, built once in main() and reused by all three analyses (run_pattern_nmf.py:2246-2259).
 
+Since 2026-09-06 both tables see a decomposition only after `filter_components` (run_pattern_nmf.py), which drops a
+component whose `weight_normal` share is below half the unit average 1/k AND whose heaviest single OD flow carries 20% or
+more of its H loading, then renumbers the remaining components; such a component is one flow, not a travel pattern. The
+rule runs at the source, immediately after every production decomposition (STEP 2 and this helper alike), so every
+downstream table, curve and figure sees the same k′, and `CROSS_CITY_MIN_ROWS` is 4 so that a unit taken from 5 to 4
+components stays in the folds. On the current registry it removes two of 81 components, Wilmington (Dorian) 2 and Hammond
+(Ida) 2, both school-campus outbound patterns riding on one OD pair, and lifts the rank channel from +0.788 to +0.852
+(Wilmington −0.20 → +0.60, Hammond 0.90 → 1.00, the eleven untouched units 0.867 → 0.861); the thresholds were set after
+inspecting Wilmington (Dorian), so that unit's gain is in-sample. `COMPONENT_FILTER = False` restores the unfiltered
+pipeline, and `1-decomposition_quality/raw_data/component_filter.csv` lists the selected components by original index.
+
 ### 3 · Interpretation · why is the test role frozen at k = 10?
 
 Each city's registry k was tuned, partly on cross-city objectives, so letting the held-out city keep it would leak model

@@ -1291,8 +1291,96 @@ RANK_TRAIN_SCOPE = 'pooled'
 # the rank CV set k per unit (floor 5), most units no longer HAVE 8 components at
 # all.  EVERY cross_city_resilience call must pass this explicitly — the one that
 # did not (the city-level cum_loss fold) silently inherited 8 and dropped 11 of
-# 13 units from that figure until 2026-08-03.
-CROSS_CITY_MIN_ROWS = 5
+# 13 units from that figure until 2026-08-03.  4, not 5, since 2026-09-06: the
+# component filter below takes a 5-component unit to 4 (it does for Wilmington
+# (Dorian) and Hammond (Ida)), and at 5 the engine would drop those two UNITS
+# from every fold, which also costs the other eleven their training rows
+# (mean rank Spearman 0.836 on 11 folds against 0.852 on 13 at 4).  Every unit
+# has a usable recovery_alpha on every component, so the floor binds only
+# through k.
+CROSS_CITY_MIN_ROWS = 4
+
+# ── Component-quality filter ──────────────────────────────────────────────────
+# Applied to every production decomposition the moment W and H exist
+# (filter_components, called from STEP 2 and from _build_cross_city_feats),
+# before any feature, curve, figure or fold reads them, so a dropped component
+# exists nowhere downstream and the remaining ones are renumbered 0..k'-1.  A
+# component goes when BOTH hold: its normal-period volume share (weight_normal
+# over the unit's sum) is below COMPONENT_FILTER_MAX_SHARE of the unit average
+# 1/k, AND its heaviest single OD flow carries at least COMPONENT_FILTER_MIN_TOP1
+# of its H loading.  Such a component is one flow rather than a travel pattern:
+# its functional shares and distances are that flow's endpoints, and its
+# relative curve is that flow's day-to-day noise over a near-zero weekend
+# baseline.  On the 2026-09-06 registry the rule selects 2 of 81 components,
+# Wilmington (Dorian) 2 and Hammond (Ida) 2 (22% / 27% of loading on one OD
+# pair, 0.44 / 0.43 of the unit-average weight; both school-campus outbound
+# patterns).  Rank channel +0.788 -> +0.852 (Wilmington -0.20 -> +0.60, Hammond
+# 0.90 -> 1.00, the eleven untouched units 0.867 -> 0.861).  Both thresholds
+# were set after inspecting Wilmington (Dorian), so that unit's gain is
+# in-sample; Hammond is the rule's only out-of-sample hit.  COMPONENT_FILTER =
+# False reproduces the unfiltered pipeline exactly; the components the rule
+# selects are logged to 1-decomposition_quality/raw_data/component_filter.csv
+# either way, with a flag saying whether they were dropped.
+COMPONENT_FILTER = True
+COMPONENT_FILTER_MAX_SHARE = 0.5     # weight_normal share, as a fraction of 1/k
+COMPONENT_FILTER_MIN_TOP1 = 0.20     # heaviest OD flow's share of the H row
+
+_COMPONENT_FILTER_LOG = []   # one row per selected component; see filter_components
+
+
+def filter_components(W, H, weights, n_nor, code, verbose=False):
+    """Apply the component-quality filter to one unit's fresh decomposition.
+
+    Returns (W, H, weights) restricted to the retained components, in their
+    original order and renumbered 0..k'-1.  The rule (COMPONENT_FILTER_*) is
+    evaluated on the unit's own weight_normal shares and H-row concentrations,
+    which is why it needs n_nor.  Only the STEP-2 caller passes verbose=True:
+    it prints and logs each selected component once per unit, whereas
+    _build_cross_city_feats re-decomposes a unit once per fold and stays
+    silent.  The log records the ORIGINAL index of a selected component; the
+    component numbers in every downstream table and figure are the renumbered
+    ones.
+    """
+    W = np.asarray(W, dtype=float)
+    H = np.asarray(H, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    k = H.shape[0]
+    if k == 0:
+        return W, H, weights
+    wn = W[:n_nor].sum(axis=0) * H.sum(axis=1)                # weight_normal
+    share_x_k = (wn / wn.sum() * k) if wn.sum() > 0 else np.full(k, np.nan)
+    hsum = H.sum(axis=1)
+    top1 = np.where(hsum > 0, H.max(axis=1) / np.where(hsum > 0, hsum, 1.0), np.nan)
+    hit = ((share_x_k < COMPONENT_FILTER_MAX_SHARE)
+           & (top1 >= COMPONENT_FILTER_MIN_TOP1))
+    if verbose:
+        for j in np.where(hit)[0]:
+            print(f"  [component filter] {code}: component {j} "
+                  f"{'dropped' if COMPONENT_FILTER else 'flagged (filter off)'} — "
+                  f"weight {share_x_k[j]:.2f} x unit average, top-1 flow "
+                  f"{top1[j]:.2f} of loading")
+            _COMPONENT_FILTER_LOG.append(dict(
+                code=code, component=int(j), k=int(k),
+                weight_x_average=float(share_x_k[j]),
+                top1_flow_share=float(top1[j]), applied=bool(COMPONENT_FILTER)))
+    if not COMPONENT_FILTER or not hit.any():
+        return W, H, weights
+    keep = ~hit
+    if verbose and int(keep.sum()) < CROSS_CITY_MIN_ROWS:
+        print(f"  [component filter] {code}: only {int(keep.sum())} components "
+              f"remain, below CROSS_CITY_MIN_ROWS = {CROSS_CITY_MIN_ROWS}; the "
+              f"cross-city engine will skip this unit")
+    return W[:, keep], H[keep], weights[keep]
+
+
+def write_component_filter_log():
+    """1-decomposition_quality/raw_data/component_filter.csv: every component
+    the rule selected, by ORIGINAL index within its unit, and whether it was
+    dropped.  Written even when empty so an absent row is a documented absence."""
+    os.makedirs(OUTPUT_QUALITY_RAW, exist_ok=True)
+    cols = ['code', 'component', 'k', 'weight_x_average', 'top1_flow_share', 'applied']
+    pd.DataFrame(_COMPONENT_FILTER_LOG, columns=cols).to_csv(
+        os.path.join(OUTPUT_QUALITY_RAW, 'component_filter.csv'), index=False)
 
 # Rows of the LOO scatter grid.  13 units go 5/5/3 with the short row
 # centred, which stays wider than tall (slide-shaped) while keeping the
@@ -2694,8 +2782,12 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     held-out role, hence the explicit parameter).  l1_reg is the unit's CITY_EVENTS
     value.  `cat_lookup` is the unit's block-group
     -> category map from the STEP-1 global classification.
+    The component-quality filter (filter_components) is applied to the fresh
+    factors before anything is computed from them, exactly as in STEP 2, so
+    the two decompositions of one unit agree on k'.
     Returns (feats, (W, H)) — the decomposition is reused by STEP 7."""
     W, H, weights = decompose_city(X_all, k, l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
+    W, H, weights = filter_components(W, H, weights, n_nor, cfg['code'])
     M, _ = build_od_function_matrix_soft(H, mapping, share_lookup,
                                          SF_CATEGORIES)
     distances = build_distance_array(mapping, gdf)
@@ -4897,6 +4989,9 @@ def main():
         else:
             W, H, weights = decompose_city(
                 X_all, cfg['n_behaviors'], l1_reg=cfg['l1_reg'], fit_time_cols=fit_time_cols)
+        # The component-quality filter runs here, on the fresh factors, so every
+        # table, curve and figure below sees only the retained components.
+        W, H, weights = filter_components(W, H, weights, n_nor, code, verbose=True)
         u.update(
             H=H, W=W, mapping=mapping, weights=weights, n_nor=n_nor, n_dis=n_dis,
             # Kept for the cross-city LOO, which re-decomposes each unit for its
@@ -4909,6 +5004,8 @@ def main():
                                        u['H'], u['fit_time_cols'])
         for code, u in units.items()]
     analysis_decomposition_quality_summary(quality_rows)
+    # Quality above is measured on the RETAINED components (post filter).
+    write_component_filter_log()
     analysis_city_mobility_curves(units)
 
     # ── STEP 3 — Within-city analyses: characterise each unit's components ──
