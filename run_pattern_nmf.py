@@ -203,8 +203,9 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
         per-unit city_magnitude_curve_<code>.png and component_curves_<code>.png,
         curve_pred_metrics.csv, and raw_data/ (per-day city curves by method +
         the per-component α/L table + the plotted MAE table)
-    4-cross_city_od_pred/        per city-event, one self-contained HTML slider map
-        of the daily predicted / observed / difference OD flows
+    4-cross_city_od_pred/        od_flow_pred_vs_gt_<code>.html, one flat
+        self-contained HTML slider map per city-event of the daily predicted /
+        observed / difference OD flows
 
 Adding a city-event means adding one CITY_EVENTS entry and providing its graph
 pkl, its geo CSV, and its land-use (EPA Smart Location Database) and income
@@ -4827,7 +4828,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                 frames[name] = per_day
             vis_od_flow_slider_html(
                 frames, [int(d) for d in obs.index[:n_d]],
-                os.path.join(OUTPUT_OD_PRED, held, 'od_flow_pred_vs_gt.html'),
+                os.path.join(OUTPUT_OD_PRED, f'od_flow_pred_vs_gt_{held}.html'),
                 f'{held}: daily OD flows — forecast vs observed',
                 note=('H spatial patterns are the test decomposition&#39;s own '
                       '(descriptive); the time dimension is the STEP-7 '
