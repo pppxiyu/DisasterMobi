@@ -194,6 +194,36 @@ For each component,
 
 
 
+### 2.5 Recovery by trip purpose, pooled over every unit (2026-09-09)
+
+`analysis_recovery_by_trip_purpose` draws one pooled r(d) curve per **trip
+purpose** into `4-func_vs_resi/all_city/line_recovery_by_trip_purpose.png`. A
+purpose is an unordered pair of endpoint functions with residential at one end
+(residential ↔ commercial, ↔ industrial, ↔ public, ↔ health, ↔ leisure,
+↔ residential; both directions summed, since a daily OD matrix carries the
+outbound and the return leg). No component is assigned to a purpose — every
+component is a mixture, the soft O×D cross-tab rarely puts more than 0.12 on
+one cell — so a component's weight for a purpose is its share on that pair in
+**excess** of the mean share over its own city's components, floored at zero:
+the same within-city contrast the rank channel uses, which also cancels the
+land-use base rate every city shares. Each city's purpose curve is the
+weight-normalised mean of its components' production curves; the pooled curve
+is the plain mean over the cities with any positive weight, so a city counts
+once whatever its k. `cum_loss` per purpose is Σ_d (1 − pooled curve), which
+by linearity equals the same weighting of the components' cum_loss, and it
+orders the legend (smallest loss first).
+
+Read with three limits in mind. The between-city standard errors overlap
+heavily (n = 13): the curve *shapes* separate, the numbers are suggestive. A
+purpose curve is typically carried by one component per city (median top
+weight 0.6–0.8), so the pooled line is "the most purpose-leaning component of
+each city, averaged". And the neighbourhood and public purposes are rare in the
+OD mass (mean share 1–2 % against 5 % for commercial), so their contrasts rest
+on the smallest shares. The raw tables under `all_city/raw_data/` hold the
+pooled curves with standard errors, every city's purpose curves, the summary
+and the weight diagnostics.
+
+
 ## Part 3 — Context-aware
 
 

@@ -164,7 +164,10 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                              (the same heatmap one unit at a time)
         4-func_vs_resi/      func/distance/income × cum_loss Spearman heatmaps
                              (rows = INTRA_RES_COLS, cum_loss only), per_city/ +
-                             pooled all_city/ with raw_data/
+                             pooled all_city/ with raw_data/; all_city/ also
+                             holds line_recovery_by_trip_purpose.png, the
+                             pooled r(d) curve per residential↔function trip
+                             purpose (+ its raw_data/ tables)
         5-disaster_vs_resi/  pooled arrival-intensity vs cum_loss scatter
                              (intensity is a per-event constant, so this reads
                              between events) + raw_data/
@@ -253,7 +256,7 @@ from utils.pattern_analysis.visualization import (
     vis_exposure_vs_cumloss,
     vis_bar_cross_city_resi_pred, vis_scatter_city_pred, vis_bar_curve_mae,
     vis_curves_city_pred, vis_city_curves_grid,
-    vis_component_curves_grid, vis_od_flow_slider_html,
+    vis_component_curves_grid, vis_od_flow_slider_html, vis_recovery_by_trip_purpose,
     vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_qm_pred_vs_obs, vis_func_vs_time_distribution,
     vis_centered_spectrum_loo,
     vis_centered_distributions, vis_spread_vs_predictors,
@@ -984,6 +987,8 @@ OUTPUT_CHAR_RESIL    = os.path.join(OUTPUT_CHAR, '2-resilience_curves')
 # within-unit rank normalisation (+ raw_data/).  The pearson twin and the
 # within-unit LOO Ridge were retired 2026-08-04 with the rest of the old
 # intra-city resilience-correlation folder.
+# all_city/ also carries analysis_recovery_by_trip_purpose's pooled curve
+# figure and its raw_data/ tables.
 OUTPUT_FUNC_VS_RESI       = os.path.join(OUTPUT_CHAR, '4-func_vs_resi')
 OUTPUT_RESI_CORR_RANK_PER = os.path.join(OUTPUT_FUNC_VS_RESI, 'per_city')
 OUTPUT_RESI_CORR_RANK_ALL = os.path.join(OUTPUT_FUNC_VS_RESI, 'all_city')
@@ -2710,6 +2715,112 @@ def analysis_func_resi_corr_pooled(feats_by_city):
     print(f"  [pooled func×resilience] {len(pooled)} components from "
           f"{len(codes)} city-events -> {OUTPUT_RESI_CORR_RANK_ALL}")
     return rho
+
+
+# Trip purposes for analysis_recovery_by_trip_purpose: residential at one end,
+# each functional category at the other, both directions summed.  Colour by
+# purpose FAMILY, fixed before any curve was seen: obligatory travel (work;
+# school and government) in the blue family, discretionary travel (shopping,
+# services and offices; recreation) in the warm family, medical in violet,
+# neighbourhood in neutral dark.  Siblings within a family differ by shade AND
+# marker, so no identity rests on colour alone.  Insertion order is the
+# drawing order; the legend is ordered by the result (see the function).
+TRIP_PURPOSE_STYLE = {
+    'industrial':  ('residential \u2194 industrial (work)',                        '#0F4D92', 'o'),
+    'public':      ('residential \u2194 public (school, government)',              '#3987E5', 's'),
+    'commercial':  ('residential \u2194 commercial (shopping, services, offices)', '#E28E2C', 'o'),
+    'leisure':     ('residential \u2194 leisure (recreation)',                     '#D24B40', 's'),
+    'health':      ('residential \u2194 health (medical)',                         '#9A4D8E', '^'),
+    'residential': ('residential \u2194 residential (neighbourhood)',              '#4D4D4D', 'D'),
+}
+
+
+def analysis_recovery_by_trip_purpose(units, landuse_by_code):
+    """Pooled recovery curve per trip purpose, one line each, over every unit.
+
+    A trip purpose is an unordered pair of endpoint functions with residential
+    at one end (TRIP_PURPOSE_STYLE); the two directions are summed because a
+    daily OD matrix carries the outbound and the return leg.  Every component is
+    a mixture (the soft O×D cross-tab rarely puts more than 0.12 on one cell),
+    so no component is assigned to one purpose: its weight for purpose P is its
+    share on P in EXCESS of the mean share over its own city's components,
+    floored at zero -- the within-city contrast the rank channel uses -- which
+    also cancels the land-use base rate every city shares.  A city's purpose
+    curve is the weight-normalised mean of its components' r(d) (the production
+    smoothed curves); the pooled curve is the plain mean over the cities with
+    any positive weight, so each city counts once whatever its k.  cum_loss per
+    purpose is Σ_d (1 − pooled curve), which by linearity is the same weighting
+    of the components' cum_loss; it orders the legend, smallest loss first.
+
+    A purpose curve is typically carried by ONE component per city (median top
+    weight 0.6-0.8), and the neighbourhood and public purposes are rare in the
+    OD mass (mean share 1-2% against 5% for commercial), so their curves are
+    the most exposed to a single component; the weight table records both.
+
+    Writes all_city/line_recovery_by_trip_purpose.png and, under raw_data/,
+    recovery_by_trip_purpose_{pooled,by_city,summary,weights}.csv."""
+    cats = list(SF_CATEGORIES)
+    res = cats.index('residential')
+    keys = list(TRIP_PURPOSE_STYLE)
+    city_curve, city_loss, wrows = {}, {}, []
+    for code, u in units.items():
+        lookup = share_lookup_from_landuse(landuse_by_code[code], SF_CATEGORIES)
+        M, _ = build_od_function_matrix_soft(np.asarray(u['H'], float), u['mapping'],
+                                             lookup, cats)
+        r = resilience_curves(np.asarray(u['W'], float), u['n_nor'], u['first_day_nor'],
+                              SLOTS_ACTIVE, n_dis=u['n_dis']).to_numpy()
+        city_curve[code], city_loss[code] = {}, {}
+        for X in keys:
+            j = cats.index(X)
+            share = M[:, res, j] + (M[:, j, res] if j != res else 0.0)
+            w = np.clip(share - share.mean(), 0.0, None)
+            if w.sum() <= 0:
+                continue
+            w = w / w.sum()
+            city_curve[code][X] = r @ w
+            city_loss[code][X] = float(np.nansum(1.0 - city_curve[code][X]))
+            wrows.append(dict(code=code, purpose=X, k=int(M.shape[0]),
+                              n_positive=int((w > 0).sum()), top_weight=float(w.max()),
+                              mean_share=float(share.mean())))
+    if not wrows:
+        print("  [trip purpose] no unit produced a positive weight; skipping.")
+        return
+    codes = list(units)
+    n_days = len(next(iter(next(iter(city_curve.values())).values())))
+    pooled, summary, long = {}, [], []
+    for X in keys:
+        cs = [city_curve[c][X] for c in codes if X in city_curve[c]]
+        ls = np.array([city_loss[c][X] for c in codes if X in city_loss[c]])
+        A = np.vstack(cs)
+        pooled[X] = A.mean(axis=0)
+        pooled[f'{X}_se'] = A.std(axis=0, ddof=1) / np.sqrt(len(cs)) if len(cs) > 1 else np.nan
+        summary.append(dict(purpose=X, label=TRIP_PURPOSE_STYLE[X][0], n_cities=len(cs),
+                            cum_loss=float(ls.mean()),
+                            cum_loss_se=float(ls.std(ddof=1) / np.sqrt(len(ls))) if len(ls) > 1 else np.nan,
+                            level_day0=float(pooled[X][0]), level_day_last=float(pooled[X][-1])))
+        for c in codes:
+            if X in city_curve[c]:
+                for d, v in enumerate(city_curve[c][X]):
+                    long.append(dict(code=c, purpose=X, day_since_landfall=d, value=float(v)))
+    S = pd.DataFrame(summary).set_index('purpose')
+    order = S.sort_values('cum_loss').index.tolist()          # most resilient first
+
+    os.makedirs(OUTPUT_RESI_CORR_RANK_ALL, exist_ok=True)
+    os.makedirs(OUTPUT_RESI_CORR_RANK_RAW, exist_ok=True)
+    P = pd.DataFrame(pooled, index=pd.RangeIndex(n_days, name='day_since_landfall'))
+    P.to_csv(os.path.join(OUTPUT_RESI_CORR_RANK_RAW, 'recovery_by_trip_purpose_pooled.csv'))
+    pd.DataFrame(long).to_csv(os.path.join(OUTPUT_RESI_CORR_RANK_RAW,
+                                           'recovery_by_trip_purpose_by_city.csv'), index=False)
+    S.to_csv(os.path.join(OUTPUT_RESI_CORR_RANK_RAW, 'recovery_by_trip_purpose_summary.csv'))
+    pd.DataFrame(wrows).to_csv(os.path.join(OUTPUT_RESI_CORR_RANK_RAW,
+                                            'recovery_by_trip_purpose_weights.csv'), index=False)
+    vis_recovery_by_trip_purpose(
+        P[keys], TRIP_PURPOSE_STYLE, order,
+        save_path=os.path.join(OUTPUT_RESI_CORR_RANK_ALL, 'line_recovery_by_trip_purpose.png'))
+    print("  [trip purpose] cum_loss by purpose (smallest first): "
+          + ", ".join(f"{X} {S.loc[X, 'cum_loss']:.2f}" for X in order)
+          + f" -> {OUTPUT_RESI_CORR_RANK_ALL}")
+    return S
 
 
 def analysis_resilience_corr(feats, tag, lambda_ctx=None):
@@ -5102,6 +5213,8 @@ def main():
         analysis_time_function_corr_pooled(feats_by_city)
         print("\n── Function × resilience correlation, ALL city-events pooled ──")
         analysis_func_resi_corr_pooled(feats_by_city)
+        print("\n── Recovery by trip purpose, ALL city-events pooled ──")
+        analysis_recovery_by_trip_purpose(units, landuse_by_code)
 
     # The intra-city scope ends here: folder 1- is complete and internally
     # consistent (its per-unit AND pooled figures all reflect this run's k

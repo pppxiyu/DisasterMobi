@@ -1011,6 +1011,50 @@ def vis_curves_city_pred(days, gt, method_curves, save_path=None, title=None,
     return fig
 
 
+def vis_recovery_by_trip_purpose(pooled, styles, order, save_path=None):
+    """One pooled r(d) line per trip purpose, slide-sized, no title, no grid.
+
+    `pooled` is [days × purpose key]; `styles` maps a key to (label, colour,
+    marker) and fixes the drawing order; `order` lists the keys in legend order
+    (the caller passes smallest cumulative loss first).  The baseline r = 1 is
+    the dashed rule.  Fonts sit above the module's slide defaults on purpose:
+    six lines share one panel and the figure is read from the back of a room.
+    """
+    rc = {'font.family': 'sans-serif',
+          'font.sans-serif': ['Arial', 'Helvetica', 'DejaVu Sans', 'sans-serif'],
+          'font.size': 24, 'axes.labelsize': 27,
+          'xtick.labelsize': 22, 'ytick.labelsize': 22,
+          'axes.spines.right': False, 'axes.spines.top': False,
+          'axes.linewidth': 1.6, 'legend.frameon': False,
+          'xtick.major.width': 1.6, 'ytick.major.width': 1.6,
+          'xtick.major.size': 7, 'ytick.major.size': 7}
+    days = pooled.index.to_numpy()
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(15.5, 7.8))
+        ax.axhline(1.0, color='#4D4D4D', lw=3, ls='--', alpha=0.35, zorder=1)
+        handles = {}
+        for key, (label, col, mk) in styles.items():
+            if key not in pooled.columns:
+                continue
+            handles[key], = ax.plot(days, pooled[key].to_numpy(), color=col, lw=3.0,
+                                    marker=mk, ms=9, label=label, zorder=3)
+        ax.set_xlabel('days since landfall')
+        ax.set_ylabel('activity relative to the\nnormal-period baseline')
+        ax.set_xticks(range(0, int(days.max()) + 1, 2))
+        ax.set_yticks([0.2, 0.4, 0.6, 0.8, 1.0])
+        ax.grid(False)
+        keep = [k for k in order if k in handles]
+        ax.legend([handles[k] for k in keep], [styles[k][0] for k in keep],
+                  loc='lower right', fontsize=21, handlelength=2.2,
+                  labelspacing=0.45, borderaxespad=0.3)
+        fig.tight_layout()
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+    return fig
+
+
 def vis_component_curves_grid(curves_obs, method_curves, save_path=None,
                               title=None, ncols=3, weights=None):
     """Per-component curve grid for ONE city-event: each panel shows a
