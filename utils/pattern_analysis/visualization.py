@@ -2692,7 +2692,7 @@ def vis_spread_vs_predictors(target, predictors, save_path=None, storms=None,
                              ncol=5, dim_r2=0.15, gap_after=None,
                              title_fontsize=None,
                              xlabel='candidate predictor',
-                             ylabel='within-city loss SD'):
+                             ylabel='within-city loss SD', show_statistics=True):
     """Does any candidate predictor track the WIDTH the spread model has to
     predict?  One panel per candidate, all sharing the same y.
 
@@ -2707,6 +2707,8 @@ def vis_spread_vs_predictors(target, predictors, save_path=None, storms=None,
     group of candidates can be set apart from the rest without needing a second
     figure or a box drawn around them.
 
+    With show_statistics=True, panels label Pearson r and R^2. Set it false
+    to retain the descriptive trend without adding text annotations.
     Each panel carries the least-squares line and its Pearson r with R^2,
     because the question is whether the cloud has usable slope at n = 13.
     Panels at or below `dim_r2` are kept -- a null result is evidence, hiding it
@@ -2764,13 +2766,14 @@ def vis_spread_vs_predictors(target, predictors, save_path=None, storms=None,
                 xx = np.linspace(x.min(), x.max(), 50)
                 ax.plot(xx, b0 + b1 * xx, lw=2.6, zorder=2,
                         color='#D9D9D9' if dim else '#B64342')
-                ax.text(0.035, 0.975, 'r {:+.2f}'.format(rr) + chr(10)
-                        + '$R^2$ {:.2f}'.format(rr ** 2),
-                        transform=ax.transAxes, ha='left', va='top',
-                        fontsize=27, linespacing=1.3, zorder=6,
-                        color='#A8A8A8' if dim else '#1A1A1A',
-                        bbox=dict(boxstyle='round,pad=0.22', fc='white',
-                                  ec='none', alpha=0.78))
+                if show_statistics:
+                    ax.text(0.035, 0.975, 'r {:+.2f}'.format(rr) + chr(10)
+                            + '$R^2$ {:.2f}'.format(rr ** 2),
+                            transform=ax.transAxes, ha='left', va='top',
+                            fontsize=27, linespacing=1.3, zorder=6,
+                            color='#A8A8A8' if dim else '#1A1A1A',
+                            bbox=dict(boxstyle='round,pad=0.22', fc='white',
+                                      ec='none', alpha=0.78))
             ax.set_title(title, color='#1A1A1A', fontsize=title_fontsize)
             if cl:
                 for lab in ax.get_yticklabels():

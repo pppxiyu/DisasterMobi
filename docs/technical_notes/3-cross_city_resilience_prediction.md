@@ -1,5 +1,48 @@
 # Technical Note · Cross-City Resilience Prediction
 
+## Current spread model (adopted 2026-09-14)
+
+`SPREAD_MODEL = 'purpose_function_variance'` in `run_pattern_nmf.py` selects the
+seven-input dispersion model. Set it to `'legacy_pca'` to restore the preceding
+22-input, two-principal-component model. Earlier development records below are
+historical where they describe the old spread features or PCA.
+
+Each component retains six functional attributes, defined as the origin and
+destination shares of the same category added together. Their fifteen pairwise
+products enter a separate ridge regression of within-city mean-centred cumulative
+loss. Predictors are also city-centred, then scaled on the training cities with
+equal total weight per city. An internal leave-one-city-out check selects the
+ridge penalty from thirteen logarithmically spaced values between 0.001 and 1000.
+The signed coefficients are returned to the original predictor units. A city's
+purpose indicator is the population standard deviation of its component scores.
+The city is excluded from the regression that creates its indicator, including
+for training rows and every inner-validation split.
+
+The city model receives this unlogged purpose indicator and six natural-log
+population variances of the functional attributes. The variances use equally
+weighted components and add 1e-12 before taking logs. There is no income input
+and no PCA in this branch. Training-city standardization, the 15-day backbone
+spread ratio, Gaussian-kernel density objective, bandwidth and penalty grids,
+and the downstream rank, quantile assignment, city-total alignment and curve
+shrinkage remain unchanged. Numerical optimization retains the zero start and
+Nelder–Mead rule, with the larger convergence budget validated in the sandbox.
+A failed fit raises an error instead of silently publishing an incomplete fit.
+
+The sandbox's thirteen-city-event leave-one-out mean W1 is 1.222106
+day-equivalents. Integration checks compare every city's selected parameters,
+seven feature values, correction coefficients and resulting scale against that
+reference, and verify the legacy switch separately. The existing whole-window
+decomposition and landfall-anchor time conventions are not changed by this
+feature experiment. W1 evaluates the centred distribution, not rank accuracy or
+city-total accuracy.
+
+Implementation is in `utils/pattern_analysis/spread_prediction.py`. The shared
+`spread_scale` entry point serves both the distribution evaluation and curve
+prediction. `centered_distribution/raw/spread_model_folds.json` records fold
+features, coefficients and selected parameters, and `spread_city_features.csv`
+contains the seven outer-held-out city inputs. The current feature diagnostic
+replaces the old PCA and income/correlation predictor diagnostics.
+
 ## Overview
 
 Everything under `outputs/nmf/cross_city_resi_pred/` answers one question. Can the disaster resilience of a city-event the model

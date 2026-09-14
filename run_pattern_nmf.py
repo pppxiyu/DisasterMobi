@@ -3072,6 +3072,12 @@ MLB2_K = 2
 MLB2_H_GRID = (0.25, 0.40)
 MLB2_LAM_GRID = (0.0, 1.0, 10.0, 100.0)
 
+# Adopted seven-input model; legacy_pca restores the previous 22-input/PCA path.
+SPREAD_MODEL = 'purpose_function_variance'
+_SPREAD_MODEL_CACHE = {}
+_SPREAD_RESULT_CACHE = {}
+_SPREAD_FOLD_AUDIT = {}
+
 
 def _backbone_spread(r0_vec, days, mu_a):
     """Within-city sd of the BACKBONE-implied losses Σ_d (1 − logistic(d; r0_j,
@@ -3245,7 +3251,7 @@ def spread_scale(held, rest, merged, mu_a):
 
     `base` is B2, the zero-parameter backbone ratio -- the held unit's backbone
     spread over the training units' mean, both on SPREAD_BACKBONE_DAYS.  `mult`
-    is the fitted ML-B2inc increment exp(gamma'PC), which is 1.0 wherever the
+    is the fitted multiplicative correction, which is 1.0 wherever the
     ingredients are missing, so base alone is always a valid answer.  The scale
     the caller applies is base * mult.
 
@@ -3261,10 +3267,37 @@ def spread_scale(held, rest, merged, mu_a):
                if c in sbb and np.isfinite(sbb[c]) and sbb[c] > 0]
     base = (sbb[held] / float(np.mean(s_train))
             if s_train and np.isfinite(sbb.get(held, np.nan)) else 1.0)
-    vec = {c: _mlb2_feature_vec(merged[c]) for c in codes if c in merged}
-    vec = {c: v for c, v in vec.items() if v is not None}
-    mult = _mlb2_spread_multiplier(held, rest, cen, sbb, vec,
-                                   CENTERED_QUANTILE_GRID)
+    if SPREAD_MODEL == 'purpose_function_variance':
+        from utils.pattern_analysis.spread_prediction import PurposeSpreadModel
+        import hashlib
+        # Key by actual inputs, not frame identities: STEP 6 and STEP 7 rebuild
+        # equivalent frames, and must reuse exactly the same learned scale.
+        digest = hashlib.sha256()
+        for c in sorted(codes):
+            if c not in merged:
+                continue
+            digest.update(c.encode())
+            cols = ([f'share_from_{k}' for k in MLB2_FUNCS]
+                    + [f'share_to_{k}' for k in MLB2_FUNCS] + ['cum_loss'])
+            digest.update(merged[c][cols].to_numpy(dtype=float).tobytes())
+        data_key = digest.hexdigest()
+        if data_key not in _SPREAD_MODEL_CACHE:
+            _SPREAD_MODEL_CACHE[data_key] = PurposeSpreadModel({c: merged[c] for c in codes if c in merged})
+        model = _SPREAD_MODEL_CACHE[data_key]
+        key = (data_key, held, tuple(rest), tuple(sbb.get(c, np.nan) for c in codes),
+               tuple(MLB2_H_GRID), tuple(MLB2_LAM_GRID), CENTERED_QUANTILE_GRID.tobytes())
+        if key not in _SPREAD_RESULT_CACHE:
+            _SPREAD_RESULT_CACHE[key] = model.multiplier(
+                held, rest, sbb, CENTERED_QUANTILE_GRID, MLB2_H_GRID, MLB2_LAM_GRID)
+        mult, info = _SPREAD_RESULT_CACHE[key]
+        _SPREAD_FOLD_AUDIT[held] = dict(info, base=float(base), scale=float(base * mult))
+    elif SPREAD_MODEL == 'legacy_pca':
+        vec = {c: _mlb2_feature_vec(merged[c]) for c in codes if c in merged}
+        vec = {c: v for c, v in vec.items() if v is not None}
+        mult = _mlb2_spread_multiplier(held, rest, cen, sbb, vec,
+                                      CENTERED_QUANTILE_GRID)
+    else:
+        raise ValueError(f'Unknown SPREAD_MODEL: {SPREAD_MODEL}')
     return float(base), float(mult)
 
 
@@ -3325,8 +3358,6 @@ def analysis_centered_spectrum(feats_test, codes):
         print("  [centered_spectrum] fewer than 3 usable units; skipping.")
         return
     pg = CENTERED_QUANTILE_GRID
-    vec_by = {c: _mlb2_feature_vec(feats_test[c]) for c in usable}
-    vec_by = {c: v for c, v in vec_by.items() if v is not None}
     rows, pred = [], {}
     for held in usable:
         rest = [c for c in usable if c != held]
@@ -3350,6 +3381,17 @@ def analysis_centered_spectrum(feats_test, codes):
     raw_dir = os.path.join(OUTPUT_CENTERED_DIST, 'raw')
     os.makedirs(raw_dir, exist_ok=True)
     M.to_csv(os.path.join(raw_dir, 'centered_spectrum_metrics.csv'))
+    if SPREAD_MODEL == 'purpose_function_variance':
+        import json
+        with open(os.path.join(raw_dir, 'spread_model_folds.json'), 'w', encoding='utf-8') as stream:
+            json.dump(list(_SPREAD_FOLD_AUDIT.values()), stream, indent=2)
+        feature_rows = []
+        for c in usable:
+            info = _SPREAD_FOLD_AUDIT[c]
+            for row in info.get('feature_rows', []):
+                if row['is_held']:
+                    feature_rows.append(dict(code=c, **dict(zip(info['feature_names'], row['values']))))
+        pd.DataFrame(feature_rows).to_csv(os.path.join(raw_dir, 'spread_city_features.csv'), index=False)
     # Schematic twin of the LOO grid: ONE unlabelled panel showing what W1
     # measures.  The fold shown is the MEDIAN-W1 one, chosen by rule rather
     # than by eye so the illustration is not a flattering pick.
@@ -3408,8 +3450,9 @@ def analysis_centered_spectrum(feats_test, codes):
         for i in range(3):
             sdvar.setdefault(f'SD of {MLB2_FUNCS[i]} share', {})[c] = (
                 sd_of(F[:, i]))
-        sdvar.setdefault('SD of median income', {})[c] = (
-            sd_of(f['median_income_combined'].to_numpy(dtype=float)[ok]))
+        if SPREAD_MODEL == 'legacy_pca':
+            sdvar.setdefault('SD of median income', {})[c] = (
+                sd_of(f['median_income_combined'].to_numpy(dtype=float)[ok]))
         for i in range(3, 6):
             sdvar.setdefault(f'SD of {MLB2_FUNCS[i]} share', {})[c] = (
                 sd_of(F[:, i]))
@@ -3419,22 +3462,38 @@ def analysis_centered_spectrum(feats_test, codes):
             fcorr.setdefault(key, {})[c] = (
                 float(np.corrcoef(u, v)[0, 1])
                 if u.std() > 1e-12 and v.std() > 1e-12 else np.nan)
+    if SPREAD_MODEL == 'purpose_function_variance':
+        # Show the actual seven city inputs; purpose values are outer-held-out.
+        sdvar = {f'{k.capitalize()} share\nlog variance': {} for k in MLB2_FUNCS}
+        sdvar['Purpose score\nstandard deviation'] = {}
+        for c in usable:
+            info = _SPREAD_FOLD_AUDIT[c]
+            for row in info.get('feature_rows', []):
+                if row['is_held']:
+                    for label, value in zip(sdvar, row['values']):
+                        sdvar[label][c] = value
     vis_spread_vs_predictors(
         tgt, sdvar, storms=storm_col, ncol=4, gap_after=0,
+        title_fontsize=28 if SPREAD_MODEL == 'purpose_function_variance' else None,
+        dim_r2=-1 if SPREAD_MODEL == 'purpose_function_variance' else 0.15,
+        show_statistics=SPREAD_MODEL == 'legacy_pca',
         xlabel='candidate predictor',
         save_path=os.path.join(OUTPUT_CENTERED_DIST,
-                               'spread_vs_predictors_sd.png'))
-    vis_spread_vs_predictors(
-        tgt, fcorr, storms=storm_col, ncol=5,
-        xlabel='within-city correlation between the paired functional shares',
-        save_path=os.path.join(OUTPUT_CENTERED_DIST,
-                               'spread_vs_predictors_func_corr.png'))
+                               ('spread_vs_predictors_features.png' if SPREAD_MODEL == 'purpose_function_variance'
+                                else 'spread_vs_predictors_sd.png')))
+    if SPREAD_MODEL == 'legacy_pca':
+        vis_spread_vs_predictors(
+            tgt, fcorr, storms=storm_col, ncol=5,
+            xlabel='within-city correlation between the paired functional shares',
+            save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                                   'spread_vs_predictors_func_corr.png'))
 
     # The PCA step itself: which raw features the two components are built
     # from, and where each unit lands in the plane gamma operates on.
-    pca_block = {c: _mlb2_feature_vec(feats_test[c]) for c in usable}
+    pca_block = ({c: _mlb2_feature_vec(feats_test[c]) for c in usable}
+                 if SPREAD_MODEL == 'legacy_pca' else {})
     pca_block = {c: v for c, v in pca_block.items() if v is not None}
-    if len(pca_block) >= 4:
+    if SPREAD_MODEL == 'legacy_pca' and len(pca_block) >= 4:
         fnames = ([f'corr {a} - {b}'
                    for a, b in itertools.combinations(MLB2_FUNCS, 2)]
                   + [f'log var {k}' for k in MLB2_FUNCS]
