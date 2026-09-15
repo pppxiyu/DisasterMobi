@@ -220,8 +220,10 @@ Run
     python run_pattern_nmf.py
 """
 import itertools
+import json
 import os
 import re
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -229,6 +231,7 @@ from scipy.optimize import brentq, least_squares, minimize
 from scipy.stats import rankdata, spearmanr
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import r2_score
+from sklearn.isotonic import isotonic_regression
 
 from config import (
     AGG_LEVEL, DATA_DIR, OUTPUT_DIR, SLOT_PER_DAY, SLOTS_ACTIVE,
@@ -3078,6 +3081,16 @@ _SPREAD_MODEL_CACHE = {}
 _SPREAD_RESULT_CACHE = {}
 _SPREAD_FOLD_AUDIT = {}
 
+# The distribution decoder used after the rank, city-total and spread branches.
+# ``none`` restores the original empirical Wasserstein barycentre exactly.
+# ``backbone_two_projections`` adds the two fold-local shape corrections that
+# reached component cum_loss MAE 2.4930 in the 13-unit leave-one-out evaluation
+# (2026-09-15).  It learns only from the distribution of the observable
+# r0-implied backbone losses, so it does not create a new target-side feature.
+DISTRIBUTION_SHAPE_MODEL = 'backbone_two_projections'
+_DISTRIBUTION_SHAPE_PENALTIES = np.array([0.1, 1.0, 10.0, 100.0, 1000.0, np.inf])
+_DISTRIBUTION_SHAPE_AUDIT = {}
+
 
 def _backbone_spread(r0_vec, days, mu_a):
     """Within-city sd of the BACKBONE-implied losses Σ_d (1 − logistic(d; r0_j,
@@ -3243,6 +3256,204 @@ def centred_spectra(merged, codes):
         if len(v) >= 2:
             out[c] = v - v.mean()
     return out
+
+
+def _distribution_shape_grid(merged, codes):
+    """Probability intervals shared by the components counts in this fold.
+
+    These are label-free: a unit contributes only its retained component count.
+    On them, each unit's empirical distribution is a step quantile function.
+    """
+    nodes = {Fraction(j, len(merged[c]))
+             for c in codes if c in merged and len(merged[c]) >= 2
+             for j in range(len(merged[c]) + 1)}
+    if len(nodes) < 2:
+        return None, None, None
+    edges = np.array([float(x) for x in sorted(nodes)], dtype=float)
+    return edges, np.diff(edges), (edges[:-1] + edges[1:]) / 2.0
+
+
+def _backbone_two_projection_shape(held, rest, merged, rank_score, mu_a):
+    """Predict the first two standardized loss-shape amplitudes.
+
+    This is the 2.4930 distribution layer.  It retains the production rank
+    order, predicted spread and city-total anchor, and changes only the
+    standardized quantile *shape*.  Each amplitude has its own nested-LOO
+    Ridge penalty.  Its two inputs are projections of the held unit's
+    landfall-observable, r0-implied backbone loss distribution onto the two
+    fold-local outcome shape modes.
+
+    Returns component-aligned standardized quantiles and an audit dictionary;
+    returns ``None`` when a fold cannot form the required label-free inputs.
+    """
+    if DISTRIBUTION_SHAPE_MODEL == 'none':
+        return None, {'model': 'none'}
+    if DISTRIBUTION_SHAPE_MODEL != 'backbone_two_projections':
+        raise ValueError(f'Unknown DISTRIBUTION_SHAPE_MODEL: '
+                         f'{DISTRIBUTION_SHAPE_MODEL}')
+    if rank_score is None or held not in merged:
+        return None, {'model': DISTRIBUTION_SHAPE_MODEL, 'reason': 'no_rank'}
+    train = tuple(c for c in rest if c in merged and len(merged[c]) >= 2)
+    if len(train) < 4 or held in train:
+        return None, {'model': DISTRIBUTION_SHAPE_MODEL, 'reason': 'too_few_train'}
+    all_codes = tuple(dict.fromkeys((*train, held)))
+    edges, weights, probability = _distribution_shape_grid(merged, all_codes)
+    if edges is None:
+        return None, {'model': DISTRIBUTION_SHAPE_MODEL, 'reason': 'no_grid'}
+
+    def quantile(code, values=None):
+        v = (merged[code]['cum_loss'].dropna().to_numpy(dtype=float)
+             if values is None else np.asarray(values, dtype=float))
+        if len(v) < 2 or not np.isfinite(v).all():
+            raise ValueError(f'Invalid component distribution: {code}')
+        return np.sort(v)[np.floor(probability * len(v)).astype(int)]
+
+    def standardized_quantile(code):
+        v = merged[code]['cum_loss'].dropna().to_numpy(dtype=float)
+        sd = float(np.std(v))
+        if not np.isfinite(sd) or sd < 1e-12:
+            raise ValueError(f'Degenerate component loss distribution: {code}')
+        return (quantile(code) - float(np.mean(v))) / sd
+
+    def reference_shape(train_codes):
+        centered = []
+        for code in train_codes:
+            v = merged[code]['cum_loss'].dropna().to_numpy(dtype=float)
+            centered.append(quantile(code) - float(np.mean(v)))
+        bary = np.mean(centered, axis=0)
+        sd = float(np.sqrt(np.sum(weights * bary ** 2)))
+        if not np.isfinite(sd) or sd < 1e-12:
+            raise ValueError('Degenerate empirical reference shape')
+        return bary / sd, sd
+
+    def basis(train_codes):
+        matrix = np.array([standardized_quantile(code) for code in train_codes])
+        mean = matrix.mean(axis=0)
+        _, singular, vt = np.linalg.svd(
+            (matrix - mean) * np.sqrt(weights), full_matrices=False)
+        modes = vt[:2] / np.sqrt(weights)
+        # The sign is arbitrary in an SVD; fixing it makes the learned
+        # amplitude auditable and deterministic across folds.
+        for j in range(len(modes)):
+            if modes[j, np.argmax(np.abs(modes[j]))] < 0:
+                modes[j] *= -1.0
+        if len(singular) < 2 or not np.isfinite(modes).all():
+            raise ValueError('Insufficient finite shape modes')
+        return mean, modes
+
+    def mode_target(train_codes, code):
+        _, modes = basis(train_codes)
+        return (standardized_quantile(code) - reference_shape(train_codes)[0]) @ (
+            weights[:, None] * modes.T)
+
+    def backbone_feature(train_codes, code):
+        # For every training example, its own recovery-rate estimate is left
+        # out.  The held unit uses all outer-training units, exactly as a
+        # deployable forecast would.
+        eligible = tuple(c for c in train_codes if c != code)
+        if len(eligible) < 2:
+            raise ValueError('Too few units for a backbone-rate estimate')
+        alpha = pooled_backbone_alpha(merged, eligible)
+        r0 = merged[code]['r0'].to_numpy(dtype=float)
+        r0 = r0[np.isfinite(r0) & (r0 > 1e-6)]
+        if len(r0) < 2 or not np.isfinite(alpha):
+            raise ValueError(f'Invalid backbone inputs: {code}')
+        implied = np.sum(1.0 - 1.0 / (1.0 + (1.0 / r0[:, None] - 1.0)
+                                      * np.exp(-alpha * SPREAD_BACKBONE_DAYS)),
+                         axis=1)
+        sd = float(np.std(implied))
+        if sd < 1e-12 or not np.isfinite(sd):
+            raise ValueError(f'Degenerate backbone distribution: {code}')
+        standardized = (implied - float(np.mean(implied))) / sd
+        # A component can lack a usable r0 anchor.  Its input distribution then
+        # has a different atom count, so evaluate the same step quantile on the
+        # union grid before projecting it onto the outcome basis.
+        feature_edges = np.unique(np.r_[edges,
+                                        np.arange(len(standardized) + 1)
+                                        / len(standardized)])
+        feature_probability = (feature_edges[:-1] + feature_edges[1:]) / 2.0
+        feature_weights = np.diff(feature_edges)
+        mode_ids = np.searchsorted(edges, feature_probability, side='right') - 1
+        feature_q = np.sort(standardized)[
+            np.floor(feature_probability * len(standardized)).astype(int)]
+        mean, modes = basis(train_codes)
+        return (feature_q - mean[mode_ids]) @ (
+            feature_weights[:, None] * modes[:, mode_ids].T)
+
+    def grid(train_codes, code):
+        x_raw = np.array([backbone_feature(train_codes, c) for c in train_codes])
+        x_held = backbone_feature(train_codes, code)
+        x_mean, x_sd = x_raw.mean(axis=0), x_raw.std(axis=0)
+        x_sd[x_sd < 1e-12] = 1.0
+        x = (x_raw - x_mean) / x_sd
+        xh = (x_held - x_mean) / x_sd
+        y = np.array([mode_target(train_codes, c) for c in train_codes])
+        y_mean = y.mean(axis=0)
+        predictions, coefficients = [], []
+        for penalty in _DISTRIBUTION_SHAPE_PENALTIES:
+            if np.isinf(penalty):
+                beta, prediction = np.zeros((2, 2)), np.zeros(2)
+            else:
+                beta = np.linalg.solve(x.T @ x + penalty * np.eye(2),
+                                       x.T @ (y - y_mean))
+                prediction = y_mean + xh @ beta
+            predictions.append(prediction)
+            coefficients.append(beta)
+        return np.asarray(predictions), np.asarray(coefficients), {
+            'feature_mean': x_mean.tolist(),
+            'feature_standard_deviation': x_sd.tolist(),
+            'target_mean': y_mean.tolist(),
+        }
+
+    def tune(train_codes):
+        errors = []
+        for validation in train_codes:
+            subtrain = tuple(c for c in train_codes if c != validation)
+            prediction, _, _ = grid(subtrain, validation)
+            errors.append((prediction - mode_target(subtrain, validation)) ** 2)
+        mse = np.mean(errors, axis=0)
+        return np.argmin(mse, axis=0), mse
+
+    try:
+        predictions, coefficients, scaling = grid(train, held)
+        chosen, inner_mse = tune(train)
+        amplitudes = np.array([predictions[chosen[j], j] for j in range(2)])
+        q0, reference_standard_deviation = reference_shape(train)
+        _, modes = basis(train)
+        raw = q0 + amplitudes @ modes
+        projected = isotonic_regression(raw, sample_weight=weights, increasing=True)
+        center = float(projected @ weights)
+        sd = float(np.sqrt((projected - center) ** 2 @ weights))
+        if not np.isfinite(sd) or sd < 1e-12:
+            raise ValueError('Degenerate corrected shape')
+        shape = (projected - center) / sd
+        score = rank_score.to_numpy(dtype=float)
+        if len(score) != len(merged[held]):
+            raise ValueError('Rank score is not component aligned')
+        rank_position = (rankdata(score, method='ordinal') - 0.5) / len(score)
+        ids = np.searchsorted(edges, rank_position, side='left') - 1
+        ids = np.clip(ids, 0, len(shape) - 1)
+        # ``shape`` has unit standard deviation.  The quantile mapper applies
+        # the existing dimensionless spread ratio, so restore the empirical
+        # reference standard deviation here; together they equal the 2.4930
+        # model's predicted sigma.
+        return reference_standard_deviation * shape[ids], {
+            'model': DISTRIBUTION_SHAPE_MODEL,
+            'amplitudes': amplitudes.tolist(),
+            'penalties': [None if np.isinf(_DISTRIBUTION_SHAPE_PENALTIES[chosen[j]])
+                           else float(_DISTRIBUTION_SHAPE_PENALTIES[chosen[j]])
+                           for j in range(2)],
+            'inner_mode_mse': inner_mse.tolist(),
+            'coefficients': [coefficients[chosen[j], :, j].tolist()
+                             for j in range(2)],
+            'shape_normalization_mean': center,
+            'shape_normalization_standard_deviation': sd,
+            'reference_standard_deviation': reference_standard_deviation,
+            **scaling,
+        }
+    except (ValueError, np.linalg.LinAlgError) as error:
+        return None, {'model': DISTRIBUTION_SHAPE_MODEL,
+                      'reason': str(error)}
 
 
 def spread_scale(held, rest, merged, mu_a):
@@ -4469,7 +4680,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             outer, [_r0_city(held), _msa_gdp_table()[held]], s_in, x_in, g_in)
 
     def _quantile_mapped_chat(chat_raw, score, obs, wn, rest, mu_a, c_city,
-                              scale_value=1.0):
+                              scale_value=1.0, shape_positions=None):
         """Component cum_loss predictions assembled by QUANTILE MAPPING, the
         comonotone assignment, i.e. the optimal-transport map on the line.
         Four ingredients, each contributing what it transfers best:
@@ -4551,11 +4762,20 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                 # caller); this function only APPLIES it.
                 scale = float(scale_value)
                 idx = np.where(ok)[0][np.argsort(sc[ok], kind='stable')]
-                pos = (np.arange(len(idx)) + 0.5) / len(idx)
-                # Wasserstein barycentre: average the training units' QUANTILE
-                # FUNCTIONS at the plotting positions, not their samples.
-                out[idx] = scale * np.mean(
-                    [np.quantile(v, pos) for v in spectra], axis=0)
+                if (shape_positions is not None and len(shape_positions) == len(out)
+                        and ok.all()):
+                    # The 2.4930 layer supplies a fold-local monotone shape,
+                    # restored to the empirical reference width at each rank
+                    # position.  Rank, scale and city-total location remain
+                    # the production ingredients.
+                    out = scale * np.asarray(shape_positions, dtype=float)
+                else:
+                    pos = (np.arange(len(idx)) + 0.5) / len(idx)
+                    # Wasserstein barycentre: average the training units'
+                    # QUANTILE FUNCTIONS at the plotting positions, not their
+                    # samples.
+                    out[idx] = scale * np.mean(
+                        [np.quantile(v, pos) for v in spectra], axis=0)
                 if np.isfinite(out).all():
                     loc = (float(c_city) if np.isfinite(c_city)
                            else float(wn @ chat_raw.to_numpy(dtype=float)))
@@ -4781,9 +5001,12 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         _sp_merged = {**train_merged, held: test_merged[held]}
         _sp_mu_a = pooled_backbone_alpha(train_merged, rest)
         _sp_base, _sp_mult = spread_scale(held, rest, _sp_merged, _sp_mu_a)
+        shape_positions, shape_audit = _backbone_two_projection_shape(
+            held, rest, _sp_merged, rank_score, _sp_mu_a)
+        _DISTRIBUTION_SHAPE_AUDIT[held] = shape_audit
         cum_hat, spread_scale_applied = _quantile_mapped_chat(
             cum_hat_raw, rank_score, obs, wn, rest, mu_a, city_total_hat,
-            scale_value=_sp_base * _sp_mult)
+            scale_value=_sp_base * _sp_mult, shape_positions=shape_positions)
         if CURVE_PRED_SOLVER == 'joint_alphaL':
             line_a0, line_b = _alphaL_training_line(rest)
             pred_curves, L_solved, alpha_solved = _joint_alphaL_curves(
@@ -4895,6 +5118,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                    'rank_score': (float(rank_score.iloc[j])
                                   if rank_score is not None else np.nan),
                    'spread_scale': spread_scale_applied,
+                   'distribution_shape_model': shape_audit.get('model'),
+                   'shape_mode_1_amplitude': shape_audit.get('amplitudes',
+                                                               [np.nan, np.nan])[0],
+                   'shape_mode_2_amplitude': shape_audit.get('amplitudes',
+                                                               [np.nan, np.nan])[1],
                    'city_total_pred': city_total_hat,
                    'level_solved': float(L_solved[j]),
                    'alpha_train_mean': mu_a,
@@ -5027,6 +5255,9 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     par_df = pd.DataFrame(par_rows)
     par_df.to_csv(os.path.join(raw_dir, 'component_params_gt_vs_pred.csv'),
                   index=False)
+    with open(os.path.join(raw_dir, 'distribution_shape_folds.json'),
+              'w', encoding='utf-8') as stream:
+        json.dump(list(_DISTRIBUTION_SHAPE_AUDIT.values()), stream, indent=2)
     # The three publication figures behind the forecast's mechanism, drawn from
     # that same table: the rank channel on its own, what the quantile mapping
     # makes of it, and the rate/level relation the plateau inversion exploits.
