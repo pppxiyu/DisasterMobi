@@ -37,5 +37,6 @@ TASK.md
 .claude/
 .vscode/
 .idea/
+handover_package/
 .DS_Store
 Thumbs.db
