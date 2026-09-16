@@ -739,30 +739,36 @@ weight_normal-weighted mean of its finite fitted component rates, from the regis
 (run_pattern_nmf.py:1636-1643). The line silently drops out of a unit's figure and metrics when fewer than two training cities
 have a finite city rate, or when the held-out city's day-0 anchor is invalid (run_pattern_nmf.py:1653-1656).
 
-Component curves become the city curve through the weight_normal shares, the exact reconstruction weights of the total relative
-curve (§1; run_pattern_nmf.py:1939-1947), and the day-type baseline scales the result to absolute volume where the raw per-day
-curves and the magnitude figure are written (run_pattern_nmf.py:1996-2002, 2033-2040). Scoring happens at component and city
-level, with MAE, NRMSE (the RMSE divided by the standard deviation of the observed truth at that level) and, at city level only,
-R², plus the curve-derived cum_loss so the curve and scalar analyses stay comparable (run_pattern_nmf.py:1949-1979). Written out
-are a magnitude figure and a component-grid figure per unit (run_pattern_nmf.py:2027-2040), an accuracy bar chart carrying, for
-each city-event, the city-curve MAE of every method line side by side, so the methods are compared on the very quantity the
-forecast optimises rather than on any single fitted parameter (run_pattern_nmf.py:2061-2073), the metrics CSV, and three raw CSVs
-holding the per-day city curves, the per-component parameter table (with the consumed ĉ, the raw-channel ĉ, the rank score, the
-applied spread scale and the solved L), and the plotted MAE table itself (run_pattern_nmf.py:2050-2066).
+**Updated 2026-09-15 — dynamic city reconstruction and fair direct-city comparisons.** Component curves are no longer
+averaged by fixed `weight_normal` shares. For component `i` on day `d`, let `r_i(d)` be its predicted relative curve,
+`b_i(d)` its normal-period day-type baseline, and `h_i` the sum of its H loadings. With `B(d)` the raw city's matching total
+baseline, the city relative prediction is
 
-An earlier version of this step drew a city-level α bar chart instead, comparing the fitted city rate against the city-wise
-prediction and the train mean. It was removed in favour of the MAE chart because the component path predicts cum_loss rather
-than a rate, so it could contribute no bar and the figure silently compared only the two lines that are not production. Nothing
-else depended on it, and the fitted rates it displayed remain in the per-component raw table.
+    r_city(d) = [Σ_i r_i(d) b_i(d) h_i] / B(d).
 
-Every curve MAE in §8, §9 and §10 is a city-curve MAE of the RELATIVE daily curve, in fractions of the normal baseline, so 0.0727
-means the predicted curve is off by about 7.27 percent of normal daily activity on an average day; these are not the
-day-equivalent cum_loss MAEs of §6, and each headline number is the five-unit mean of the per-unit values in
-curve_pred_metrics.csv. In current production 'pred' scores MAE 0.0727 against 0.0893 for the train-mean line, 0.1385 for the
-city-wise line and 0.0785 for the oracle, while city-curve R² is 0.552 for 'pred' against 0.166 for the train-mean line, −0.219
-for the city-wise line and 0.738 for the oracle. Per unit, 'pred' scores 0.0790 on BR_Ida, 0.0499 on FM_Ian, 0.0772 on LC_Laura,
-0.0541 on WM_Dorian and 0.1034 on WM_Isaias. That 'pred' undercuts the oracle's MAE is not a typo, and the §10 caveat on the
-oracle explains it.
+Thus every component-based method first becomes a predicted daily component flow, those flows are summed, and only then is the
+sum normalized. It uses pre-event component baselines and H only, so it does not read the held-out recovery curve. The earlier
+fixed-share expression is only exact under a common baseline and otherwise misses changing weekday/weekend component composition.
+
+The main `city_magnitude_curve_all.png` now compares three component-based lines (proposed method, direct component ridge and
+component train mean) with three methods that never use the decomposition: (i) the equal-weight mean of the other training-city
+curves; (ii) a nested-leave-one-out Ridge regression from raw-city features to the four surge-plus-relaxation parameters; and
+(iii) a nested-leave-one-out Gaussian-kernel nearest-neighbour mixture of the other raw-city curves. The direct-city feature
+table contains the observed city landfall-day state, pre-landfall loss, inverse track distance, GDP, mean trip distance, mean
+income, hurricane intensity, evacuation strength, six city functional shares and their 15 pairwise products. Hyperparameter
+selection optimizes the synthesized city-curve MAPE entirely within each outer training fold. The output no longer includes the
+retired `bar_cross_city_curve_mae.png`; its only generating function and CSV were removed. The raw output retains per-day curves,
+the component parameter table, direct-city feature table, direct-city ground-truth parameters and the selected fold settings.
+
+Scoring happens at component and city level, with MAE, NRMSE (the RMSE divided by the standard deviation of the observed truth at
+that level) and, at city level only, R², plus the curve-derived cum_loss so the curve and scalar analyses stay comparable.
+
+Every curve MAE in §8, §9 and §10 is a city-curve MAE of the RELATIVE daily curve, in fractions of the normal baseline; these
+are not the day-equivalent cum_loss MAEs of §6. In the 13-city-event refresh dated 2026-09-15, the dynamically aggregated
+proposed method has mean MAE 0.0874 and mean MAPE 12.40%. The component ridge and component train-mean references have MAPE
+14.15% and 15.34%, respectively. The no-decomposition direct-city Ridge, equal training-curve mean and feature-kernel mixture
+have MAPE 18.17%, 20.57% and 20.60%, respectively. These values are calculated directly from
+`raw_data/city_curves_by_method.csv`; `curve_pred_metrics.csv` retains MAE, NRMSE and R² by city-event and method.
 
 #### 3 · Interpretation · how loosely should the city-wise comparison be read?
 

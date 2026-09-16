@@ -199,7 +199,7 @@ order; the prefixes are part of the paths below and of the OUTPUT_* constants.
                         SECOND ROW = the same layouts greyed out as a base
                         map with every city-event's own layout drawn on top,
                         colour = the function)
-    3-cross_city_curve_pred/     the STEP-7 outputs: bar_cross_city_curve_mae.png
+    3-cross_city_curve_pred/     the STEP-7 outputs: city_magnitude_curve_all.png
         plus the mechanism figures (rank_to_cumloss_qm,
         rank_to_cumloss_scatter),
         (the city-level whole-curve error of each forecast line, per city-event),
@@ -229,7 +229,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, least_squares, minimize
 from scipy.stats import rankdata, spearmanr
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import Ridge, RidgeCV
 from sklearn.metrics import r2_score
 from sklearn.isotonic import isotonic_regression
 
@@ -257,7 +257,7 @@ from utils.pattern_analysis.visualization import (
     vis_bar_component_distance, vis_bar_component_income,
     vis_heatmap_pair_transfer, vis_scatter_intensity_resilience,
     vis_exposure_vs_cumloss,
-    vis_bar_cross_city_resi_pred, vis_scatter_city_pred, vis_bar_curve_mae,
+    vis_bar_cross_city_resi_pred, vis_scatter_city_pred,
     vis_curves_city_pred, vis_city_curves_grid,
     vis_component_curves_grid, vis_od_flow_slider_html, vis_recovery_by_trip_purpose,
     vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_qm_pred_vs_obs, vis_func_vs_time_distribution,
@@ -1270,6 +1270,14 @@ OD_MAP_TOP_ARCS = 600
 #     SL_Ida, 0.543 vs 0.086) — chosen for consistency with the city channel.
 CURVE_PRED_CITY_MODEL = 'ridge'
 # (the rank channel's predictor is RANK_MODEL; see the block above)
+
+# Direct-city whole-curve references: all parameters of the same four-parameter
+# surge-plus-relaxation family are predicted from city features.  The choices
+# are selected inside each outer LOO fold by an inner city-curve MAPE, so these
+# grids do not borrow the held-out city's recovery path.
+DIRECT_CITY_RIDGE_ALPHAS = np.logspace(-3, 4, 17)
+DIRECT_CITY_KERNEL_BANDWIDTHS = (0.35, 0.50, 0.75, 1.0,
+                                 1.5, 2.0, 3.0, 5.0)
 
 # Training scope for the RANK channel (STEP-7 curve prediction and the
 # component_rank headline): 'pooled' trains every fold on all 12 reference
@@ -4317,8 +4325,8 @@ def analysis_cross_city_pairs(feats_train, feats_test, codes, method='spearman',
 # 81/81 coverage it contributes nothing, so naming the line after it was wrong.
 # 'city' DOES stay tagged kNN: that baseline really is a cosine-kNN over city
 # feature vectors predicting one city-level alpha.
-# Insertion order is the order the CITY figures use: the bar's columns and the
-# magnitude grid's lines/legend both walk _CITY_FIGURE_METHODS below.
+# Insertion order is retained for the legacy per-city magnitude overlays, whose
+# lines walk _CITY_FIGURE_METHODS below.
 _CURVE_METHOD_LABELS = {
     'pred':        'proposed pipeline',
     'city':        'city-wise prediction (kNN)',
@@ -4327,8 +4335,8 @@ _CURVE_METHOD_LABELS = {
     'train_mean':  'train-mean baseline',
 }
 
-# Which method lines appear in the CITY-LEVEL figures (the magnitude overlay and
-# the whole-curve MAE bar).  The oracle is deliberately absent: it reads each
+# Which method lines appear in the legacy city-level magnitude overlay. The
+# oracle is deliberately absent: it reads each
 # test component's own curve, so it is a descriptive ceiling rather than a
 # forecast, and putting it beside three genuine forecasts invites reading it as
 # a fourth.  It is NOT removed from the analysis — it still carries the
@@ -4337,7 +4345,8 @@ _CURVE_METHOD_LABELS = {
 _CITY_FIGURE_METHODS = tuple(m for m in _CURVE_METHOD_LABELS if m != 'oracle')
 
 
-def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_test):
+def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_test,
+                                    global_iwf):
     """Predict each held-out unit's ENTIRE disaster-window mobility curve, not just
     its cum_loss.  Leave-one-unit-out; the pearson/pooled_train frame throughout
     (absolute parameters are what the curve model needs).
@@ -4422,26 +4431,26 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
          Components with an unusable anchor (all-NaN curve, or a day-0 total
          stop r0 ≈ 0) emit r ≡ 1; their (near-)zero weight_normal makes the
          aggregation unaffected.
-      3. City curves: the component curves are aggregated with the weight_normal
-         shares (the exact reconstruction weights of the total curve), and the
-         day-type-matched baseline of the TOTAL activity matrix scales the
-         relative curves to absolute daily flow volume for the magnitude figure.
+      3. City curves: each component curve is first restored to daily flow
+         magnitude with its own day-type-matched component baseline and its
+         total H loading. These component magnitudes are summed and divided by
+         the raw total city's matching baseline; this dynamic aggregation
+         respects weekday/weekend component composition. The magnitude page
+         also shows three decomposition-free references: the training-curve
+         mean, a nested-LOO Ridge prediction of the four curve parameters, and
+         an RBF-nearest-neighbour mixture of training city curves.
 
     Outputs under cross_city_curve_pred/:
-      bar_cross_city_curve_mae.png    per city-event, the city-level whole-curve
-                                      MAE of the 4 FORECAST lines side by side,
-                                      comparing them on the quantity the forecast
-                                      optimises (lower is better; the oracle's own
-                                      MAE stays in curve_pred_metrics.csv)
-      city_magnitude_curve_<code>.png observed vs the FORECAST lines, absolute
-                                      volume (the oracle is a ceiling, not a
-                                      forecast, so it is not drawn here)
+      city_magnitude_curve_all.png    all city-events: three component-based
+                                      curves plus the three direct-city
+                                      references, in absolute flow volume
       component_curves_<code>.png     per-component grid: observed / oracle / pred
       curve_pred_metrics.csv          component- and city-level MAE/NRMSE/R² plus
                                       the curve-derived cum_loss, per method line
       raw_data/                       per-day city curves + the per-component
-                                      α/L/B table + the plotted MAE table
-                                      (everything above is recomputable)."""
+                                      α/L/B table + direct-city features,
+                                      ground-truth curve parameters and selected
+                                      nested-LOO hyperparameters."""
     # Three feature sets, one per channel (2026-08-04 re-wiring):
     #   feature_cols — the pooled/raw channel base (income stays: it is a LEVEL
     #     predictor there); _param_prediction and the city-wise reference curve
@@ -4491,6 +4500,9 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     # (α, L) for the oracle line, the observed TOTAL relative curve (the city
     # ground truth) and the total day-type baseline (relative -> absolute).
     curves_obs, city_gt_rel, city_base, oracle_par = {}, {}, {}, {}
+    city_direct_params, city_direct_features = {}, {}
+    city_direct_param_cols = ['recovery_alpha', 'recovery_level',
+                              'surge_strength', 'surge_rate']
     for c in codes:
         u = units[c]
         W, H = dec_test[c]
@@ -4508,6 +4520,59 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                                            SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
         city_base[c] = daily_baselines(total, u['n_nor'], u['first_day_nor'],
                                        SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
+        # The three direct-city baselines deliberately use no NMF object: all
+        # inputs are available from the raw OD matrix, static city covariates,
+        # and the observed landfall-day city state.  They provide the fair
+        # alternative to the component-wise methods below.
+        city_fit = recovery_curve_features(
+            total, u['n_nor'], u['first_day_nor'], SLOTS_ACTIVE,
+            n_dis=u['n_dis'], max_rate=ALPHA_MAX_RATE, min_fit_r2=-np.inf,
+            min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
+            surge_bounds=SURGE_BOUNDS, surge_rate_bounds=SURGE_RATE_BOUNDS)
+        city_direct_params[c] = city_fit.loc[city_fit.index[0],
+                                             city_direct_param_cols].to_numpy(dtype=float)
+        if not np.isfinite(city_direct_params[c]).all():
+            raise ValueError(f'{c}: direct city curve fit has non-finite parameters')
+
+        raw_csv = os.path.join(SPACE_FUNCTION_DIR,
+                               f"{u['key']}_block_group_sld_raw.csv")
+        poi = _city_poi_share(raw_csv, global_iwf)
+        income_csv = os.path.join(
+            ACS_DATA_DIR,
+            f"{u['key']}_block_group_acs_income_{ACS_INCOME_YEAR}_raw.csv")
+        income = float(load_city_income(income_csv)['median_household_income']
+                       .dropna().mean())
+        distances = np.asarray(build_distance_array(u['mapping'], u['gdf']),
+                               dtype=float)
+        normal_flow = u['X_all'][:, :u['n_nor']].sum(axis=1)
+        mean_distance = (float(np.average(distances, weights=normal_flow))
+                         if normal_flow.sum() > 0 else np.nan)
+        storm = c.split('_', 1)[1]
+        track = _load_track_cached(HURDAT2_BASIN_IDS[storm])
+        centroid = u['gdf'].to_crs(4326).geometry.union_all().centroid
+        exposure = city_exposure(track, centroid.y, centroid.x)
+        row = {
+            'r0': float(city_gt_rel[c].iloc[0]),
+            'pre_cumloss': float(pre_landfall_decline_loss(
+                total, u['n_nor'], u['n_dis'], u['first_day_nor'],
+                SLOTS_ACTIVE).iloc[0]),
+            'inverse_track_distance': 1.0 / max(float(exposure['dist_km']), 1.0),
+            'gdp': float(_msa_gdp_table()[c]),
+            'mean_distance': mean_distance,
+            'income': income,
+            'hurricane_intensity': float(u['cfg']['ss_intensity']),
+            'evacuation_strength': float(u['cfg']['evac_level']),
+        }
+        row.update({f'func_{cat}': float(poi[cat]) for cat in SF_CATEGORIES})
+        for i, left in enumerate(SF_CATEGORIES):
+            for right in SF_CATEGORIES[i + 1:]:
+                row[f'func_{left}_X_{right}'] = row[f'func_{left}'] * row[f'func_{right}']
+        city_direct_features[c] = row
+
+    city_direct_feature_df = pd.DataFrame.from_dict(city_direct_features,
+                                                     orient='index').loc[codes]
+    if not np.isfinite(city_direct_feature_df.to_numpy(dtype=float)).all():
+        raise ValueError('direct city-curve feature table contains non-finite values')
     # City-level cum_loss of the TOTAL activity curve, identical to the STEP-6
     # ground truth because both integrate the same smoothed total curve.  Only
     # TRAINING units' values are ever read, by the location channel's nested
@@ -4569,6 +4634,103 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         a_hat = float(sims @ atr / ssum) if ssum > 0 else float(atr.mean())
         curve = 1.0 / (1.0 + (1.0 / r0c - 1.0) * np.exp(-a_hat * days_f))
         return curve, a_hat
+
+    def _city_curve_mape(pred, observed):
+        """Mean absolute percentage error of two city relative curves."""
+        pred = np.asarray(pred, dtype=float)
+        observed = np.asarray(observed, dtype=float)
+        keep = (np.isfinite(pred) & np.isfinite(observed)
+                & (np.abs(observed) > 1e-8))
+        return (float(np.mean(np.abs(pred[keep] - observed[keep])
+                              / np.abs(observed[keep])) * 100.0)
+                if keep.any() else np.inf)
+
+    def _direct_city_curve(r0, params, days_f):
+        """One direct-city curve from the shared surge-plus-relaxation family.
+
+        Its parameters are clipped to the fitting bounds before synthesis. The
+        observed landfall-day city state r0 remains the anchor, so every direct
+        baseline receives the same allowed day-0 information as the component
+        forecast rather than learning an intercept through the curve fit.
+        """
+        alpha, level, surge, surge_rate = np.asarray(params, dtype=float)
+        alpha = float(np.clip(alpha, 0.0, ALPHA_MAX_RATE))
+        level = float(np.clip(level, *LEVEL_BOUNDS))
+        surge = float(np.clip(surge, *SURGE_BOUNDS))
+        surge_rate = float(np.clip(surge_rate, *SURGE_RATE_BOUNDS))
+        r0 = float(r0)
+        if not np.isfinite(r0) or r0 <= 1e-6:
+            return np.ones_like(days_f, dtype=float)
+        logistic = level / (1.0 + (level / r0 - 1.0)
+                            * np.exp(-alpha * days_f))
+        return logistic + surge * days_f * np.exp(-surge_rate * days_f)
+
+    def _direct_standardize(train_x, test_x):
+        """Training-only z score for the direct-city feature vector."""
+        mean = train_x.mean(axis=0)
+        sd = train_x.std(axis=0)
+        sd[sd == 0] = 1.0
+        return (train_x - mean) / sd, (test_x - mean) / sd
+
+    def _direct_ridge_curve(held, rest, days_f):
+        """Nested-LOO Ridge forecast of the four direct-city curve parameters.
+
+        The inner score is the synthesized city curve's MAPE, rather than
+        parameter-space squared error, because parameters can trade off while
+        producing equivalent curves.  This returns the selected alpha so the
+        output records the exact fold-level choice.
+        """
+        def _fit_predict(train_codes, target_code, alpha):
+            x_train = city_direct_feature_df.loc[train_codes].to_numpy(dtype=float)
+            x_test = city_direct_feature_df.loc[target_code].to_numpy(dtype=float)[None, :]
+            y_train = np.vstack([city_direct_params[c] for c in train_codes])
+            zx_train, zx_test = _direct_standardize(x_train, x_test)
+            y_mean = y_train.mean(axis=0)
+            y_sd = y_train.std(axis=0)
+            y_sd[y_sd == 0] = 1.0
+            model = Ridge(alpha=float(alpha), fit_intercept=True)
+            model.fit(zx_train, (y_train - y_mean) / y_sd)
+            return model.predict(zx_test)[0] * y_sd + y_mean
+
+        losses = []
+        for alpha in DIRECT_CITY_RIDGE_ALPHAS:
+            inner_loss = []
+            for inner in rest:
+                inner_train = [c for c in rest if c != inner]
+                p_hat = _fit_predict(inner_train, inner, alpha)
+                pred = _direct_city_curve(city_gt_rel[inner].iloc[0], p_hat, days_f)
+                inner_loss.append(_city_curve_mape(pred, city_gt_rel[inner]))
+            losses.append(float(np.mean(inner_loss)))
+        selected = float(DIRECT_CITY_RIDGE_ALPHAS[int(np.argmin(losses))])
+        params = _fit_predict(rest, held, selected)
+        return (_direct_city_curve(city_gt_rel[held].iloc[0], params, days_f),
+                selected)
+
+    def _direct_kernel_curve(held, rest):
+        """Nested-LOO RBF mixture of observed training-city recovery curves."""
+        def _mixture(train_codes, target_code, bandwidth):
+            x_train = city_direct_feature_df.loc[train_codes].to_numpy(dtype=float)
+            x_test = city_direct_feature_df.loc[target_code].to_numpy(dtype=float)[None, :]
+            zx_train, zx_test = _direct_standardize(x_train, x_test)
+            distance = np.sqrt(np.mean((zx_train - zx_test) ** 2, axis=1))
+            weights = np.exp(-0.5 * (distance / float(bandwidth)) ** 2)
+            if not np.isfinite(weights).all() or weights.sum() <= 0:
+                weights = np.ones(len(train_codes), dtype=float)
+            weights = weights / weights.sum()
+            curves = np.vstack([city_gt_rel[c].to_numpy(dtype=float)
+                                for c in train_codes])
+            return weights @ curves
+
+        losses = []
+        for bandwidth in DIRECT_CITY_KERNEL_BANDWIDTHS:
+            inner_loss = []
+            for inner in rest:
+                inner_train = [c for c in rest if c != inner]
+                pred = _mixture(inner_train, inner, bandwidth)
+                inner_loss.append(_city_curve_mape(pred, city_gt_rel[inner]))
+            losses.append(float(np.mean(inner_loss)))
+        selected = float(DIRECT_CITY_KERNEL_BANDWIDTHS[int(np.argmin(losses))])
+        return _mixture(rest, held, selected), selected
 
     def _param_prediction(held, rest, target, extra_pooled=(), cols=None,
                           model='cosine_knn', level_cols=None):
@@ -4952,6 +5114,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     metric_rows, par_rows, curve_rows = [], [], []
     city_curve_page = {}          # code -> (days, gt, lines) for the one-page grid
     comp_curve_rows = []          # long-form component curves -> raw_data/
+    city_direct_hyper_rows = []   # chosen nested-LOO settings for direct references
     for held in codes:
         rest = [c for c in codes if c != held]
         alpha_hat, mu_a = _param_prediction(held, rest, 'recovery_alpha')
@@ -5049,12 +5212,45 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         gt_rel = city_gt_rel[held].to_numpy(dtype=float)
         base = city_base[held].to_numpy(dtype=float)
         days = obs.index.to_numpy()
-        city_rel = {lab: dfc.to_numpy(dtype=float) @ wn for lab, dfc in lines.items()}
+        # Dynamic reconstruction of every component-based method. A component
+        # relative curve first becomes a daily flow magnitude through its OWN
+        # day-type-matched normal baseline and total H loading; those magnitudes
+        # are summed, then divided by the raw city's matching total baseline.
+        # Fixed weight_normal averaging is only exact under one common baseline;
+        # this form respects weekday/weekend component compositions without
+        # reading the held-out disaster curve.
+        u_held = units[held]
+        W_held, H_held = dec_test[held]
+        component_base = daily_baselines(
+            W_held, u_held['n_nor'], u_held['first_day_nor'], SLOTS_ACTIVE,
+            n_dis=u_held['n_dis']).to_numpy(dtype=float)
+        component_loading = H_held.sum(axis=1).astype(float)
+        city_rel = {}
+        for lab, dfc in lines.items():
+            component_flow = dfc.to_numpy(dtype=float) * component_base
+            numerator = component_flow @ component_loading
+            city_rel[lab] = np.divide(numerator, base,
+                                      out=np.ones_like(numerator, dtype=float),
+                                      where=np.isfinite(base) & (base > 0))
         # City-wise baseline: a single L = 1 city logistic from the city-level
         # predicted α; adds the 'city' entry (a plain vector, no component curves).
         city_curve, ca_hat = _city_wise_curve(held, rest, days.astype(float))
         if city_curve is not None:
             city_rel['city'] = city_curve
+        # Three fully decomposition-free city forecasts. The equal-weight mean
+        # reads no features; ridge predicts the four curve parameters; KNN is a
+        # feature-weighted mixture of the other raw city curves. All three use
+        # the same city-level feature table and nested LOO choices where a
+        # tuning parameter exists.
+        city_rel['city_train_mean'] = np.mean(
+            [city_gt_rel[c].to_numpy(dtype=float) for c in rest], axis=0)
+        city_rel['city_ridge'], ridge_alpha = _direct_ridge_curve(
+            held, rest, days.astype(float))
+        city_rel['city_knn'], kernel_bandwidth = _direct_kernel_curve(held, rest)
+        city_direct_hyper_rows.append({
+            'code': held, 'ridge_alpha': ridge_alpha,
+            'kernel_bandwidth': kernel_bandwidth,
+        })
 
         # Metrics: component level pooled over all component-days with a finite
         # observed value (only the per-component methods); city level on the
@@ -5154,12 +5350,18 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             save_path=os.path.join(OUTPUT_CURVE_PRED,
                                    'city_magnitude_curve_legacy',
                                    f'city_magnitude_curve_{held}.png'))
-        # CURRENT figure: slide format, and the city-wise kNN line dropped --
-        # it is the weakest of the three and crowds the panel.
-        # No per-unit slide file any more: the combined page below carries all
-        # 13, so a separate copy per city was redundant.
-        slide_lines = {k: v for k, v in city_lines.items()
-                       if k != _CURVE_METHOD_LABELS['city']}
+        # CURRENT figure: the three component-based curves and three direct-city
+        # alternatives. Internal labels keep the direct methods unambiguous in
+        # raw data; the grouped legend below displays the requested short names.
+        # No per-unit slide file: the combined page carries every city-event.
+        slide_lines = {
+            'proposed method': city_rel['pred'] * base,
+            'ridge regression': city_rel['naive_ridge'] * base,
+            'train-mean': city_rel['train_mean'] * base,
+            'city train-mean': city_rel['city_train_mean'] * base,
+            'city ridge regression': city_rel['city_ridge'] * base,
+            'city KNN': city_rel['city_knn'] * base,
+        }
         city_curve_page[held] = (days, gt_rel * base, slide_lines)
         # Persist the component-level curves: the city ones were already in
         # raw_data/, these were not, which forced a full pipeline run for any
@@ -5252,6 +5454,13 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         os.path.join(OUTPUT_CURVE_PRED, 'curve_pred_metrics.csv'), index=False)
     pd.DataFrame(curve_rows).to_csv(
         os.path.join(raw_dir, 'city_curves_by_method.csv'), index=False)
+    city_direct_feature_df.rename_axis('code').to_csv(
+        os.path.join(raw_dir, 'city_direct_curve_features.csv'))
+    pd.DataFrame.from_dict(city_direct_params, orient='index',
+                           columns=city_direct_param_cols).rename_axis('code').to_csv(
+                               os.path.join(raw_dir, 'city_direct_curve_parameters_gt.csv'))
+    pd.DataFrame(city_direct_hyper_rows).to_csv(
+        os.path.join(raw_dir, 'city_direct_curve_hyperparameters.csv'), index=False)
     par_df = pd.DataFrame(par_rows)
     par_df.to_csv(os.path.join(raw_dir, 'component_params_gt_vs_pred.csv'),
                   index=False)
@@ -5277,11 +5486,6 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             par_df, names=cnames,
             save_path=os.path.join(OUTPUT_CURVE_PRED,
                                    'rank_to_cumloss_scatter.png'))
-    # Accuracy bar: per city-event, the CITY-LEVEL curve error of every method line,
-    # so the four lines are compared on the quantity the analysis actually optimises
-    # (the whole-curve MAE) rather than on any single fitted parameter.  Methods are
-    # the forecast lines of _CITY_FIGURE_METHODS, in that order; a method missing for
-    # a unit leaves a gap.  The oracle's own MAE stays in curve_pred_metrics.csv.
     if comp_curve_rows:
         pd.DataFrame(comp_curve_rows).to_csv(
             os.path.join(raw_dir, 'component_curves_by_method.csv'),
@@ -5292,34 +5496,32 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             city_curve_page,
             names={c: f"{labels.get(c, c)} ({c.split('_', 1)[-1]})"
                    for c in city_curve_page},
+            mae_annotation_methods=('train-mean', 'ridge regression',
+                                    'proposed method'),
+            legend_groups=(
+                ('Decomposition-based',
+                 (('proposed method', 'proposed method'),
+                  ('ridge regression', 'ridge regression'),
+                  ('train-mean', 'train-mean')), 0.81),
+                ('No decomposition',
+                 (('city train-mean', 'train-mean'),
+                  ('city ridge regression', 'ridge regression'),
+                  ('city KNN', 'KNN')), 0.36),
+            ),
             save_path=os.path.join(OUTPUT_CURVE_PRED,
                                    'city_magnitude_curve_all.png'))
 
-    mae_df = (pd.DataFrame(metric_rows)
-              .pivot(index='code', columns='method', values='mae_city')
-              .reindex(index=[c for c in codes if c in {r['code'] for r in metric_rows}],
-                       columns=[m for m in _CITY_FIGURE_METHODS if m in
-                                {r['method'] for r in metric_rows}])
-              .rename(columns=_CURVE_METHOD_LABELS))
-    mae_df.to_csv(os.path.join(raw_dir, 'city_curve_mae.csv'))
-    # Full "City (Storm)" tick labels, the same naming the magnitude page uses.
-    _bar_labels = {c['code']: c['label'] for c in CITY_EVENTS}
-    vis_bar_curve_mae(
-        mae_df,
-        names={c: f"{_bar_labels.get(c, c)} ({c.split('_', 1)[-1]})"
-               for c in mae_df.index},
-        ylabel='city-curve MAE (fraction of the normal baseline)',
-        save_path=os.path.join(OUTPUT_CURVE_PRED, 'bar_cross_city_curve_mae.png'))
     print(f"  [curve_pred] -> {OUTPUT_CURVE_PRED} "
           f"({len({r['code'] for r in metric_rows})} city-events)")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def _run_step_7(cc_train, cc_test, units, all_codes, dec_test):
+def _run_step_7(cc_train, cc_test, units, all_codes, dec_test, global_iwf):
     """STEP 7: cross-city curve prediction + the OD maps."""
     print("\n── Cross-city curve prediction (clean-rate forecast, surge-model fit) ──")
-    analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test)
+    analysis_cross_city_curve_pred(cc_train, cc_test, units, all_codes, dec_test,
+                                   global_iwf)
 
 
 def main():
@@ -5651,7 +5853,7 @@ def main():
         analysis_centered_spectrum(cc_test, all_codes)
 
         # ── STEP 7 — curve prediction (+ OD maps) ────────────────────────
-        _run_step_7(cc_train, cc_test, units, all_codes, dec_test)
+        _run_step_7(cc_train, cc_test, units, all_codes, dec_test, global_iwf)
 
 
 if __name__ == '__main__':
