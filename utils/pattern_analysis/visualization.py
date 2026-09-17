@@ -7,9 +7,12 @@ serves utils/neural_network/temporal_decay.py (via utils.pattern_analysis
 .temporal) and can be skipped by production readers.
 """
 import os
+from fractions import Fraction
+
 import numpy as np
 from scipy.stats import rankdata, spearmanr, pearsonr, skewnorm
 import pandas as pd
+from sklearn.isotonic import isotonic_regression
 import matplotlib
 # Headless-safe: every figure here is written to disk, never shown.  Without
 # this, a detached run lazily imports the Qt GUI backend at the first
@@ -2172,6 +2175,219 @@ def vis_rank_to_cumloss_qm(params, save_path=None, ncols=5):
     return fig
 
 
+def vis_distribution_location_scale_scatter(params, mu_save_path=None,
+                                             sigma_save_path=None):
+    """Leave-one-unit-out location and scale diagnostics for the final
+    component cumulative-loss distribution.
+
+    For each city-event, mu is the equal-component mean and sigma is the
+    equal-component population standard deviation (ddof=0). Ground truth comes
+    from cum_loss_fit and the estimate from the final cum_loss_pred consumed by
+    the curve forecast. This makes the panels diagnostics of the assembled
+    distribution, not of an isolated intermediate branch. Pearson r is shown
+    because the panels ask whether between-city variation is predicted; the
+    dashed identity line is deliberately omitted from the legend.
+    """
+    rows = []
+    for code, group in params.groupby('code', sort=False):
+        truth = group['cum_loss_fit'].dropna().to_numpy(dtype=float)
+        pred = group['cum_loss_pred'].dropna().to_numpy(dtype=float)
+        if len(truth) < 2 or len(pred) < 2:
+            continue
+        rows.append({
+            'code': code,
+            'mu_true': float(np.mean(truth)),
+            'mu_pred': float(np.mean(pred)),
+            'sigma_true': float(np.std(truth, ddof=0)),
+            'sigma_pred': float(np.std(pred, ddof=0)),
+        })
+    data = pd.DataFrame(rows)
+    if len(data) < 2:
+        return {}
+
+    def _one(x_col, y_col, xlabel, ylabel, color, save_path):
+        x = data[x_col].to_numpy(dtype=float)
+        y = data[y_col].to_numpy(dtype=float)
+        r = float(pearsonr(x, y).statistic)
+        lo = float(min(x.min(), y.min()))
+        hi = float(max(x.max(), y.max()))
+        pad = 0.08 * (hi - lo if hi > lo else 1.0)
+        lo, hi = lo - pad, hi + pad
+        rc = dict(_SLIDE_RC, **{
+            'font.size': 18, 'axes.labelsize': 20,
+            'xtick.labelsize': 16, 'ytick.labelsize': 16,
+            'legend.fontsize': 15,
+        })
+        with plt.rc_context(rc):
+            fig, ax = plt.subplots(figsize=(8.8, 7.2))
+            ax.plot([lo, hi], [lo, hi], color='#7A7A7A', lw=2.2,
+                    ls=(0, (5, 4)))
+            ax.scatter(x, y, s=125, color=color, edgecolor='white',
+                       linewidth=1.2, zorder=3, label='Held-out city-events')
+            ax.text(0.96, 0.06, rf'Pearson $r$ = {r:.2f}',
+                    transform=ax.transAxes, ha='right', va='bottom',
+                    fontsize=18)
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
+            ax.legend(loc='upper left')
+            fig.subplots_adjust(left=0.19, right=0.97, bottom=0.18, top=0.97)
+            if save_path:
+                os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                            exist_ok=True)
+                fig.savefig(save_path, dpi=300, bbox_inches='tight',
+                            facecolor='white')
+                plt.close(fig)
+        return r
+
+    return {
+        'mu_pearson': _one(
+            'mu_true', 'mu_pred',
+            r'True location, $\mu_c$ (day-equivalents)',
+            r'Leave-one-out estimate, $\widehat{\mu}_c$ (day-equivalents)',
+            '#2B6F9C', mu_save_path),
+        'sigma_pearson': _one(
+            'sigma_true', 'sigma_pred',
+            r'True scale, $\sigma_c$ (day-equivalents)',
+            r'Leave-one-out estimate, $\widehat{\sigma}_c$ (day-equivalents)',
+            '#D9822B', sigma_save_path),
+    }
+
+
+def vis_distribution_shape_density(params, shape_audits, names=None,
+                                   save_path=None):
+    """Show representative predicted standardized loss distributions.
+
+    Reconstructs each held-out fold's reference quantile shape and its final
+    two-mode monotone shape correction from the persisted fold amplitudes.
+    The three displayed city-events are selected deterministically at the
+    minimum, median-nearest and maximum integrated correction magnitude.  A
+    common weighted Gaussian KDE bandwidth keeps density differences
+    attributable to the predicted shapes rather than to smoothing choices.
+    """
+    codes = params['code'].drop_duplicates().tolist()
+    if len(codes) < 3 or len(shape_audits) != len(codes):
+        return None
+    if all(isinstance(audit, dict) and audit.get('code') in codes
+           for audit in shape_audits):
+        audit_by_code = {audit['code']: audit for audit in shape_audits}
+    else:
+        # Backward compatibility for saved outputs created before the held-out
+        # city-event code was written into each fold audit.
+        audit_by_code = dict(zip(codes, shape_audits))
+    values = {
+        code: group['cum_loss_fit'].dropna().to_numpy(dtype=float)
+        for code, group in params.groupby('code', sort=False)
+    }
+    if any(len(values.get(code, ())) < 2 for code in codes):
+        return None
+
+    nodes = {
+        Fraction(j, len(values[code]))
+        for code in codes for j in range(len(values[code]) + 1)
+    }
+    edges = np.array([float(value) for value in sorted(nodes)], dtype=float)
+    weights = np.diff(edges)
+    probability = (edges[:-1] + edges[1:]) / 2.0
+
+    def quantile(code):
+        v = values[code]
+        return np.sort(v)[np.floor(probability * len(v)).astype(int)]
+
+    def standardized_quantile(code):
+        v = values[code]
+        return (quantile(code) - float(np.mean(v))) / float(np.std(v))
+
+    reference_shapes = {}
+    corrected_shapes = {}
+    correction_size = {}
+    for held in codes:
+        audit = audit_by_code.get(held, {})
+        amplitudes = np.asarray(audit.get('amplitudes', ()), dtype=float)
+        if len(amplitudes) != 2 or not np.isfinite(amplitudes).all():
+            continue
+        train = [code for code in codes if code != held]
+        centered = np.array([
+            quantile(code) - float(np.mean(values[code])) for code in train
+        ])
+        barycenter = centered.mean(axis=0)
+        q0 = barycenter / np.sqrt(np.sum(weights * barycenter ** 2))
+        matrix = np.array([standardized_quantile(code) for code in train])
+        mean_shape = matrix.mean(axis=0)
+        _, _, vt = np.linalg.svd(
+            (matrix - mean_shape) * np.sqrt(weights), full_matrices=False)
+        modes = vt[:2] / np.sqrt(weights)
+        for j in range(2):
+            if modes[j, np.argmax(np.abs(modes[j]))] < 0:
+                modes[j] *= -1.0
+        projected = isotonic_regression(
+            q0 + amplitudes @ modes, sample_weight=weights, increasing=True)
+        center = float(projected @ weights)
+        sd = float(np.sqrt((projected - center) ** 2 @ weights))
+        if not np.isfinite(sd) or sd < 1e-12:
+            continue
+        shape = (projected - center) / sd
+        reference_shapes[held] = q0
+        corrected_shapes[held] = shape
+        correction_size[held] = float(
+            np.sqrt(np.sum(weights * (shape - q0) ** 2)))
+
+    if len(corrected_shapes) < 3:
+        return None
+    ordered = pd.Series(correction_size).sort_values()
+    selected = [
+        ordered.index[0],
+        (ordered - ordered.median()).abs().sort_values().index[0],
+        ordered.index[-1],
+    ]
+    bandwidth = (1.0 / np.sum(weights ** 2)) ** (-1.0 / 5.0)
+    all_values = np.concatenate([
+        *reference_shapes.values(),
+        *[corrected_shapes[code] for code in selected],
+    ])
+    grid = np.linspace(all_values.min() - 3 * bandwidth,
+                       all_values.max() + 3 * bandwidth, 800)
+
+    def kde(v):
+        z = (grid[:, None] - v[None, :]) / bandwidth
+        kernels = np.exp(-0.5 * z ** 2) / (
+            np.sqrt(2 * np.pi) * bandwidth)
+        return kernels @ weights
+
+    mean_reference = np.mean(
+        [kde(reference_shapes[code]) for code in reference_shapes], axis=0)
+    palette = ('#4C956C', '#8A5AA5', '#D9822B')
+    rc = dict(_SLIDE_RC, **{
+        'font.size': 18, 'axes.labelsize': 20,
+        'xtick.labelsize': 16, 'ytick.labelsize': 16,
+        'legend.fontsize': 15,
+    })
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(12.8, 4.8))
+        ax.plot(grid, mean_reference, color='#7A7A7A', lw=2.2,
+                ls=(0, (5, 4)), label='_nolegend_')
+        for code, color in zip(selected, palette):
+            ax.plot(grid, kde(corrected_shapes[code]), color=color, lw=3.0,
+                    label=(names or {}).get(code, code))
+        ax.set(
+            xlabel=(r'Standardized component cumulative loss, '
+                    r'$z=(y-\mu_c)/\sigma_c$'),
+            ylabel=r'Probability density, $f_{Z_c}(z;\,\mathbf{a}_c)$',
+            xlim=(grid.min(), grid.max()), ylim=(0, None),
+        )
+        ax.legend(loc='upper left', handlelength=3.0)
+        fig.subplots_adjust(left=0.12, right=0.985, bottom=0.23, top=0.97)
+        if save_path:
+            os.makedirs(os.path.dirname(os.path.abspath(save_path)),
+                        exist_ok=True)
+            fig.savefig(save_path, dpi=300, bbox_inches='tight',
+                        pad_inches=0.20, facecolor='white')
+            plt.close(fig)
+    return selected
+
+
 def vis_func_vs_time_distribution(ranked, time_col, categories, rho_rank=None,
                                   save_path=None):
     """How one temporal feature and the functional shares CO-DISTRIBUTE across
@@ -2964,9 +3180,8 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None,
     tuples. It makes the distinction between decomposition-based and direct-city
     methods explicit while retaining the default compact legend for other uses.
 
-    The default compact legend appends each method's page-level MAPE, computed
-    from the plotted arrays. A supplied grouped legend instead prioritizes the
-    decomposition comparison and leaves these summary values in the raw CSV.
+    The legend appends each method's page-level MAPE, computed from the plotted
+    arrays. A supplied grouped legend retains the decomposition comparison.
     Per-panel labels remain absolute MAE in flow-volume units and can be
     restricted with `mae_annotation_methods`."""
     codes = list(per_city)
@@ -3063,7 +3278,9 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None,
                                              labels_to_idx.get(internal, j))
                     legend_ax.plot([0.00, 0.14], [y, y], color=col, lw=2.2,
                                    ls=dsh, marker='.', ms=5)
-                    legend_ax.text(0.18, y, display, va='center', ha='left',
+                    mape = (f' (MAPE {rate[internal]:.1%})'
+                            if internal in rate else '')
+                    legend_ax.text(0.18, y, display + mape, va='center', ha='left',
                                    color=col, fontsize=18)
         elif lg is not None:
             for t in lg.get_texts():

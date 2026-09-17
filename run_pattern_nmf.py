@@ -260,7 +260,9 @@ from utils.pattern_analysis.visualization import (
     vis_bar_cross_city_resi_pred, vis_scatter_city_pred,
     vis_curves_city_pred, vis_city_curves_grid,
     vis_component_curves_grid, vis_od_flow_slider_html, vis_recovery_by_trip_purpose,
-    vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_qm_pred_vs_obs, vis_func_vs_time_distribution,
+    vis_rank_pred_vs_true, vis_rank_to_cumloss_qm, vis_qm_pred_vs_obs,
+    vis_distribution_location_scale_scatter, vis_distribution_shape_density,
+    vis_func_vs_time_distribution,
     vis_centered_spectrum_loo,
     vis_centered_distributions, vis_spread_vs_predictors,
     vis_centered_spectrum_schematic,
@@ -2313,13 +2315,56 @@ def analysis_rank_channel(merged, codes, target='cum_loss'):
     return rser
 
 
+def raw_component_loss_for_city_total(W, n_nor, first_day, slots_per_day,
+                                      n_dis=None):
+    """Direct, unsmoothed component cumulative loss for the city-total φ stage.
+
+    This target is formed directly from the NMF temporal factor: each disaster
+    day is divided by the component's original normal-period weekday or weekend
+    mean, then ``1 - ratio`` is summed.  It is intentionally independent of
+    any recovery-curve smoothing, baseline regularisation, or curve fitting.
+    """
+    W = np.asarray(W, dtype=float)
+    if W.shape[0] % slots_per_day:
+        raise ValueError('W rows must be an integer number of days.')
+    if n_nor % slots_per_day or (n_dis is not None and n_dis % slots_per_day):
+        raise ValueError('Normal and disaster starts must fall on day boundaries.')
+    n_days = W.shape[0] // slots_per_day
+    n_normal_days = n_nor // slots_per_day
+    disaster_start = (n_dis if n_dis is not None else n_nor) // slots_per_day
+    if not (0 < n_normal_days <= disaster_start < n_days):
+        raise ValueError('Invalid normal/disaster day boundaries.')
+
+    daily = W.reshape(n_days, slots_per_day, W.shape[1]).sum(axis=1)
+    day_names = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+                 'saturday', 'sunday']
+    if str(first_day).lower() not in day_names:
+        raise ValueError(f'Unknown first day: {first_day!r}.')
+    start = day_names.index(str(first_day).lower())
+    weekdays = np.array([((start + d) % 7) < 5 for d in range(n_days)],
+                        dtype=bool)
+    normal = daily[:n_normal_days]
+    weekday_base = normal[weekdays[:n_normal_days]].mean(axis=0)
+    weekend_base = normal[~weekdays[:n_normal_days]].mean(axis=0)
+    baseline = np.where(weekdays[disaster_start:, None],
+                        weekday_base, weekend_base)
+    ratio = np.divide(daily[disaster_start:], baseline,
+                      out=np.full_like(baseline, np.nan), where=baseline > 0)
+    loss = np.nansum(1.0 - ratio, axis=0)
+    loss[~np.isfinite(ratio).any(axis=0)] = np.nan
+    return pd.Series(loss, name='city_total_raw_component_loss')
+
+
 def city_total_score(held, rest, merged, feats_test, model,
                      feature_cols=None, pooled_cols=None,
                      min_rows=CROSS_CITY_MIN_ROWS):
     """THE phi stage of the city-total estimator: one unit's aggregate score s.
 
-    Every component's cum_loss is predicted on the POOLED-TRAIN scale and the
-    predictions are weight_normal-averaged WITHOUT ever being un-standardized.
+    Every component's direct raw cumulative loss is predicted on the
+    POOLED-TRAIN scale and the predictions are weight_normal-averaged WITHOUT
+    ever being un-standardized. This target is separate from the processed
+    component recovery curve, so city-total prediction cannot change merely
+    because the recovery-curve generator changes.
     Keeping them standardized is the whole point: un-standardizing multiplies
     by the large component-to-component spread and mis-calibrates the
     aggregate, which is what the raw channel does.  The result feeds
@@ -2327,8 +2372,8 @@ def city_total_score(held, rest, merged, feats_test, model,
     total, and both STEP 6's headline figure and STEP 7's quantile-mapping
     anchor now read this same pair.
 
-    The held unit's cum_loss is overwritten with a placeholder ramp so its own
-    losses cannot reach the fit even by accident.  `feature_cols` defaults to
+    The held unit's raw component loss is overwritten with a placeholder ramp
+    so its own losses cannot reach the fit even by accident. `feature_cols` defaults to
     CITY_TOTAL_FEATURE_COLS; the one caller that overrides it is STEP 6's
     cosine-kNN arm, deliberately kept on the smaller pre-interaction set (a
     cosine over 24 mostly-collinear products dilutes the neighbourhood it
@@ -2337,10 +2382,19 @@ def city_total_score(held, rest, merged, feats_test, model,
                 else feature_cols)
     pcols = list(CITY_TOTAL_POOLED_COLS if pooled_cols is None
                  else pooled_cols)
-    te = merged[held].copy()
+    target_col = 'city_total_raw_component_loss'
+    if target_col not in merged[held].columns:
+        raise KeyError(f'Missing {target_col!r} in city-total component table.')
+
+    def _with_inner_target(code):
+        frame = merged[code].copy()
+        frame['cum_loss'] = frame[target_col].to_numpy(dtype=float)
+        return frame
+
+    te = _with_inner_target(held)
     te['cum_loss'] = np.arange(len(te), dtype=float)
     fold = {held: te}
-    fold.update({c: merged[c] for c in rest})
+    fold.update({c: _with_inner_target(c) for c in rest})
     _r2, pred, _g = cross_city_resilience(
         fold, ['cum_loss'], cols, rank=False,
         split={'train': list(rest), 'test': [held]}, target_std='pooled_train',
@@ -2979,6 +3033,12 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     # (r_total = Σ p_i·r_i) and hence city cum_loss = Σ p_i·cum_loss_i; the full-window
     # importance above is NOT this.  Used to aggregate component cum_loss -> city level.
     feats['weight_normal'] = W[:n_nor].sum(axis=0) * H.sum(axis=1)
+    # City-total φ target only: direct raw component cumulative loss under the
+    # original weekday/weekend denominator. The ordinary ``cum_loss`` kept in
+    # resilience_features remains the target for rank, distribution, and curve
+    # prediction branches.
+    feats['city_total_raw_component_loss'] = raw_component_loss_for_city_total(
+        W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE, n_dis=n_dis).to_numpy()
     # Per-event-constant LEVEL features (only used by the cross-city pooled_train mode,
     # see LEVEL_FEATURE_COLS): Saffir-Simpson arrival intensity and the BG-pop-weighted
     # HEvOD evacuation strength.
@@ -5166,7 +5226,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         _sp_base, _sp_mult = spread_scale(held, rest, _sp_merged, _sp_mu_a)
         shape_positions, shape_audit = _backbone_two_projection_shape(
             held, rest, _sp_merged, rank_score, _sp_mu_a)
-        _DISTRIBUTION_SHAPE_AUDIT[held] = shape_audit
+        _DISTRIBUTION_SHAPE_AUDIT[held] = {'code': held, **shape_audit}
         cum_hat, spread_scale_applied = _quantile_mapped_chat(
             cum_hat_raw, rank_score, obs, wn, rest, mu_a, city_total_hat,
             scale_value=_sp_base * _sp_mult, shape_positions=shape_positions)
@@ -5486,6 +5546,17 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             par_df, names=cnames,
             save_path=os.path.join(OUTPUT_CURVE_PRED,
                                    'rank_to_cumloss_scatter.png'))
+        vis_distribution_location_scale_scatter(
+            par_df,
+            mu_save_path=os.path.join(OUTPUT_CITY_TOTAL,
+                                      'mu_pred_vs_true.png'),
+            sigma_save_path=os.path.join(OUTPUT_CENTERED_DIST,
+                                         'sigma_pred_vs_true.png'))
+        vis_distribution_shape_density(
+            par_df, list(_DISTRIBUTION_SHAPE_AUDIT.values()), names=cnames,
+            save_path=os.path.join(
+                OUTPUT_CENTERED_DIST,
+                'density_with_a_typical_city_events.png'))
     if comp_curve_rows:
         pd.DataFrame(comp_curve_rows).to_csv(
             os.path.join(raw_dir, 'component_curves_by_method.csv'),
