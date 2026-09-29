@@ -1,5 +1,65 @@
 # Technical Note · Cross-City Resilience Prediction
 
+## Recovery definition and fixed evaluation benchmark (adopted 2026-09-29)
+
+The adopted experiment is the **11.9599%** sandbox version, before final-curve
+total-loss alignment. It replaces the arithmetic moving average of daily
+activity ratios with the sum of observed flows divided by the sum of their
+normal baselines within the same centred three-day window. Only available
+disaster days enter boundary windows. Weekday and weekend baselines still use
+normal-period data only. There is no day-of-week baseline adjustment.
+
+`resilience_curves` now defaults to `smoothing='ratio_of_sums'`. Component
+recovery targets, fitted oracle parameters, cumulative losses, ranks, reference
+distributions, scale/shape training, and raw-city smoothed training responses
+are all regenerated with this definition. Unsmoothed raw component losses in
+the city-total inner model remain unchanged. Curve fitting, cumulative-loss
+integration, and the existing component-level location constraint still use
+all fifteen days, numbered 0 through 14.
+
+For a like-for-like comparison with the sandbox result, the **evaluation city
+truth remains the historical mean of daily ratios**, explicitly computed with
+`smoothing='mean_of_ratios'`. This is distinct from the new city training
+response. `city_curves_by_method.csv` contains that fixed evaluation truth;
+`city_training_response_curves.csv` records the new training response separately.
+Both are derived from the original raw city data, not a cached prediction.
+
+`CITY_CURVE_EVAL_START_DAY = 1` limits city MAE, normalized RMSE, R-squared,
+and MAPE to days 1 through 14 for every method, including all baselines and the
+oracle. Component curve errors retain their original full-period definition.
+All fifteen days are still plotted and exported. The legend reports the
+equal-city mean of within-city MAPE; the per-panel MAE uses the same evaluation
+days in absolute flow units. The reporting window does not change internal
+baseline tuning. Cumulative-loss columns still cover all fifteen days, and
+`city_response_cum_loss` distinguishes the training response from benchmark loss.
+
+The sandbox reproduction targets are **11.9598672% proposed city MAPE** and
+**9.3946178% oracle city MAPE** over days 1 through 14. The preceding fixed-truth
+day-1-through-14 result was 12.3091%; 12.3807% used days 0 through 14.
+
+Run `python run_pattern_nmf.py` in the project environment to regenerate the
+complete outputs. Before importing numerical libraries, the standalone command
+defaults `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and `MKL_NUM_THREADS` to 1,
+matching the sandbox. Importing the module does not change these settings;
+explicit environment overrides are respected and can change numerical results.
+The scale correction uses non-convex numerical optimization and can amplify
+roundoff differences; the first default-multithread refresh produced 11.9421%
+rather than the saved 11.9599%. This is a numerical reproducibility precaution,
+not a change to features, objectives, or model selection.
+
+Neither experiment 5 nor final-curve total-loss alignment is included. Experiment
+5 multiplies each observed component curve by a shared daily correction so its
+reconstructed aggregate matches the separately processed city reconstruction;
+it requires that day's observed component flows. Final-curve alignment instead
+adjusts predicted component losses and solves the curves again until the
+reconstructed city's cumulative loss matches the independently predicted city
+loss. It uses a predicted scalar constraint rather than future city observations.
+
+This adoption is **not an information-leakage repair**. The centred day-0 window
+still contains day 1, so its initial-state features require day-1 observations.
+Simply omitting day 0 from evaluation does not make a day-0 forecast causal.
+The separately recorded raw-day-0 and segmented-curve experiments are not adopted.
+
 ## Current spread model (adopted 2026-09-14)
 
 `SPREAD_MODEL = 'purpose_function_variance'` in `run_pattern_nmf.py` selects the
@@ -921,9 +981,9 @@ current production (§8.5).
 - **Five units, always.** Every number above rests on five leave-one-out folds. The designs defend against this with zero-tuning
   conventions, pre-registered acceptance rules, ablations and jackknives, but no amount of care turns five folds into a large
   sample, so treat margins of a few thousandths as suggestive rather than settled.
-- **The day-0 anchor embeds one post-landfall day.** The r0 anchors are read from the smoothed curves, and the smoother is a
-  centred 3-day rolling mean with a 1-day minimum window (utils/pattern_analysis/component_features.py:388-391), so the smoothed
-  day-0 value is the average of the raw days 0 and 1. Every anchor consumer, namely the component curves' day-0 row
+- **The day-0 anchor embeds one post-landfall day.** The r0 anchors are read from the smoothed curves. Historically the
+  centred three-day mean made day 0 the arithmetic average of raw days 0 and 1. Since the 2026-09-29 adoption, it is their
+  baseline-weighted average, equivalently their summed flows divided by summed baselines. Every anchor consumer, namely the component curves' day-0 row
   (run_pattern_nmf.py:1605), the r0 feature column (run_pattern_nmf.py:1033-1039) and the city anchor
   (run_pattern_nmf.py:1644), therefore carries one observed post-landfall day into the forecast, and the §8 input contract holds
   at the level of the smoothed curve object.

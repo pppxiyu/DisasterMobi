@@ -225,6 +225,13 @@ import os
 import re
 from fractions import Fraction
 
+# Initialize numerical libraries the same way as the reproducibility sandbox.
+# Set this before NumPy/SciPy imports, and only for the standalone entry point.
+# Explicit environment overrides remain available for performance experiments.
+if __name__ == '__main__':
+    for _thread_setting in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS'):
+        os.environ.setdefault(_thread_setting, '1')
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, least_squares, minimize
@@ -282,6 +289,7 @@ from utils.pattern_analysis.component_features import (
 from utils.pattern_analysis.ml_resilience import (
     cross_city_resilience,
 )
+from utils.pattern_analysis.curve_metrics import curve_error_metrics
 from utils.data_processing.geo_loader import load_city_geo
 from utils.data_processing.hurdat_exposure import (load_track, city_exposure,
                                                    track_distance,
@@ -1247,6 +1255,9 @@ CITY_TOTAL_DECOMP_MODELS = {'cos_KNN': 'cosine_knn', 'ridge': 'ridge'}
 
 # Everything the STEP-7 curve prediction writes goes here.
 OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '3-cross_city_curve_pred')
+# Reporting only. Training targets, curve inversion and city-loss constraints
+# still integrate all 15 days. Preserve the original city truth for comparison.
+CITY_CURVE_EVAL_START_DAY = 1
 
 # STEP-7 spatial view: per held city, an interactive slider map of the daily
 # PREDICTED OD flows (forecast curves x component baselines x H), the observed
@@ -2363,8 +2374,9 @@ def city_total_score(held, rest, merged, feats_test, model,
     Every component's direct raw cumulative loss is predicted on the
     POOLED-TRAIN scale and the predictions are weight_normal-averaged WITHOUT
     ever being un-standardized. This target is separate from the processed
-    component recovery curve, so city-total prediction cannot change merely
-    because the recovery-curve generator changes.
+    component recovery curve. The inner target is therefore invariant to
+    smoothing, although initial-state features and the outer city response
+    can still change with the recovery-curve generator.
     Keeping them standardized is the whole point: un-standardizing multiplies
     by the large component-to-component spread and mis-calibrates the
     aggregate, which is what the raw channel does.  The result feeds
@@ -3020,8 +3032,9 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     # Observed landfall-day relative drop r0 = r(0) of each component's curve
     # (baseline-normalized, so cross-city comparable).  It is BOTH the curve
     # anchor AND — being the mechanically strongest, feature-independent
-    # predictor of cum_loss — a STEP-7 predictor of cum_loss (leak-free: r0 is
-    # the observed initial condition the paper's setting provides).
+    # predictor of cum_loss — a STEP-7 predictor of cum_loss. The centred
+    # day-0 window contains day 1, so this input is not available at a day-0
+    # cutoff. The ratio-of-sums adoption intentionally does not repair that.
     feats['r0'] = resilience_curves(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
                                     n_dis=n_dis).iloc[0].to_numpy(dtype=float)
     # Per-component NMF importance (‖W‖·‖H‖, full window) — kept for reference.
@@ -4505,8 +4518,9 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
                                       curves plus the three direct-city
                                       references, in absolute flow volume
       component_curves_<code>.png     per-component grid: observed / oracle / pred
-      curve_pred_metrics.csv          component- and city-level MAE/NRMSE/R² plus
-                                      the curve-derived cum_loss, per method line
+      curve_pred_metrics.csv          full-period component MAE/NRMSE; city
+                                      MAE/NRMSE/R²/MAPE from the reporting start
+                                      day; full-period cumulative losses
       raw_data/                       per-day city curves + the per-component
                                       α/L/B table + direct-city features,
                                       ground-truth curve parameters and selected
@@ -4557,9 +4571,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
     # Observed smoothed relative curves of every unit's TEST components (same
     # decomposition as feats_test, via dec_test), the unit's ungated own-fit
-    # (α, L) for the oracle line, the observed TOTAL relative curve (the city
-    # ground truth) and the total day-type baseline (relative -> absolute).
+    # (α, L) for the oracle line, the new city training response, the fixed
+    # historical city evaluation truth, and the day-type baseline used to
+    # reconstruct absolute flow. Training and evaluation curves are separate.
     curves_obs, city_gt_rel, city_base, oracle_par = {}, {}, {}, {}
+    city_eval_rel = {}
     city_direct_params, city_direct_features = {}, {}
     city_direct_param_cols = ['recovery_alpha', 'recovery_level',
                               'surge_strength', 'surge_rate']
@@ -4578,6 +4594,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         total = u['X_all'].sum(axis=0).reshape(-1, 1)
         city_gt_rel[c] = resilience_curves(total, u['n_nor'], u['first_day_nor'],
                                            SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
+        # Training responses follow the adopted ratio-of-sums definition.
+        # The fixed historical benchmark alone retains mean-of-daily-ratios.
+        city_eval_rel[c] = resilience_curves(
+            total, u['n_nor'], u['first_day_nor'], SLOTS_ACTIVE,
+            n_dis=u['n_dis'], smoothing='mean_of_ratios').iloc[:, 0]
         city_base[c] = daily_baselines(total, u['n_nor'], u['first_day_nor'],
                                        SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
         # The three direct-city baselines deliberately use no NMF object: all
@@ -5269,7 +5290,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             'train_mean': _curves_from_params(obs, np.full(k, mu_a), ones),
         }
 
-        gt_rel = city_gt_rel[held].to_numpy(dtype=float)
+        gt_rel = city_eval_rel[held].to_numpy(dtype=float)
         base = city_base[held].to_numpy(dtype=float)
         days = obs.index.to_numpy()
         # Dynamic reconstruction of every component-based method. A component
@@ -5318,14 +5339,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         # at city level, where the curve has real variance).
         obs_arr = obs.to_numpy(dtype=float)
         sd_comp = float(np.nanstd(obs_arr))
-        sd_city = float(np.nanstd(gt_rel))
         cum_loss_gt = float(np.nansum(1.0 - gt_rel))
         for lab in city_rel:
             cr = city_rel[lab]
-            cdiff = cr - gt_rel
-            ok = np.isfinite(gt_rel) & np.isfinite(cr)
-            ss_res = float(np.sum((cr[ok] - gt_rel[ok]) ** 2))
-            ss_tot = float(np.sum((gt_rel[ok] - gt_rel[ok].mean()) ** 2))
+            city_metrics = curve_error_metrics(
+                gt_rel, cr, days, start_day=CITY_CURVE_EVAL_START_DAY)
             if lab in lines:                          # per-component methods only
                 diff = lines[lab].to_numpy(dtype=float) - obs_arr
                 mae_comp = float(np.nanmean(np.abs(diff)))
@@ -5336,12 +5354,15 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             metric_rows.append({
                 'code': held, 'method': lab,
                 'mae_component': mae_comp, 'nrmse_component': nrmse_comp,
-                'mae_city': float(np.nanmean(np.abs(cdiff))),
-                'nrmse_city': (float(np.sqrt(np.nanmean(cdiff ** 2))) / sd_city
-                               if sd_city > 0 else np.nan),
-                'r2_city': (1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan,
+                'mae_city': city_metrics['mae'],
+                'nrmse_city': city_metrics['nrmse'],
+                'r2_city': city_metrics['r2'],
+                'mape_city': city_metrics['mape'],
+                'city_evaluation_start_day': CITY_CURVE_EVAL_START_DAY,
+                'city_evaluation_n_days': city_metrics['n_days'],
                 'cum_loss_from_curve': float(np.nansum(1.0 - cr)),
                 'cum_loss_gt': cum_loss_gt,
+                'city_response_cum_loss': gt_cum[held],
             })
 
         # Fitted per-component α and L: the gated metric values, kept for the raw
@@ -5514,6 +5535,11 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         os.path.join(OUTPUT_CURVE_PRED, 'curve_pred_metrics.csv'), index=False)
     pd.DataFrame(curve_rows).to_csv(
         os.path.join(raw_dir, 'city_curves_by_method.csv'), index=False)
+    pd.DataFrame([
+        {'code': code, 'day': int(day), 'r_rel': float(value),
+         'smoothing': 'ratio_of_sums'}
+        for code, curve in city_gt_rel.items() for day, value in curve.items()
+    ]).to_csv(os.path.join(raw_dir, 'city_training_response_curves.csv'), index=False)
     city_direct_feature_df.rename_axis('code').to_csv(
         os.path.join(raw_dir, 'city_direct_curve_features.csv'))
     pd.DataFrame.from_dict(city_direct_params, orient='index',
@@ -5565,6 +5591,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         labels = {c['code']: c['label'] for c in CITY_EVENTS}
         vis_city_curves_grid(
             city_curve_page,
+            evaluation_start_day=CITY_CURVE_EVAL_START_DAY,
             names={c: f"{labels.get(c, c)} ({c.split('_', 1)[-1]})"
                    for c in city_curve_page},
             mae_annotation_methods=('train-mean', 'ridge regression',

@@ -406,16 +406,35 @@ def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
     return pd.DataFrame(r, index=pd.RangeIndex(len(r), name='day_since_landfall'))
 
 
-def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3):
+def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3,
+                      smoothing='ratio_of_sums'):
     """
     Smoothed relative-activity curves r_k(d) for the disaster period
-    (centred rolling mean over `smooth` days; smooth=1 disables).
+    Default smoothing divides the centred window's total activity by its
+    total day-type-matched normal baseline. Boundary windows contain only
+    available disaster days. `smooth=1` returns the unmodified daily ratios.
+    `smoothing='mean_of_ratios'` preserves the historical city evaluation
+    benchmark; it is not the production training-response definition.
     DataFrame [n_disaster_days × k], index = days since landfall.
     See _daily_relative_curve for the n_nor / n_dis (buffer) semantics.
     """
+    if smoothing not in ('ratio_of_sums', 'mean_of_ratios'):
+        raise ValueError(f'Unknown recovery smoothing {smoothing!r}')
     r = _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=n_dis)
     if smooth and smooth > 1:
-        r = r.rolling(smooth, center=True, min_periods=1).mean()
+        if smoothing == 'mean_of_ratios':
+            return r.rolling(smooth, center=True, min_periods=1).mean()
+        W = np.asarray(W, dtype=float)
+        start = (n_nor if n_dis is None else n_dis) // slots_per_day
+        daily = W.reshape(-1, slots_per_day, W.shape[1]).sum(axis=1)[start:]
+        base = daily_baselines(W, n_nor, first_day, slots_per_day, n_dis=n_dis)
+        numerator = pd.DataFrame(daily, index=r.index).rolling(
+            smooth, center=True, min_periods=1).sum().to_numpy()
+        denominator = base.rolling(
+            smooth, center=True, min_periods=1).sum().to_numpy()
+        r = pd.DataFrame(np.divide(
+            numerator, denominator, out=np.full_like(numerator, np.nan),
+            where=denominator > 0), index=r.index, columns=r.columns)
     return r
 
 

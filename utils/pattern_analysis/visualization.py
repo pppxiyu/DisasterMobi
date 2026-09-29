@@ -25,6 +25,7 @@ import matplotlib.colors as mcolors
 import matplotlib.ticker as ticker
 import matplotlib.patheffects as pe
 import seaborn as sns
+from .curve_metrics import curve_error_metrics
 
 
 # ── Flow time-series (only used by the GRU temporal_decay module) ────────
@@ -3166,7 +3167,8 @@ def vis_qm_pred_vs_obs(params, save_path=None, ncols=5, names=None):
 
 
 def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None,
-                         mae_annotation_methods=None, legend_groups=None):
+                         mae_annotation_methods=None, legend_groups=None,
+                         evaluation_start_day=0):
     """Every city-event's absolute mobility curve on ONE page.
 
     `per_city` maps code -> (days, ground_truth, {label: values}); `names` maps
@@ -3183,7 +3185,8 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None,
     The legend appends each method's page-level MAPE, computed from the plotted
     arrays. A supplied grouped legend retains the decomposition comparison.
     Per-panel labels remain absolute MAE in flow-volume units and can be
-    restricted with `mae_annotation_methods`."""
+    restricted with `mae_annotation_methods`. All displayed metrics use days
+    at or after `evaluation_start_day`; the full curves remain plotted."""
     codes = list(per_city)
     names = names or {}
     nrow = int(np.ceil(len(codes) / ncols))
@@ -3193,10 +3196,9 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None,
         _gt = np.asarray(_gt, dtype=float)
         for lab, vals in _lines.items():
             vals = np.asarray(vals, dtype=float)
-            ok = np.isfinite(_gt) & np.isfinite(vals) & (_gt != 0)
-            if ok.any():
-                rate.setdefault(lab, []).append(
-                    float(np.mean(np.abs(vals[ok] - _gt[ok]) / _gt[ok])))
+            metric = curve_error_metrics(_gt, vals, _days, evaluation_start_day)
+            if np.isfinite(metric['mape']):
+                rate.setdefault(lab, []).append(metric['mape'])
     rate = {lab: float(np.mean(v)) for lab, v in rate.items()}
 
     rc = dict(_SLIDE_RC, **{'font.size': 19, 'axes.titlesize': 21,
@@ -3230,7 +3232,8 @@ def vis_city_curves_grid(per_city, save_path=None, ncols=5, names=None,
                     # number needs no separate key; stacked at the lower right.
                     ax.text(0.97,
                             0.045 + 0.115 * (len(stack) - 1 - stack.index(lab)),
-                            'MAE {:.3g}'.format(np.nanmean(np.abs(vals - gt))),
+                            'MAE {:.3g}'.format(curve_error_metrics(
+                                gt, vals, days, evaluation_start_day)['mae']),
                             transform=ax.transAxes, color=col, fontsize=16,
                             va='bottom', ha='right')
             ax.set_title(names.get(code, code))
