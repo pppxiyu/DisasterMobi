@@ -407,7 +407,8 @@ def _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=None):
 
 
 def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3,
-                      smoothing='ratio_of_sums'):
+                      smoothing='ratio_of_sums', *, component_loading=None,
+                      city_flow=None):
     """
     Smoothed relative-activity curves r_k(d) for the disaster period
     Default smoothing divides the centred window's total activity by its
@@ -417,13 +418,19 @@ def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3,
     benchmark; it is not the production training-response definition.
     DataFrame [n_disaster_days × k], index = days since landfall.
     See _daily_relative_curve for the n_nor / n_dis (buffer) semantics.
+    Supplying both component_loading (H row sums) and city_flow (raw city
+    activity per slot, whole window) enables experiment 5. After smoothing,
+    apply a common daily factor so baseline-weighted component reconstruction
+    equals the separately smoothed NMF city reconstruction. The city denominator
+    uses only normal-period raw city data. This is response processing, NOT a
+    future correction for forecast curves. Its day-0 value still reads day 1.
     """
     if smoothing not in ('ratio_of_sums', 'mean_of_ratios'):
         raise ValueError(f'Unknown recovery smoothing {smoothing!r}')
+    if (component_loading is None) != (city_flow is None):
+        raise ValueError('Supply both component_loading and city_flow, or neither')
     r = _daily_relative_curve(W, n_nor, first_day, slots_per_day, n_dis=n_dis)
     if smooth and smooth > 1:
-        if smoothing == 'mean_of_ratios':
-            return r.rolling(smooth, center=True, min_periods=1).mean()
         W = np.asarray(W, dtype=float)
         start = (n_nor if n_dis is None else n_dis) // slots_per_day
         daily = W.reshape(-1, slots_per_day, W.shape[1]).sum(axis=1)[start:]
@@ -432,14 +439,51 @@ def resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3,
             smooth, center=True, min_periods=1).sum().to_numpy()
         denominator = base.rolling(
             smooth, center=True, min_periods=1).sum().to_numpy()
-        r = pd.DataFrame(np.divide(
-            numerator, denominator, out=np.full_like(numerator, np.nan),
-            where=denominator > 0), index=r.index, columns=r.columns)
+        if smoothing == 'mean_of_ratios':
+            r = r.rolling(smooth, center=True, min_periods=1).mean()
+        else:
+            r = pd.DataFrame(np.divide(
+                numerator, denominator, out=np.full_like(numerator, np.nan),
+                where=denominator > 0), index=r.index, columns=r.columns)
+        if component_loading is not None:
+            loading = np.asarray(component_loading, dtype=float)
+            city = np.asarray(city_flow, dtype=float).reshape(-1, 1)
+            if (loading.shape != (W.shape[1],) or len(city) != len(W)
+                    or not np.isfinite(loading).all() or (loading < 0).any()
+                    or not np.isfinite(city).all() or (city < 0).any()):
+                raise ValueError('Invalid component loading or raw city flow')
+            city_base = daily_baselines(
+                city, n_nor, first_day, slots_per_day, n_dis=n_dis)
+            city_daily = daily @ loading
+            cb = city_base.iloc[:, 0].to_numpy()
+            if not np.isfinite(cb).all() or (cb <= 0).any():
+                raise ValueError('Coherent smoothing requires positive city baselines')
+            if smoothing == 'ratio_of_sums':
+                target = (pd.Series(city_daily).rolling(smooth, center=True,
+                          min_periods=1).sum().to_numpy()
+                          / city_base.rolling(smooth, center=True,
+                          min_periods=1).sum().iloc[:, 0].to_numpy())
+            else:
+                target = pd.Series(city_daily / cb).rolling(
+                    smooth, center=True, min_periods=1).mean().to_numpy()
+            provisional = (r.to_numpy() * base.to_numpy()) @ loading / cb
+            # A completely inactive window already agrees at zero. Otherwise
+            # undefined scaling is an error, never an implicit neutral factor.
+            inactive = (provisional == 0) & (target == 0)
+            factor = np.divide(target, provisional, out=np.ones_like(target),
+                               where=~inactive)
+            if not np.isfinite(factor).all() or (factor < 0).any():
+                raise ValueError('Undefined aggregate-coherence correction')
+            r = r.mul(factor, axis=0)
+            restored = (r.to_numpy() * base.to_numpy()) @ loading / cb
+            if not np.allclose(restored, target, rtol=1e-10, atol=1e-10):
+                raise ValueError('Aggregate-coherence identity failed')
     return r
 
 
 def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3,
-                        recovery_threshold=0.9):
+                        recovery_threshold=0.9, *, component_loading=None,
+                        city_flow=None):
     """
     Quantify each component's disaster response from its (smoothed) relative
     daily curve r_k(d) — the "drop and come back" pattern.  Every metric reads
@@ -464,9 +508,9 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
       cum_loss         = Σ_d (1 − r(d))   NET cumulative deviation from baseline over
                          the disaster window (day-equivalents; >0 = net loss, <0 = net
                          gain).  UNCLIPPED: above-baseline surges cancel below-baseline
-                         drops, so the metric is LINEAR/additive across components (a
-                         baseline-share-weighted sum of component cum_loss equals the
-                         total-curve cum_loss; no Jensen/clipping gap).
+                         drops. City reconstruction requires the DAILY component
+                         baseline shares; a fixed normal-period weighted sum of
+                         component cum_loss is not generally the city curve loss.
 
     Returns DataFrame indexed by component with all five columns.
 
@@ -479,7 +523,8 @@ def resilience_features(W, n_nor, first_day, slots_per_day, n_dis=None, smooth=3
     note and ask the owner to decide.
     """
     r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
-                          smooth=smooth)
+                          smooth=smooth, component_loading=component_loading,
+                          city_flow=city_flow)
     arr = r.to_numpy()
     n_days, k = arr.shape
 
@@ -512,7 +557,8 @@ def recovery_curve_features(W, n_nor, first_day, slots_per_day, n_dis=None,
                             smooth=3, max_rate=5.0, min_points=5,
                             min_fit_r2=0.0, min_std=0.02, min_r0=1e-6,
                             level_bounds=(0.05, 5.0), surge_bounds=(-10.0, 10.0),
-                            surge_rate_bounds=(0.1, 3.0), include_surge=True):
+                            surge_rate_bounds=(0.1, 3.0), include_surge=True, *,
+                            component_loading=None, city_flow=None):
     """
     Surge-plus-relaxation recovery model per component — the parameters of the
     resilience curve, fitted jointly (2026-07-14; supersedes the free-plateau
@@ -568,7 +614,8 @@ def recovery_curve_features(W, n_nor, first_day, slots_per_day, n_dis=None,
     an ablation backbone, not the metric.  Gates are identical.
     """
     r = resilience_curves(W, n_nor, first_day, slots_per_day, n_dis=n_dis,
-                          smooth=smooth)
+                          smooth=smooth, component_loading=component_loading,
+                          city_flow=city_flow)
     arr = r.to_numpy()
     n_days, k = arr.shape
     out = np.full((k, 4), np.nan)

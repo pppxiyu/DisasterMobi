@@ -1,8 +1,93 @@
 # Technical Note · Cross-City Resilience Prediction
 
+## Aggregate coherence and final-curve alignment (adopted 2026-09-29)
+
+This extension keeps the ratio-of-moving-sums response definition and fixed
+day-1-through-14 city evaluation described below. It adds two independently
+switchable operations. Both switches default to `True` in `run_pattern_nmf.py`.
+Setting both to `False` restores the preceding 11.9599% method.
+
+### 1 · Observed component curve construction
+
+`COMPONENT_AGGREGATE_COHERENCE` enables experiment 5. First smooth each
+component with the existing ratio-of-window-sums operator. Restore daily flow
+with that component's day-type normal baseline and H row sum, sum components,
+and divide by the raw city's day-type normal baseline. Separately sum the
+unsmoothed component flows into an NMF city reconstruction and smooth it using
+the same ratio-of-window-sums operator and raw-city normal denominator. Divide
+the latter city curve by the former on each day and multiply every component's
+smoothed value by that day's common factor. A fully inactive window has factor
+one if both aggregates are zero; other undefined corrections fail explicitly.
+
+This is the **combination of experiments 3 and 5**, not the historical isolated
+experiment 5 with arithmetic moving averages. The correction target is the NMF
+city reconstruction, not observed raw city disaster flow. Only normal-period
+raw city flow determines its denominator. Baselines and component loadings are
+passed explicitly; no global array registry or monkeypatch is used.
+
+Every production component response consumer uses the corrected definition,
+including within-city descriptions, trip-purpose curves, cumulative-loss and
+rank labels, scale and shape responses, recovery-parameter fits, test ground
+truth and oracle. Landfall-day component predictors also use the corrected
+first point, as in the sandbox. Thus city-total predictions may change through
+their predictors even though the raw inner loss target is unchanged. Direct
+raw-city responses, the raw component-loss inner target and fixed city evaluation
+truth do not receive component correction. No future daily correction is
+applied to forecast curves.
+
+### 2 · Forecast city-total constraint
+
+`FINAL_CURVE_TOTAL_ALIGNMENT` adds a common shift to predicted component
+cumulative losses, reruns the configured curve decoder, and reconstructs the
+city curve with daily component baselines and H row sums divided by the raw
+city normal baseline. The chosen shift makes the reconstructed curve's **full
+day-0-through-14 cumulative relative loss** match the independently predicted
+city cumulative relative loss. Neither is a raw trip count. The scalar target
+is a prediction, never the held city's observed recovery loss.
+
+Every candidate starts from an immutable original loss vector; shifts are not
+accumulated. The search uses a bracketed root, with a bounded residual search
+when no root is bracketed. Solver bounds may make the target unattainable; in
+that case retain the best evaluated candidate, including the original, warn,
+and report the unmatched residual. `raw_data/final_curve_alignment.csv` records
+the shift, before/after residuals, convergence status, tolerance and predicted
+city target for every fold. Updated losses, solved parameters, component curves,
+city curves and OD forecast outputs all consume the same aligned result.
+Only proposed forecasts receive this constraint, not oracle or baseline curves.
+
+### 3 · Verification and interpretation
+
+Unit tests cover both smoothing operators, aggregate conservation, unchanged
+raw targets, independence from future raw-city totals, consistent target/fit
+arguments, inactive windows, common-shift invariance, exact feasible alignment,
+unattainable targets and invalid inputs. End-to-end checks additionally compare
+the refreshed city benchmark, direct-city baselines and independent city-total
+predictions, and verify the exported forecast against the alignment audit.
+
+The complete production refresh passed **24 unit tests** and the 13-city,
+79-component definition audit. On the fixed day-1-through-14 benchmark, mean
+city MAPE is **11.2518205%** for proposed forecasts and **9.4971609%** for oracle.
+The proposed error is lower than the preceding 11.9598672% result by 0.7080467
+percentage points, but higher than the previously tested experiment-3 plus
+final-alignment result of 10.8578918%. The latter did not include experiment 5;
+the two requested additions should not be interpreted as an individually
+validated improvement from each operation. All 13 final loss constraints were
+matched, with maximum absolute residual **9.67582e-10 day-equivalents**.
+Exported component parameters reconstruct the exported component and city
+forecasts; STEP-6 city-total predictions equal the STEP-7 constraint values.
+The fixed city truth and all three decomposition-free forecasts are unchanged.
+The city and Baton Rouge component figures were visually checked after export;
+their existing layout, colors, annotations and legend formatting are retained.
+
+The existing centred day-0 inputs still use day 1. These additions do not fix
+that known availability issue or certify upstream OD selection as leakage-free.
+Evaluation remains days 1 through 14; excluding day 0 is not itself a leakage
+repair. Historical isolated-experiment and pre-adoption results below retain
+their original meanings and are not results for this combined version.
+
 ## Recovery definition and fixed evaluation benchmark (adopted 2026-09-29)
 
-The adopted experiment is the **11.9599%** sandbox version, before final-curve
+The preceding adopted experiment was the **11.9599%** sandbox version, before final-curve
 total-loss alignment. It replaces the arithmetic moving average of daily
 activity ratios with the sum of observed flows divided by the sum of their
 normal baselines within the same centred three-day window. Only available
@@ -47,7 +132,8 @@ roundoff differences; the first default-multithread refresh produced 11.9421%
 rather than the saved 11.9599%. This is a numerical reproducibility precaution,
 not a change to features, objectives, or model selection.
 
-Neither experiment 5 nor final-curve total-loss alignment is included. Experiment
+Neither experiment 5 nor final-curve total-loss alignment was included in that
+preceding version. Both are now included as specified above. Experiment
 5 multiplies each observed component curve by a shared daily correction so its
 reconstructed aggregate matches the separately processed city reconstruction;
 it requires that day's observed component flows. Final-curve alignment instead

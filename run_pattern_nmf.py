@@ -290,6 +290,8 @@ from utils.pattern_analysis.ml_resilience import (
     cross_city_resilience,
 )
 from utils.pattern_analysis.curve_metrics import curve_error_metrics
+from utils.pattern_analysis.city_alignment import align_city_total_loss
+import warnings
 from utils.data_processing.geo_loader import load_city_geo
 from utils.data_processing.hurdat_exposure import (load_track, city_exposure,
                                                    track_distance,
@@ -1258,6 +1260,19 @@ OUTPUT_CURVE_PRED = os.path.join(OUTPUT_PLOTS, '3-cross_city_curve_pred')
 # Reporting only. Training targets, curve inversion and city-loss constraints
 # still integrate all 15 days. Preserve the original city truth for comparison.
 CITY_CURVE_EVAL_START_DAY = 1
+# Experiment 5 changes observed component responses, including their day-0
+# anchors, before fitting. It does not correct future forecast days with truth.
+COMPONENT_AGGREGATE_COHERENCE = True
+# Match the decoded forecast's full-horizon loss to the independent city model.
+FINAL_CURVE_TOTAL_ALIGNMENT = True
+
+
+def _component_curve_kwargs(H, X_all):
+    """Explicit correction context; never install global array-ID registries."""
+    if not COMPONENT_AGGREGATE_COHERENCE:
+        return {}
+    return dict(component_loading=np.asarray(H).sum(axis=1),
+                city_flow=np.asarray(X_all).sum(axis=0))
 
 # STEP-7 spatial view: per held city, an interactive slider map of the daily
 # PREDICTED OD flows (forecast curves x component baselines x H), the observed
@@ -2845,7 +2860,8 @@ def analysis_recovery_by_trip_purpose(units, landuse_by_code):
         M, _ = build_od_function_matrix_soft(np.asarray(u['H'], float), u['mapping'],
                                              lookup, cats)
         r = resilience_curves(np.asarray(u['W'], float), u['n_nor'], u['first_day_nor'],
-                              SLOTS_ACTIVE, n_dis=u['n_dis']).to_numpy()
+                              SLOTS_ACTIVE, n_dis=u['n_dis'],
+                              **_component_curve_kwargs(u['H'], u['X_all'])).to_numpy()
         city_curve[code], city_loss[code] = {}, {}
         for X in keys:
             j = cats.index(X)
@@ -3006,18 +3022,20 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     dist_by_aggr = dict(zip(gdf['aggr_id'].astype(str),
                             track_distance(track, bg_lat, bg_lon)))
     track_array = build_income_array(mapping, dist_by_aggr, mode='combined')
+    curve_kwargs = _component_curve_kwargs(H, X_all)
     feats = pd.concat([
         functional_features(M, SF_CATEGORIES),
         spatial_features(H, distances),
         socioeconomic_features(H, income_array, name='median_income_combined'),
         socioeconomic_features(H, track_array, name='track_dist'),
-        resilience_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE, n_dis=n_dis),
+        resilience_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
+                            n_dis=n_dis, **curve_kwargs),
         recovery_curve_features(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
                                 n_dis=n_dis, max_rate=ALPHA_MAX_RATE,
                                 min_fit_r2=ALPHA_MIN_FIT_R2,
                                 min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
                                 surge_bounds=SURGE_BOUNDS,
-                                surge_rate_bounds=SURGE_RATE_BOUNDS),
+                                surge_rate_bounds=SURGE_RATE_BOUNDS, **curve_kwargs),
     ], axis=1)
     if CURVE_ALPHA_BACKBONE == 'no_surge':
         # Ablation backbone (STEP-7 only): the same curves refit WITHOUT the
@@ -3027,7 +3045,7 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
             max_rate=ALPHA_MAX_RATE, min_fit_r2=ALPHA_MIN_FIT_R2,
             min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
             surge_bounds=SURGE_BOUNDS, surge_rate_bounds=SURGE_RATE_BOUNDS,
-            include_surge=False)['recovery_alpha'].to_numpy()
+            include_surge=False, **curve_kwargs)['recovery_alpha'].to_numpy()
     feats.insert(0, 'city', cfg['label'])
     # Observed landfall-day relative drop r0 = r(0) of each component's curve
     # (baseline-normalized, so cross-city comparable).  It is BOTH the curve
@@ -3036,7 +3054,7 @@ def _build_cross_city_feats(cfg, X_all, n_nor, n_dis, mapping, gdf, fit_time_col
     # day-0 window contains day 1, so this input is not available at a day-0
     # cutoff. The ratio-of-sums adoption intentionally does not repair that.
     feats['r0'] = resilience_curves(W, n_nor, cfg['first_day_normal'], SLOTS_ACTIVE,
-                                    n_dis=n_dis).iloc[0].to_numpy(dtype=float)
+                                    n_dis=n_dis, **curve_kwargs).iloc[0].to_numpy(dtype=float)
     # Per-component NMF importance (‖W‖·‖H‖, full window) — kept for reference.
     feats['weight'] = weights
     # Normal-period baseline magnitude per component = (Σ over the normal slots of W) ×
@@ -4582,15 +4600,17 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
     for c in codes:
         u = units[c]
         W, H = dec_test[c]
+        curve_kwargs = _component_curve_kwargs(H, u['X_all'])
         curves_obs[c] = resilience_curves(W, u['n_nor'], u['first_day_nor'],
-                                          SLOTS_ACTIVE, n_dis=u['n_dis'])
+                                          SLOTS_ACTIVE, n_dis=u['n_dis'], **curve_kwargs)
         # UNGATED own fit for the oracle line (min_fit_r2 = -inf disables the
         # quality gate; the metric columns in feats_test stay gated).
         oracle_par[c] = recovery_curve_features(
             W, u['n_nor'], u['first_day_nor'], SLOTS_ACTIVE, n_dis=u['n_dis'],
             max_rate=ALPHA_MAX_RATE, min_fit_r2=-np.inf,
             min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
-            surge_bounds=SURGE_BOUNDS, surge_rate_bounds=SURGE_RATE_BOUNDS)
+            surge_bounds=SURGE_BOUNDS, surge_rate_bounds=SURGE_RATE_BOUNDS,
+            **curve_kwargs)
         total = u['X_all'].sum(axis=0).reshape(-1, 1)
         city_gt_rel[c] = resilience_curves(total, u['n_nor'], u['first_day_nor'],
                                            SLOTS_ACTIVE, n_dis=u['n_dis']).iloc[:, 0]
@@ -5193,6 +5213,7 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
 
     os.makedirs(os.path.join(OUTPUT_CURVE_PRED, 'raw_data'), exist_ok=True)
     metric_rows, par_rows, curve_rows = [], [], []
+    alignment_rows = []
     city_curve_page = {}          # code -> (days, gt, lines) for the one-page grid
     comp_curve_rows = []          # long-form component curves -> raw_data/
     city_direct_hyper_rows = []   # chosen nested-LOO settings for direct references
@@ -5306,6 +5327,28 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
             W_held, u_held['n_nor'], u_held['first_day_nor'], SLOTS_ACTIVE,
             n_dis=u_held['n_dis']).to_numpy(dtype=float)
         component_loading = H_held.sum(axis=1).astype(float)
+        if FINAL_CURVE_TOTAL_ALIGNMENT:
+            def decode_for_city_alignment(target):
+                if CURVE_PRED_SOLVER == 'joint_alphaL':
+                    return _joint_alphaL_curves(
+                        obs, mu_a, target, line_a0, line_b, CURVE_JOINT_LAMBDA)
+                curve, level = _plateau_inversion_curves(obs, mu_a, target)
+                return curve, level, None
+
+            aligned_loss, pred_curves, L_solved, alpha_solved, audit = (
+                align_city_total_loss(cum_hat.to_numpy(dtype=float), city_total_hat,
+                                      component_base, component_loading, base,
+                                      decode_for_city_alignment))
+            cum_hat = pd.Series(aligned_loss, index=cum_hat.index)
+            lines['pred'] = pred_curves
+            alignment_rows.append(dict(code=held, **audit))
+            print(f"  [final alignment] {held}: shift {audit['delta']:.6f}; "
+                  f"loss residual {audit['initial_loss_gap']:.6f} -> "
+                  f"{audit['final_loss_gap']:.3g}")
+            if not audit['aligned']:
+                warnings.warn(f"{held}: bounded curve solver cannot match predicted "
+                              f"city loss within tolerance; residual "
+                              f"{audit['final_loss_gap']:.6g}")
         city_rel = {}
         for lab, dfc in lines.items():
             component_flow = dfc.to_numpy(dtype=float) * component_base
@@ -5531,6 +5574,10 @@ def analysis_cross_city_curve_pred(feats_by_city, feats_test, units, codes, dec_
         print("  [curve_pred] nothing to evaluate; skipping outputs.")
         return
     raw_dir = os.path.join(OUTPUT_CURVE_PRED, 'raw_data')
+    pd.DataFrame(alignment_rows, columns=[
+        'code', 'initial_loss_gap', 'delta', 'final_loss_gap', 'evaluations',
+        'aligned', 'tolerance', 'city_total_prediction', 'final_curve_loss',
+    ]).to_csv(os.path.join(raw_dir, 'final_curve_alignment.csv'), index=False)
     pd.DataFrame(metric_rows).to_csv(
         os.path.join(OUTPUT_CURVE_PRED, 'curve_pred_metrics.csv'), index=False)
     pd.DataFrame(curve_rows).to_csv(
@@ -5732,6 +5779,7 @@ def main():
         M = analysis_od_function(label, tag, H, mapping, weights,
                                  landuse_by_code[code], lambda_ctx=ctx_lambda)
 
+        curve_kwargs = _component_curve_kwargs(H, u['X_all'])
         feats = pd.concat([
             # Temporal features read W[:n_nor].
             temporal_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, _INTERVAL_HOURS,
@@ -5749,7 +5797,8 @@ def main():
             # Resilience reads W[n_dis:] against a baseline built from W[:n_nor].
             # The buffer columns [n_nor, n_dis) feed neither the resilience features
             # nor the curves.
-            resilience_features(W, n_nor, first_day_nor, SLOTS_ACTIVE, n_dis=n_dis),
+            resilience_features(W, n_nor, first_day_nor, SLOTS_ACTIVE,
+                                n_dis=n_dis, **curve_kwargs),
 
             # Free-plateau logistic recovery params.  recovery_alpha (the rate)
             # is the RES_COLS metric; recovery_level (the equilibrium L) rides
@@ -5761,7 +5810,7 @@ def main():
                                     min_fit_r2=ALPHA_MIN_FIT_R2,
                                     min_std=ALPHA_MIN_STD, level_bounds=LEVEL_BOUNDS,
                                     surge_bounds=SURGE_BOUNDS,
-                                    surge_rate_bounds=SURGE_RATE_BOUNDS),
+                                    surge_rate_bounds=SURGE_RATE_BOUNDS, **curve_kwargs),
         ], axis=1)
         feats.insert(0, 'city', label)
         feats.insert(1, 'weight', weights)
@@ -5777,7 +5826,8 @@ def main():
         
         analysis_resilience_corr(feats, tag, lambda_ctx=ctx_lambda)
         
-        curves = resilience_curves(W, n_nor, first_day_nor, SLOTS_ACTIVE, n_dis=n_dis)
+        curves = resilience_curves(W, n_nor, first_day_nor, SLOTS_ACTIVE,
+                                   n_dis=n_dis, **curve_kwargs)
         analysis_func_ordered_lines(W, n_nor, n_dis, first_day_nor, first_day_dis,
                                     curves, feats, tag)
 
